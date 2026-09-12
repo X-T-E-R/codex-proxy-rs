@@ -40,6 +40,15 @@ pub enum RequestDecodeError {
     /// 请求不是合法 JSON。
     #[error("request body must be valid JSON")]
     MalformedJson,
+    /// 请求体解压后超过允许上限。
+    #[error("decompressed request body is too large")]
+    DecompressedBodyTooLarge,
+    /// 请求使用了网关不支持的 `Content-Encoding`。
+    #[error("request content-encoding `{encoding}` is not supported")]
+    UnsupportedContentEncoding {
+        /// Content-Encoding 标识。
+        encoding: String,
+    },
     /// 顶层不是 object。
     #[error("request body must be a JSON object")]
     ExpectedObject,
@@ -97,6 +106,16 @@ impl RequestDecodeError {
             Self::MalformedJson => (
                 "invalid_json",
                 "Request body must be valid JSON.".to_owned(),
+                None,
+            ),
+            Self::DecompressedBodyTooLarge => (
+                "request_too_large",
+                "Decompressed request body exceeds the allowed size.".to_owned(),
+                None,
+            ),
+            Self::UnsupportedContentEncoding { encoding } => (
+                "unsupported_content_encoding",
+                format!("Content-Encoding `{encoding}` is not supported."),
                 None,
             ),
             Self::ExpectedObject => (

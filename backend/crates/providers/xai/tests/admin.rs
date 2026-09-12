@@ -39,15 +39,108 @@ use gateway_core::task::{
     WorkerContribution, WorkerCycleContext, WorkerKind, WorkerRunnable, WorkerTaskError,
 };
 use provider_xai::{
-    DiscoveryDocument, GrokOAuthConfig, PendingAuthorization, RedirectUriAllowlist,
+    DiscoveryDocument, GrokAccountSessionSelector, GrokCredentialFailure, GrokCredentialRepository,
+    GrokOAuthConfig, GrokSessionBinding, GrokSessionSelector, OfficialGrokEndpointPolicy,
+    PendingAuthorization, RedirectUriAllowlist, ReqwestGrokModelCatalogTransport, SecretValue,
+    SelectedGrokSession,
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
 use crate::support::{
-    MemoryProviderAccountStore, TestSessionAffinity, TestSessionExclusions, create_input,
-    seed_input, xai_config,
+    MemoryCooldownPort, MemoryGrokCatalogCache, MemoryProviderAccountStore, TestSessionAffinity,
+    TestSessionExclusions, account_id, create_input, seed_input, xai_config,
 };
+
+#[tokio::test]
+async fn account_unavailable_clears_real_selector_cooldowns_only_for_deleted_account() {
+    let store = MemoryProviderAccountStore::shared();
+    let cooldowns = Arc::new(MemoryCooldownPort::default());
+    let ports = ProviderStorePorts::new(
+        store.clone(),
+        Arc::new(TestLeases),
+        Arc::new(TestSessionAffinity),
+        Arc::new(TestSessionExclusions),
+        Arc::new(TestCatalogCache::default()),
+        Arc::new(TestArtifactProfiles),
+        Arc::new(TestCredentialState),
+        cooldowns.clone(),
+        Arc::new(TestRuntimePolicy),
+        Arc::new(TestOAuthPending::default()),
+    );
+    let repository = GrokCredentialRepository::new(store.clone());
+    let selector = GrokAccountSessionSelector::new(
+        ProviderKind::new("xai").unwrap(),
+        repository.clone(),
+        MemoryGrokCatalogCache::shared(),
+        Arc::new(crate::support::grok_quota_service(
+            repository,
+            Arc::new(
+                ReqwestGrokModelCatalogTransport::new(Arc::new(OfficialGrokEndpointPolicy))
+                    .unwrap(),
+            ),
+        )),
+        ports.leases(),
+        cooldowns.clone(),
+        ports.account_feedback(),
+    );
+    let bundle = provider_xai::initialize(xai_config(), ports).await.unwrap();
+    let models = ["grok-4.5", "grok-4.6"].map(|id| UpstreamModelId::new(id).unwrap());
+    for suffix in ["deleted-cooldown", "retained-cooldown"] {
+        let input = create_input(suffix, &format!("subject-{suffix}"));
+        seed_input(&store, &input).await.unwrap();
+        let session = SelectedGrokSession::new(
+            input.account_id,
+            CredentialRevision::new(1).unwrap(),
+            input.secret.access_token,
+            SecretValue::new(input.account.subject),
+            None,
+            GrokSessionBinding::new(suffix).unwrap(),
+            (),
+        )
+        .unwrap();
+        // cooldown 必须来自生产 selector 对真实反馈类型的处理，不能由 mock 手工伪造。
+        selector
+            .record_failure(
+                &session,
+                GrokCredentialFailure::RateLimited {
+                    retry_after: Some(Duration::from_secs(60)),
+                },
+            )
+            .await;
+        for model in &models {
+            selector
+                .record_failure(
+                    &session,
+                    GrokCredentialFailure::ModelQuotaExhausted {
+                        upstream_model: model.clone(),
+                        retry_after: None,
+                    },
+                )
+                .await;
+            assert!(
+                cooldowns
+                    .scoped_cooldown(
+                        session.account_id(),
+                        &ProviderCooldownScope::upstream_model(model.clone())
+                    )
+                    .is_some()
+            );
+        }
+        assert!(cooldowns.cooldown(session.account_id()).is_some());
+    }
+    let deleted = account_id("deleted-cooldown");
+    store.delete_account(&deleted).await.unwrap();
+    bundle.admin_provider().account_unavailable(&deleted).await;
+    assert!(cooldowns.cooldown(&deleted).is_none());
+    let retained = account_id("retained-cooldown");
+    assert!(cooldowns.cooldown(&retained).is_some());
+    for model in models {
+        let scope = ProviderCooldownScope::upstream_model(model);
+        assert!(cooldowns.scoped_cooldown(&deleted, &scope).is_none());
+        assert!(cooldowns.scoped_cooldown(&retained, &scope).is_some());
+    }
+}
 
 #[tokio::test]
 async fn xai_bundle_exposes_core_admin_and_drains_worker_contributions_once() {
@@ -941,5 +1034,169 @@ impl OAuthPendingFlowPort for TestOAuthPending {
             values.remove(&key);
             Ok(OAuthPendingConsumeOutcome::Consumed)
         })
+    }
+}
+
+mod errors {
+    use gateway_admin::ports::provider::ProviderAdminErrorKind as Kind;
+    use gateway_core::account::OutboundProxy;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn manual_refresh_keeps_expired_and_changed_credentials_distinct_without_network() {
+        for expired in [true, false] {
+            let store = MemoryProviderAccountStore::shared();
+            let mut input = create_input("refresh_error", "synthetic-subject");
+            if expired {
+                let now = Utc::now();
+                input.account.access_token_expires_at = now + chrono::Duration::seconds(1);
+                input.account.refresh_token_expires_at = Some(now + chrono::Duration::seconds(2));
+            }
+            seed_input(&store, &input).await.unwrap();
+            if expired {
+                // 新导入不接受已过期凭据；等待合法存入的短期凭据自然过期，验证历史账号刷新。
+                let remaining = input.account.refresh_token_expires_at.unwrap() - Utc::now();
+                tokio::time::sleep(
+                    remaining.to_std().unwrap_or_default() + Duration::from_millis(10),
+                )
+                .await;
+            }
+            let before = store.account(&input.account_id).unwrap();
+            let mut account = account_record(&before);
+            if !expired {
+                account.upstream_user_id = Some("previous-subject".to_owned());
+            }
+            let bundle = provider_xai::initialize(
+                xai_config(),
+                provider_ports_with(store.clone(), Arc::new(TestOAuthPending::default())),
+            )
+            .await
+            .unwrap();
+            let error = bundle
+                .admin_provider()
+                .prepare_refresh(PrepareCredentialRefresh { account })
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                if expired {
+                    Kind::Invalid
+                } else {
+                    Kind::Conflict
+                }
+            );
+            assert_eq!(
+                error.public_message(),
+                Some(if expired {
+                    "刷新令牌已失效，请重新授权"
+                } else {
+                    "账号凭据已被更新，请刷新账号列表后重试"
+                })
+            );
+            assert_eq!(store.account(&input.account_id).unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_reports_busy_without_calling_the_account_proxy() {
+        let store = MemoryProviderAccountStore::shared();
+        let input = create_input("refresh_busy", "synthetic-subject");
+        seed_input(&store, &input).await.unwrap();
+        // 账号使用出站代理时不提前准备直连 discovery；占用失败不得触发任何代理请求。
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let proxy =
+            OutboundProxy::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        store.set_outbound_proxy(&input.account_id, Some(proxy));
+        let before = store.account(&input.account_id).unwrap();
+        let mut account = account_record(&before);
+        account.outbound_proxy = before.outbound_proxy().cloned();
+        let ports = ProviderStorePorts::new(
+            store.clone(),
+            Arc::new(BusyRefreshLeases),
+            Arc::new(TestSessionAffinity),
+            Arc::new(TestSessionExclusions),
+            Arc::new(TestCatalogCache::default()),
+            Arc::new(TestArtifactProfiles),
+            Arc::new(TestCredentialState),
+            Arc::new(TestCooldown),
+            Arc::new(TestRuntimePolicy),
+            Arc::new(TestOAuthPending::default()),
+        );
+        let bundle = provider_xai::initialize(xai_config(), ports).await.unwrap();
+        let error = bundle
+            .admin_provider()
+            .prepare_refresh(PrepareCredentialRefresh { account })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Kind::Conflict);
+        assert_eq!(
+            error.public_message(),
+            Some("令牌刷新繁忙，请等待当前刷新完成后重试")
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(store.account(&input.account_id).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_unavailable_proxy_does_not_expose_proxy_credentials() {
+        let store = MemoryProviderAccountStore::shared();
+        let input = create_input("refresh_proxy", "synthetic-subject");
+        seed_input(&store, &input).await.unwrap();
+        let proxy =
+            OutboundProxy::parse("http://synthetic-user:proxy-secret-marker@127.0.0.1:1").unwrap();
+        store.set_outbound_proxy(&input.account_id, Some(proxy));
+        let before = store.account(&input.account_id).unwrap();
+        let mut account = account_record(&before);
+        account.outbound_proxy = before.outbound_proxy().cloned();
+        let bundle = provider_xai::initialize(
+            xai_config(),
+            provider_ports_with(store.clone(), Arc::new(TestOAuthPending::default())),
+        )
+        .await
+        .unwrap();
+        let error = bundle
+            .admin_provider()
+            .prepare_refresh(PrepareCredentialRefresh { account })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), Kind::Unavailable);
+        assert_eq!(
+            error.public_message(),
+            Some("xAI 令牌刷新连接失败，请检查出站连接后重试")
+        );
+        assert!(!format!("{error:?} {error}").contains("proxy-secret-marker"));
+        assert_eq!(store.account(&input.account_id).unwrap(), before);
+    }
+
+    struct BusyRefreshLeases;
+
+    impl ProviderLeasePort for BusyRefreshLeases {
+        fn load_state<'a>(
+            &'a self,
+            _: &'a ClientApiKeyId,
+            _: &'a ProviderKind,
+            _: &'a [ProviderAccountId],
+        ) -> BoxFuture<
+            'a,
+            Result<gateway_core::provider_ports::ProviderSchedulingState, ProviderStoreError>,
+        > {
+            panic!("manual refresh does not use scheduling state")
+        }
+
+        fn try_acquire(
+            &self,
+            request: ProviderLeaseRequest,
+        ) -> BoxFuture<'_, Result<ProviderLeaseAcquisition, ProviderStoreError>> {
+            assert!(matches!(
+                request,
+                ProviderLeaseRequest::RefreshCapacity(_) | ProviderLeaseRequest::Refresh(_)
+            ));
+            Box::pin(async { Ok(ProviderLeaseAcquisition::Busy { retry_after: None }) })
+        }
     }
 }

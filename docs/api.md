@@ -99,6 +99,21 @@ body 不进入这个通用信封。稳定业务码如下：
 未知 `/api/admin/*` 路径使用 `40401`，不会落入 SPA；已存在路径使用错误 method 时返回 `405`、
 `40001`，并保留标准 `Allow` header。request ID 继续通过配置的响应 header 返回。
 
+Provider 管理适配使用静态 `public_message` 提供可操作的具体原因，Admin 用例完成安全消息选择后，
+API 对 `50201`、`50202` 和 `50301` 也保留该消息，不再用固定错误覆盖；缺少安全消息时仍回退到通用提示。
+认证错误和未知内部错误继续使用固定文案，不公开 Provider 内部 message、原始响应或凭据。
+
+手动刷新令牌时，容量／账号租约占用和账号快照冲突仍为 `40901`，但分别提示等待或刷新账号列表。
+OpenAI 已收到的刷新失败响应不再统一归为资源冲突：原先落入宽泛 Transport 分类的明确拒绝使用
+`50201`，按已解析的错误码区分令牌过期、已使用、已撤销和 `invalid_grant`；刷新接口返回
+`token_expired` 时提示“刷新令牌不可用，请重新授权”，不据此断言具体失效原因。无法确认刷新结果时使用
+`50202`，提示先核对账号状态、不要立即重复刷新。缺少刷新令牌及原有明确凭据无效分支仍为 `40001`。
+上游 `401` 不代表管理员会话失效，也不会触发管理端重新登录。上述变化只修正管理错误的分类和展示，
+不改变后台自动刷新、401 恢复退避或账号终态策略；客户端不得仅因状态码从 `409` 改为 `502` 自动重发刷新。
+xAI 手动刷新返回无效的新凭据时，从 `40001` 改为 `50202`，因为上游可能已经轮换了旧 RT；
+未能完成刷新、但没有明确凭据永久失效证据的 `Rejected` 从 `40001` 改为 `50201`，不再一概提示凭据无效。
+Codex PAT 验证服务不可用和身份响应无效分别通过 `50301`、`50201` 保留原有具体提示。
+
 ### 管理写入一致性
 
 管理写入不要求客户端提供全局配置版本。会改变路由快照或安全配置的写入由后端在事务内推进
@@ -113,8 +128,8 @@ body 不进入这个通用信封。稳定业务码如下：
 
 ## 3. OpenAI 数据面与模型目录
 
-Responses、Images 和 standalone Search HTTP body、WebSocket message 和 frame 不设置网关私有长度上限；
-协议可接受性由上游决定。
+除下述 Responses 入站解压保护外，Responses、Images 和 standalone Search HTTP body、
+WebSocket message 和 frame 不设置网关私有长度上限；协议可接受性由上游决定。
 
 | 方法 | 路由 | 说明 |
 | --- | --- | --- |
@@ -129,6 +144,20 @@ Responses、Images 和 standalone Search HTTP body、WebSocket message 和 frame
 Codex 的 review 等子代理请求仍使用 `/v1/responses`，并通过 `x-openai-subagent` 请求头携带子代理类型；
 网关不提供独立的子代理请求路径。
 
+`POST /v1/responses` 在鉴权后按 `Content-Encoding` 解压，再解析 JSON；支持单一 `gzip`、
+`deflate`（zlib 封装）和 `zstd`，缺省、空值或 `identity` 直接使用原始正文。gzip 多成员与 zstd
+多帧连续解码，整体展开结果最多 64 MiB，超限在继续展开前返回 `400 request_too_large`；zstd
+回溯窗口同样最多 64 MiB，不能满足该限制的帧按解码失败处理。这个限制保护入站解压资源，不是
+模型上下文或 Token 上限，也不新增未压缩正文的长度限制。
+不支持的编码、逗号分隔的叠加编码和重复 `Content-Encoding` 头返回
+`400 unsupported_content_encoding`；压缩正文损坏、截断或解压后不是合法 JSON 返回
+`400 invalid_json`。本地错误不包含原始正文或解压库细节。WebSocket 文本帧不经过这条解压路径。
+
+Responses 不透传下游的逐跳头、反代元数据（如 `cf-*`、`x-forwarded-*`、`forwarded`、`via`、
+`cdn-loop`）以及 `Accept-Encoding` / `Content-Encoding`。链路元数据和编解码能力
+由各段传输层独立管理；其余业务扩展头继续透传，不使用固定业务头白名单。
+此规则同时适用于上游 HTTP 和 WebSocket，不影响上游响应的 `cf-ray` 等诊断信息。
+
 Responses WebSocket 仅接受文本 `response.create`，同一连接串行执行。当前响应期间收到的后续业务帧
 留在有界接收队列中，待当前响应完成终结和写出后再逐条校验、准入与执行，不因请求提前到达而断开。
 这对齐 Codex 客户端 `stream_request` 持锁至本轮结束的串行行为，不表示支持额外控制消息类型。
@@ -138,8 +167,26 @@ Responses WebSocket 仅接受文本 `response.create`，同一连接串行执行
 客户端配置的 `supports_websockets` 只控制第一段连接，不是服务端传输策略开关。
 上游在响应终态前发送 Close 1000 仍属于失败，不能按“正常关闭”计为成功。
 
+已建立模型执行的 Responses、Images 和 Search HTTP 响应使用现有 ID：
+`x-gateway-request-id` 为模型执行 ID；`x-request-id` 保留有效上游值，只有上游
+`x-oai-request-id` 时复用其值，没有上游 ID 时使用模型执行 ID。`x-oai-request-id` 不是必需字段，
+也不要求客户端识别它；OpenAI 与 xAI 路由使用相同规则。失败响应的关联 ID 不采用会话 opening ID，
+错误正文读取失败时仍返回已知上游 ID；已采集的 turn state 等允许的会话头继续按原合同交付。
+尚未建立执行的入口拒绝继续使用 middleware 的入口关联。
+
+WebSocket 在尚未交付上游业务事件时合成的错误保留已确认的失败状态，以及 Provider 提取的结构化
+message/type/code；没有结构化错误时使用稳定安全文案，不把原始 HTML 或截断正文当作 message。
+合成错误自身的 `headers` 携带允许下发的响应头：优先保留实际失败的上游 request ID，无上游 ID 时
+提供网关关联 ID，并用 `x-gateway-request-id` 独立标识网关请求。已经取得的原始上游错误帧不重写。
+客户端可能对特定状态另行统一展示；这不构成网关改写真实状态码的理由。
+
 `GET /v1/models` 默认返回 OpenAI 兼容列表 `{"object": "list", "data": [...]}`；请求携带非空
 `client_version` query 参数（Codex 客户端）时改为返回 Codex 专用目录合同 `{"models": [...]}`。
+
+Codex 专用目录中的 `context_window` 与 `max_context_window` 分别表示默认上下文窗口和客户端本地
+覆盖的上限。OpenAI Provider 分别传递上游目录中的对应字段，缺失时保留 `null`；网关不通过部署配置
+覆盖这些值。Codex 客户端配置 `model_context_window` 后，按该值与非空 `max_context_window` 的较小值
+使用窗口；上限为空时保留客户端本地值。xAI 目录只声明一个窗口，其 Provider 继续以该值作为客户端覆盖上限。
 
 OpenAI 路径保留客户端 Responses wire 语义：请求 body 的未知字段和字段顺序保持不变（受控模型
 映射除外），HTTP SSE 与 WebSocket 的上游业务事件字节原样转发，response ID 按 opaque 值处理而不
@@ -378,9 +425,10 @@ OAuth start 使用：
   `refreshToken`。刷新响应中的三个 token 字段均按官方语义独立轮换：返回新值时替换，省略时分别保留
   现值。重新授权也保留这些回调保护，但只轮换目标账号的 token。回调地址只承载 `code`/`state`，
   不以 host/path 形式作为拒绝条件。
-- 账号文件导入和首次 OAuth 创建在 credential 提交后立即尝试一次额度观测。观测失败只记录告警，
-  不回滚已提交的账号；重新授权和手工或后台 RT 刷新只更新 token，不隐式等同于手工额度刷新，也不更新
-  既有账号资料或 OAuth principal。
+- 账号文件导入和 OAuth complete（包括重新授权）在 credential 提交后后台尝试一次额度观测，不等待
+  观测完成才返回成功。观测失败只记录告警，不回滚已提交的账号；手工或后台 RT 刷新只更新 token，
+  不隐式等同于手工额度刷新，也不更新既有账号资料或 OAuth principal。xAI 导入与 OAuth complete
+  使用相同的提交后观察流程。
 - OAuth pending flow 先取得带过期时间的独占 claim，只有账号事务提交成功后才消费。失败会释放 claim，
   但上游 authorization code 本身通常只能交换一次；已完成过 token exchange 时应重新创建 OAuth flow。
 - `GET /accounts/quota` 只读取最后一次落库快照；`POST /accounts/quota/refresh` 才访问上游。access token
@@ -397,9 +445,12 @@ OAuth start 使用：
   OAuth refresh 的明确永久错误写入。
 - 正常 Responses 请求会解析上游响应的 rate-limit headers，合并进同一 quota 快照并同步状态。Free、
   K12 等套餐共用该状态机；套餐只参与账号展示和按套餐隔离的模型目录 cache，不存在 K12 专属额度路径。
-- 账号展开区的 Token 结构和模型排行使用代表性账号级额度窗口聚合，查询边界严格为
-  `[resetAt - windowSeconds, resetAt)`；额度刷新若返回了更早的重置时间，会按新边界重新聚合。无法取得
-  完整窗口边界或只有模型专属额度时显示无数据，不回退成历史累计。金额原值保持完整精度，USD 展示值
+- 账号展开区的 Token 结构、模型排行和列表 Token 汇总优先使用账号级周额度窗口，无可统计的周窗口时
+  使用月额度窗口；`usage.windowLabelDisplay` 随选中的窗口返回“周额度窗口”或“月额度窗口”。查询边界
+  严格为 `[resetAt - windowSeconds, resetAt)`，不是自然周/月或最近 7/30 天；额度刷新若返回了更早的
+  重置时间，会按新边界重新聚合。没有边界完整、可归属到账号的周/月窗口时显示无数据，标签为
+  “周/月额度窗口”，不回退到 5 小时、日窗口或历史累计。各额度条与 Dashboard 的百分比选择不受影响。
+  金额原值保持完整精度，USD 展示值
   小于 1 美元时最多保留四位小数，其余保留两位。
 - 账号页没有定时静默轮询。手工额度刷新只替换响应中的账号行并同步状态汇总，不触发整页 loading；若
   新状态不符合当前筛选，该行从当前页移除。请求驱动或后台任务产生的状态变化，需要下一次显式查询账号
@@ -702,6 +753,21 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 request/response/upstream ID、outcome 与搜索文本。诊断 `dimension` 可取 `model`、`account`、
 `apiKey`、`provider`、`transport`、`failureClass`、`status`。
 
+请求记录列表的 `search` 使用区分大小写的字面量前缀匹配，支持请求 ID、Client Key ID / Key 前缀、
+账号 ID、账号邮箱与名称、请求 / 上游模型 ID、上游请求 ID。账号邮箱与名称按请求记录的历史快照检索，
+不随当前账号修改或删除而改变；`%`、`_` 和 `\` 均按普通字符处理，不作为搜索通配符。
+
+请求 ID 和上游 ID 继续通过既有字段查询；不增加入口 ID 字段，也不扫描 trace 建立查询映射。
+旧响应中只有入口 ID 时仍需结合时间与入口日志定位，不能回填不存在的关联。
+管理端搜索完整 `sk_` Client Key 时仅提交其可见前缀，不将完整密钥放入 URL。
+错误列表的主动刷新、搜索和平台/时间条件变化会取得新的结束时间；翻页沿用该次查询快照。
+
+已进入模型执行会话、但在首次合法 ProviderStream 建立前失败的请求也进入现有错误及详情查询，
+包含无可用账号、准备失败、启动/准备超时与取消。此时 attempt 数为零，未确认的 Provider、账号及
+上游传输为空；可用模型执行 ID 在“全部平台”下查询，不从路由候选推断实际调用平台。
+已有合法 stream 后的失败仍保留真实 attempt，即使尚未收到首事件。
+鉴权、解析、路由和准入等入口拒绝不属于该范围；请求观测仍是可能延迟或丢弃的异步投影。
+
 汇总与洞察中的请求数与 outcome 分布覆盖筛选范围内全部请求；token、缓存、延迟与成本聚合仅统计
 已完整交付客户端的成功响应。
 
@@ -709,6 +775,14 @@ request/response/upstream ID、outcome 与搜索文本。诊断 `dimension` 可�
 `relatedRequests[]`（`requestId / relation / outcome / completedAt`）；`relation` 为 `recovered_by` 或
 `recovers`。`trace` 是执行终态时的有界脱敏时间线，包含 request、attempt 和 exchange 关联、阶段、
 事件摘要及淘汰计数；普通用量列表不携带此字段。
+新采集的未知 JSON 键名与值只保留结构和摘要；事件摘要中的 `eventType` 为已知事件名称字符串、
+未知名称的 `{ bytes, sha256 }` 摘要，或缺失时的 `null`。旧 trace 不做清理或回填，
+其中的 `sanitized` 标记不能作为可直接公开的保证。
+
+管理端下载的诊断包 `schemaVersion: 2` 用于人工反馈，不是备份或导入格式。它包含关联 ID、错误分类摘要、
+请求与错误事件各自的状态、attempt、时间线阶段和计时；不自动导出 message/raw error、任意 metadata、
+trace event data、请求响应正文和头部。`availability` 与 `omitted` 明示未采集、不完整或主动省略的内容，
+`null` 不代表没有发生错误。版本、环境及原始错误片段仍需操作者另行补充并审阅脱敏。
 
 错误记录中的“已自动恢复”表示系统关联到了后续成功请求，不会把原来的失败记录改为成功。
 `upstreamSendState = ambiguous` 表示无法确认该次上游执行结果，不代表后续恢复请求失败；

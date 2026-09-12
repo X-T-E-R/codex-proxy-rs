@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{
     Arc, Mutex,
@@ -11,7 +12,7 @@ use axum::{
     extract::connect_info::ConnectInfo,
     http::{
         HeaderMap, HeaderValue, Request, StatusCode,
-        header::{AUTHORIZATION, CONTENT_TYPE},
+        header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE},
     },
 };
 use bytes::Bytes;
@@ -21,7 +22,7 @@ use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ExecutionService, ExecutionSession,
     StartExecution, StartProviderExecution, StartedExecution,
 };
-use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError};
+use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError, ModelRequestId};
 use gateway_core::error::{
     ClientVisibleUpstreamError, ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind,
     ProviderError, ProviderErrorKind,
@@ -32,7 +33,7 @@ use gateway_core::event::{
 };
 use gateway_core::operation::{Operation, OperationKind};
 use gateway_core::routing::PublicModelId;
-use gateway_core::upstream::UpstreamSendState;
+use gateway_core::upstream::{OpaqueUpstreamValue, UpstreamSendState};
 use serde_json::{Value, json};
 
 use gateway_api::openai::responses::{collect_execution_response, stream_execution_response};
@@ -451,9 +452,26 @@ async fn captured_client_context(
 async fn captured_http_request(
     provider_name: &str,
     body: Value,
-    mut headers: HeaderMap,
+    headers: HeaderMap,
     peer_address: Option<SocketAddr>,
 ) -> CapturedClientContext {
+    let (response, observed) = http_request_with_body(
+        provider_name,
+        body.to_string().into(),
+        headers,
+        peer_address,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    observed.expect("captured request context")
+}
+
+async fn http_request_with_body(
+    provider_name: &str,
+    body: Bytes,
+    mut headers: HeaderMap,
+    peer_address: Option<SocketAddr>,
+) -> (axum::response::Response, Option<CapturedClientContext>) {
     headers.insert(
         AUTHORIZATION,
         "Bearer sk_context_test".parse().expect("authorization"),
@@ -464,7 +482,7 @@ async fn captured_http_request(
         client: authenticated_client_for_provider("sk_context_test", provider_name),
     });
     let mut request = Request::post("/v1/responses")
-        .body(Body::from(body.to_string()))
+        .body(Body::from(body))
         .expect("context request");
     *request.headers_mut() = headers;
     if let Some(peer_address) = peer_address {
@@ -475,12 +493,75 @@ async fn captured_http_request(
         .oneshot(request)
         .await
         .expect("context response");
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    observed
-        .lock()
-        .expect("context capture lock")
-        .clone()
-        .expect("captured request context")
+    let observed = observed.lock().expect("context capture lock").clone();
+    (response, observed)
+}
+
+#[tokio::test]
+async fn compressed_http_requests_should_preserve_execution_context_without_transport_headers() {
+    let body = json!({
+        "model": "model-a", "input": "hello", "previous_response_id": "resp_previous",
+        "prompt_cache_key": "cache-key", "client_metadata": {"source": "test"}
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert("session_id", HeaderValue::from_static("session-test"));
+    let expected = captured_http_request("openai", body.clone(), headers.clone(), None).await;
+    for encoding in ["gzip", "deflate", "zstd"] {
+        let compressed = super::request::encode_body(encoding, body.to_string().as_bytes());
+        let mut headers = headers.clone();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding));
+        headers.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&compressed.len().to_string()).expect("compressed length"),
+        );
+        let (response, observed) =
+            http_request_with_body("openai", compressed.into(), headers, None).await;
+        // 捕获执行器在解码成功后主动返回 500；正文和业务头应与未压缩请求一致，
+        // 压缩编码及长度不能泄漏到已解压正文的上游协议上下文。
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(observed.as_ref(), Some(&expected), "{encoding}");
+    }
+}
+
+#[tokio::test]
+async fn invalid_compressed_http_requests_should_fail_before_execution() {
+    for (encoding, body, code, message) in [
+        (
+            "gzip",
+            Bytes::from_static(b"broken gzip"),
+            "invalid_json",
+            "Request body must be valid JSON.",
+        ),
+        (
+            "br",
+            Bytes::from_static(b"{}"),
+            "unsupported_content_encoding",
+            "Content-Encoding `br` is not supported.",
+        ),
+        (
+            "zstd",
+            super::request::encode_body("zstd", std::io::repeat(0).take(64 * 1024 * 1024 + 1))
+                .into(),
+            "request_too_large",
+            "Decompressed request body exceeds the allowed size.",
+        ),
+    ] {
+        let headers = HeaderMap::from_iter([
+            (CONTENT_ENCODING, HeaderValue::from_static(encoding)),
+            (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+        ]);
+        let (response, observed) = http_request_with_body("openai", body, headers, None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{encoding}");
+        assert!(observed.is_none(), "invalid body must not start execution");
+        let body = to_bytes(response.into_body(), 4096)
+            .await
+            .expect("error body");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).expect("error JSON"),
+            json!({"error": {"type": "invalid_request_error", "code": code, "message": message}})
+        );
+    }
 }
 
 async fn captured_http_compaction(provider_name: &str) -> CapturedClientContext {
@@ -1737,4 +1818,224 @@ async fn buffered_rate_limit_should_persist_the_returned_429_status() {
 fn response_status_from_body(body: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(body).ok()?;
     value.pointer("/error/code")?.as_str().map(str::to_owned)
+}
+
+const MODEL_REQUEST_ID: &str = "req_model_correlation";
+
+struct SessionExecution {
+    client: AuthenticatedClient,
+    session: Mutex<Option<Box<dyn ExecutionSession>>>,
+}
+
+impl ExecutionService for SessionExecution {
+    fn authenticate(&self, _: &str) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        Ok(self.client.clone())
+    }
+
+    fn public_models(&self, _: &AuthenticatedClient) -> Vec<PublicModelId> {
+        Vec::new()
+    }
+
+    fn contains_public_model(&self, _: &AuthenticatedClient, _: &PublicModelId) -> bool {
+        true
+    }
+
+    fn start(
+        &self,
+        request: StartExecution,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async move {
+            Ok(StartedExecution {
+                request_id: ModelRequestId::new(MODEL_REQUEST_ID).unwrap(),
+                created_at: std::time::SystemTime::now(),
+                stream: request.metadata.stream,
+                session: self.session.lock().unwrap().take().expect("one execution"),
+            })
+        })
+    }
+
+    fn start_provider_endpoint(
+        &self,
+        _: StartProviderExecution,
+    ) -> BoxFuture<'_, Result<StartedExecution, GatewayError>> {
+        Box::pin(async { panic!("Responses must use model execution") })
+    }
+}
+
+async fn response(
+    provider: &str,
+    session: FakeSession,
+    streaming: bool,
+) -> axum::response::Response {
+    let execution = Arc::new(SessionExecution {
+        client: authenticated_client_for_provider("sk_correlation_test", provider),
+        session: Mutex::new(Some(Box::new(session))),
+    });
+    api_router(execution)
+        .await
+        .oneshot(
+            Request::post("/v1/responses")
+                .header(AUTHORIZATION, "Bearer sk_correlation_test")
+                .header("x-request-id", "caller-chosen-not-a-model-id")
+                .header("user-agent", "AnotherTerminal/1.0")
+                .body(Body::from(
+                    json!({
+                        "model": "model-a", "input": "synthetic", "stream": streaming
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+fn headers(values: &[(&str, &'static str)]) -> Vec<ProviderResponseHeader> {
+    values
+        .iter()
+        .map(|(name, value)| {
+            ProviderResponseHeader::new(*name, Bytes::from_static(value.as_bytes()))
+        })
+        .collect()
+}
+
+fn failed_session(streaming: bool, error: EngineError) -> FakeSession {
+    let trace = Arc::new(Trace::default());
+    if streaming {
+        FakeSession::streaming(trace, vec![NextStep::Error(error)])
+    } else {
+        FakeSession::buffered(trace, Vec::new()).with_collect_error(error)
+    }
+}
+
+#[tokio::test]
+async fn response_ids_are_provider_and_client_independent() {
+    let cases: &[(&[(&str, &str)], &str)] = &[
+        (&[], MODEL_REQUEST_ID),
+        (&[("x-request-id", "upstream-primary")], "upstream-primary"),
+        (&[("x-oai-request-id", "upstream-alias")], "upstream-alias"),
+        (
+            &[
+                ("x-request-id", "upstream-primary"),
+                ("x-oai-request-id", "upstream-alias"),
+            ],
+            "upstream-primary",
+        ),
+        (
+            &[
+                ("x-request-id", " "),
+                ("x-oai-request-id", "upstream-alias"),
+            ],
+            "upstream-alias",
+        ),
+        (&[("x-request-id", "")], MODEL_REQUEST_ID),
+    ];
+    for provider in ["openai", "xai"] {
+        for streaming in [false, true] {
+            for (upstream_headers, expected) in cases {
+                let trace = Arc::new(Trace::default());
+                let session = if streaming {
+                    FakeSession::streaming(
+                        trace,
+                        vec![
+                            NextStep::Event(delivery(
+                                started(),
+                                CommitRequirement::CommitBeforeDelivery,
+                            )),
+                            NextStep::Event(delivery(
+                                completed(),
+                                CommitRequirement::AlreadyCommitted,
+                            )),
+                            NextStep::FinalizeSuccess,
+                        ],
+                    )
+                } else {
+                    FakeSession::buffered(trace, vec![started(), completed()])
+                }
+                .with_response_headers(headers(upstream_headers));
+                let response = response(provider, session, streaming).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                assert_eq!(response.headers()["x-request-id"], *expected);
+                assert_eq!(response.headers()["x-gateway-request-id"], MODEL_REQUEST_ID);
+                assert!(
+                    !to_bytes(response.into_body(), 64 * 1024)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn failure_ids_prefer_the_actual_error_over_session_headers() {
+    for provider in ["openai", "xai"] {
+        for streaming in [false, true] {
+            for upstream_headers in [vec![], headers(&[("x-oai-request-id", "actual-error")])] {
+                let expected = if upstream_headers.is_empty() {
+                    MODEL_REQUEST_ID
+                } else {
+                    "actual-error"
+                };
+                let raw =
+                    Bytes::from_static(br#"{"error":{"message":"synthetic upstream detail"}}"#);
+                let error =
+                    ProviderError::new(ProviderErrorKind::InvalidRequest, UpstreamSendState::Sent)
+                        .with_client_visible_upstream_response(
+                            ClientVisibleUpstreamResponse::new(
+                                422,
+                                Some(b"application/json".to_vec()),
+                                raw.clone(),
+                            )
+                            .with_headers(upstream_headers),
+                        );
+                let session = failed_session(streaming, EngineError::Provider(error))
+                    .with_response_headers(headers(&[("x-request-id", "earlier-session")]));
+                let response = response(provider, session, streaming).await;
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                assert_eq!(response.headers()["x-request-id"], expected);
+                assert_eq!(response.headers()["x-gateway-request-id"], MODEL_REQUEST_ID);
+                assert_eq!(to_bytes(response.into_body(), 4096).await.unwrap(), raw);
+            }
+
+            let error =
+                ProviderError::new(ProviderErrorKind::Transport, UpstreamSendState::Ambiguous)
+                    .with_status(503)
+                    .with_upstream_request_id(OpaqueUpstreamValue::new("body-read-error"));
+            let session = failed_session(streaming, EngineError::Provider(error))
+                .with_response_headers(headers(&[
+                    ("x-request-id", "earlier-session"),
+                    ("x-oai-request-id", "earlier-alias"),
+                ]));
+            let response = response(provider, session, streaming).await;
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(response.headers()["x-request-id"], "body-read-error");
+            assert_eq!(response.headers().get_all("x-request-id").iter().count(), 1);
+            assert!(response.headers().get("x-oai-request-id").is_none());
+            assert_eq!(response.headers()["x-gateway-request-id"], MODEL_REQUEST_ID);
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_execution_failure_uses_the_existing_model_id() {
+    for provider in ["openai", "xai"] {
+        for streaming in [false, true] {
+            let session =
+                failed_session(streaming, EngineError::Deadline).with_response_headers(headers(&[
+                    ("x-request-id", "opening-primary"),
+                    ("x-oai-request-id", "opening-alias"),
+                    ("x-codex-turn-state", "retained-turn-state"),
+                ]));
+            let response = response(provider, session, streaming).await;
+            assert_eq!(response.headers()["x-request-id"], MODEL_REQUEST_ID);
+            assert_eq!(response.headers()["x-gateway-request-id"], MODEL_REQUEST_ID);
+            assert!(response.headers().get("x-oai-request-id").is_none());
+            assert_eq!(
+                response.headers()["x-codex-turn-state"],
+                "retained-turn-state"
+            );
+        }
+    }
 }

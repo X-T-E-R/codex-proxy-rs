@@ -16,6 +16,7 @@ axum = { version = "0.8.9", default-features = false, features = ["json", "query
 base64 = "0.23.0"
 bytes = "1.11.1"
 chrono = { version = "0.4.45", features = ["serde"] }
+flate2 = "1.1.9"
 futures = "0.3.32"
 gateway-admin = { path = "../gateway-admin" }
 gateway-core = { path = "../gateway-core" }
@@ -29,6 +30,7 @@ tower-http = { version = "0.7.0", features = ["cors", "fs", "request-id", "timeo
 tracing = "0.1.44"
 url = "2.5.8"
 uuid = { version = "1.23.3", features = ["v7"] }
+zstd = "=0.13.3"
 
 [dev-dependencies]
 async-trait = "0.1.89"

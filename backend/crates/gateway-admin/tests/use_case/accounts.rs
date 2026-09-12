@@ -33,10 +33,9 @@ use gateway_admin::{
             AuthorizationCommit, AuthorizationCommitGuard, AuthorizationCredentialCommit,
             AuthorizationMutationTarget, AuthorizationStarted, CompleteAuthorization,
             ConsumeProviderResetCredit, CredentialCommitGuard, CredentialDetails,
-            CredentialImportCommit, CredentialImportResult, CredentialListQuery,
-            CredentialMutationResult, CredentialPage, CredentialRotationCommit,
-            PendingAuthorizationMutation, PrepareCredentialImport, PrepareCredentialRefresh,
-            PrepareCredentialRotation, PreparedAuthorizationCommit,
+            CredentialImportCommit, CredentialImportResult, CredentialMutationResult,
+            CredentialRotationCommit, PendingAuthorizationMutation, PrepareCredentialImport,
+            PrepareCredentialRefresh, PrepareCredentialRotation, PreparedAuthorizationCommit,
             PreparedAuthorizationCredential, PreparedCredentialCreate, PreparedCredentialImport,
             PreparedCredentialRotation, PreparedCredentialRotationFacts, ProviderDocument,
             ProviderExport, ProviderExportCredentialInput, ProviderModels, ProviderQuota,
@@ -71,6 +70,8 @@ pub(super) struct FakeProviderAdmin {
     export_inputs: Mutex<Vec<ProviderExportCredentialInput>>,
     import_account_ids: Mutex<Vec<String>>,
     quota_requests: Mutex<Vec<ProviderQuotaRequest>>,
+    quota_started: tokio::sync::Notify,
+    quota_gate: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     quota: Mutex<ProviderQuota>,
     quota_refresh_account: Mutex<Option<(Arc<FakeAccountStore>, AccountRecord)>>,
     current_credential_revision: Mutex<Revision>,
@@ -89,6 +90,8 @@ impl FakeProviderAdmin {
             export_inputs: Mutex::new(Vec::new()),
             import_account_ids: Mutex::new(vec!["acct_prepared".to_owned()]),
             quota_requests: Mutex::new(Vec::new()),
+            quota_started: tokio::sync::Notify::new(),
+            quota_gate: Mutex::new(None),
             quota: Mutex::new(empty_quota()),
             quota_refresh_account: Mutex::new(None),
             current_credential_revision: Mutex::new(revision(1)),
@@ -136,6 +139,26 @@ impl FakeProviderAdmin {
             .lock()
             .expect("provider quota requests")
             .clone()
+    }
+
+    pub(super) fn pause_next_quota(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        *self.quota_gate.lock().expect("quota gate") = Some(receiver);
+        sender
+    }
+
+    pub(super) async fn wait_for_quota_requests(&self, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let notified = self.quota_started.notified();
+                if self.quota_requests().len() >= expected {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("quota observation started");
     }
 
     fn reset_credit_commands(&self) -> Vec<ConsumeProviderResetCredit> {
@@ -377,6 +400,11 @@ impl ProviderAdmin for FakeProviderAdmin {
             .lock()
             .expect("provider quota requests")
             .push(request);
+        self.quota_started.notify_one();
+        let gate = self.quota_gate.lock().expect("quota gate").take();
+        if let Some(gate) = gate {
+            gate.await.expect("release paused quota");
+        }
         if let Some(kind) = self
             .quota_failure
             .lock()
@@ -610,23 +638,6 @@ impl AccountStore for FakeAccountStore {
             .lock()
             .expect("quota window usage")
             .clone())
-    }
-
-    async fn list_credentials(
-        &self,
-        provider_kind: &ProviderKind,
-        _: CredentialListQuery,
-    ) -> AdminStoreResult<CredentialPage> {
-        self.record("store.list_credentials");
-        let accounts = self.accounts.lock().expect("accounts").clone();
-        Ok(CredentialPage {
-            config_revision: revision(1),
-            items: accounts
-                .into_iter()
-                .filter(|account| &account.provider_kind == provider_kind)
-                .collect(),
-            next_cursor: None,
-        })
     }
 
     async fn credential_details(
@@ -1759,10 +1770,8 @@ async fn accounts_list_should_attach_local_usage_to_quota_windows() {
         .as_ref()
         .expect("quota window local usage");
     assert_eq!(usage.total_tokens, Some(4_330_000));
-    assert_eq!(
-        item.usage.as_ref().and_then(|usage| usage.total_tokens),
-        Some(4_330_000),
-    );
+    // 短期额度条保留自己的本地用量，但不作为周/月统计面板的回退。
+    assert!(item.usage.is_none());
 
     let queries = store.quota_window_queries();
     assert_eq!(queries.len(), 1);
@@ -1770,6 +1779,98 @@ async fn accounts_list_should_attach_local_usage_to_quota_windows() {
     assert_eq!(queries[0].key, "primary");
     assert_eq!(queries[0].range.start, reset_at - TimeDelta::hours(5));
     assert_eq!(queries[0].range.end, reset_at);
+}
+
+#[tokio::test]
+async fn accounts_list_and_quota_refresh_should_select_the_same_weekly_or_monthly_usage() {
+    let provider = FakeProviderAdmin::new("openai", events());
+    let store = FakeAccountStore::new("openai", events());
+    let services = accounts_service(provider.clone(), store.clone()).await;
+    let account_id = ProviderAccountId::new("acct_test").expect("account id");
+    let reset_at = Utc::now() + TimeDelta::days(1);
+    let short = ProviderQuotaWindow {
+        key: "short".to_owned(),
+        group: "shortTerm".to_owned(),
+        label: "5小时限额".to_owned(),
+        limit_id: None,
+        limit_name: None,
+        role: None,
+        local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
+        window_seconds: Some(18_000),
+        used_percent: Some(50.0),
+        reset_at: Some(reset_at),
+        limit_reached: false,
+        local_usage: None,
+        provider_data: None,
+    };
+    let week = ProviderQuotaWindow {
+        key: "week".to_owned(),
+        label: "周额度".to_owned(),
+        window_seconds: Some(7 * 86_400),
+        ..short.clone()
+    };
+    let month = ProviderQuotaWindow {
+        key: "month".to_owned(),
+        group: "monthly".to_owned(),
+        label: "月额度".to_owned(),
+        window_seconds: Some(30 * 86_400),
+        ..short.clone()
+    };
+    for (windows, selected_key, tokens, duration) in [
+        (vec![short.clone(), month.clone(), week], "week", 700, 7),
+        (vec![short, month], "month", 3000, 30),
+    ] {
+        provider.set_quota(ProviderQuota {
+            windows,
+            ..empty_quota()
+        });
+        store.set_quota_window_usage(
+            [("short", 50), ("week", 700), ("month", 3000)]
+                .into_iter()
+                .map(|(key, total)| AccountUsageWindowResult {
+                    account_id: account_id.to_string(),
+                    key: key.to_owned(),
+                    usage: quota_local_usage(account_id.as_str(), total),
+                })
+                .collect(),
+        );
+        let page = services
+            .accounts()
+            .list(AccountListQuery {
+                page: 1,
+                page_size: gateway_admin::model::PageSize::new(20).expect("page size"),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: None,
+                sort: None,
+            })
+            .await
+            .expect("list accounts");
+        let refreshed = services
+            .accounts()
+            .quota(&account_id, true)
+            .await
+            .expect("refresh quota");
+        let expected = quota_local_usage(account_id.as_str(), tokens);
+        for item in [&page.items[0], &refreshed] {
+            let usage = item.usage.as_ref().expect("selected window usage");
+            assert_eq!(usage.total_tokens, expected.total_tokens);
+            assert_eq!(
+                item.quota
+                    .usage_window()
+                    .map(|(window, _)| window.key.as_str()),
+                Some(selected_key)
+            );
+        }
+        let queries = store.quota_window_queries();
+        let selected = queries
+            .iter()
+            .find(|query| query.key == selected_key)
+            .expect("selected query");
+        assert_eq!(selected.range.start, reset_at - TimeDelta::days(duration));
+        assert_eq!(selected.range.end, reset_at);
+    }
 }
 
 #[tokio::test]

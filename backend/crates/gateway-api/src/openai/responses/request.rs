@@ -1,12 +1,13 @@
 //! OpenAI Responses JSON 到 Core 路由事实与不透明 wire payload 的单一解码边界。
 
-use std::{fmt, net::IpAddr};
+use std::{borrow::Cow, fmt, net::IpAddr};
 
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload, ProviderSessionState};
 use gateway_protocol::openai::{
     X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, X_OPENAI_MEMGEN_REQUEST_HEADER,
+    is_transport_managed_request_header,
 };
 use serde_json::{Map, Value};
 
@@ -322,12 +323,87 @@ impl fmt::Debug for DecodedResponsesRequest {
 ///
 /// # Errors
 ///
-/// JSON 非法、顶层不是 object，或网关必须解释的路由字段无效时返回安全错误。
+/// 编码不支持、压缩正文损坏或超限、JSON 非法，或路由字段无效时返回安全错误。
 pub fn decode_request_with_headers(
     body: &[u8],
     headers: &HeaderMap,
 ) -> Result<DecodedResponsesRequest, RequestDecodeError> {
-    decode_request_inner(body, &OpenAiRequestHeaders::from_headers(headers))
+    let body = decompress_request_body(body, headers)?;
+    decode_request_inner(&body, &OpenAiRequestHeaders::from_headers(headers))
+}
+
+/// 下游请求体解压后的最大字节数；防御解压炸弹。
+const MAX_DECOMPRESSED_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+
+/// 按 `Content-Encoding` 解压下游请求体。
+///
+/// 未压缩与 `identity` 借用原始正文；压缩正文在读取过程中限制展开大小，
+/// 避免先完整分配再检查。只接受单一编码，重复头和叠加编码不能只解释第一项。
+fn decompress_request_body<'a>(
+    body: &'a [u8],
+    headers: &HeaderMap,
+) -> Result<Cow<'a, [u8]>, RequestDecodeError> {
+    let encoding = headers
+        .get_all(axum::http::header::CONTENT_ENCODING)
+        .iter()
+        .map(|value| {
+            value
+                .to_str()
+                .map_err(|_| RequestDecodeError::MalformedJson)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join(",");
+    match encoding.trim().to_ascii_lowercase().as_str() {
+        "" | "identity" => Ok(Cow::Borrowed(body)),
+        "gzip" => {
+            let decoder = flate2::read::MultiGzDecoder::new(body);
+            read_bounded(decoder).map(Cow::Owned)
+        }
+        "deflate" => {
+            let decoder = flate2::read::ZlibDecoder::new(body);
+            read_bounded(decoder).map(Cow::Owned)
+        }
+        "zstd" => {
+            let mut decoder = zstd::stream::read::Decoder::with_buffer(body)
+                .map_err(|_| RequestDecodeError::MalformedJson)?;
+            // 输出有界之外，也限制压缩帧声明的回溯窗口，防止解码器内部过量分配。
+            decoder
+                .window_log_max(MAX_DECOMPRESSED_REQUEST_BYTES.ilog2())
+                .map_err(|_| RequestDecodeError::MalformedJson)?;
+            read_bounded(decoder).map(Cow::Owned)
+        }
+        other => Err(RequestDecodeError::UnsupportedContentEncoding {
+            encoding: other.to_owned(),
+        }),
+    }
+}
+
+fn read_bounded<R: std::io::Read>(mut reader: R) -> Result<Vec<u8>, RequestDecodeError> {
+    let mut decoded = Vec::new();
+    let mut chunk = [0; 8192];
+    loop {
+        let remaining = MAX_DECOMPRESSED_REQUEST_BYTES - decoded.len();
+        let read_limit = chunk.len().min(remaining + 1);
+        let read = reader
+            .read(&mut chunk[..read_limit])
+            .map_err(|_| RequestDecodeError::MalformedJson)?;
+        if read == 0 {
+            return Ok(decoded);
+        }
+        if read > remaining {
+            return Err(RequestDecodeError::DecompressedBodyTooLarge);
+        }
+        // 默认 Vec 扩容和 read_to_end 的 EOF 探测可能突破输出上限；
+        // 容量增长也受相同边界约束，越界探测只使用栈上分块缓冲区。
+        let required = decoded.len() + read;
+        if required > decoded.capacity() {
+            let capacity = (decoded.capacity() * 2)
+                .max(required)
+                .min(MAX_DECOMPRESSED_REQUEST_BYTES);
+            decoded.reserve_exact(capacity - decoded.len());
+        }
+        decoded.extend_from_slice(&chunk[..read]);
+    }
 }
 
 pub(super) fn decode_request_inner(
@@ -458,7 +534,7 @@ fn passthrough_header_name(name: &str, connection_headers: &[String]) -> bool {
     if connection_headers
         .iter()
         .any(|connection_header| connection_header.eq_ignore_ascii_case(name))
-        || name.starts_with("sec-websocket-")
+        || is_transport_managed_request_header(name)
         || name.starts_with("x-grok-")
         || name.starts_with("x-xai-")
     {
@@ -467,30 +543,8 @@ fn passthrough_header_name(name: &str, connection_headers: &[String]) -> bool {
 
     !matches!(
         name,
-        // 逐跳头、上游 authority 和重序列化后的实体长度由 transport 重建。
-        "connection"
-            | "keep-alive"
-            | "proxy-connection"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host"
-            | "content-length"
-            // 下游连接诊断事实只用于本地观测，不能伪装成 OpenAI 请求事实。
-            | "forwarded"
-            | "x-forwarded-for"
-            | "x-forwarded-host"
-            | "x-forwarded-proto"
-            | "x-forwarded-port"
-            | "x-real-ip"
-            | "true-client-ip"
-            | "cf-connecting-ip"
-            | "x-request-id"
-            // 下游鉴权和账号 cookie 绝不能成为上游账号身份。
-            | "authorization"
+        // 下游鉴权和账号 cookie 绝不能成为上游账号身份。
+        "authorization"
             | "x-api-key"
             // Codex 的服务端托管认证标记只用于客户端能力判断，不代表上游身份。
             | "x-openai-actor-authorization"

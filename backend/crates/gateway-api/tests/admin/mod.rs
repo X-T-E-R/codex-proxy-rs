@@ -40,12 +40,11 @@ use gateway_admin::{
         },
         provider_credentials::{
             AuthorizationCommit, AuthorizationStarted, CompleteAuthorization, CredentialDetails,
-            CredentialImportCommit, CredentialImportResult, CredentialListQuery,
-            CredentialMutationResult, CredentialPage, CredentialRotationCommit,
-            PendingAuthorizationMutation, PrepareCredentialImport, PrepareCredentialRefresh,
-            PrepareCredentialRotation, PreparedAuthorizationCommit, PreparedCredentialImport,
-            PreparedCredentialRotation, ProviderExport, ProviderExportCredentialInput,
-            ProviderModels, ProviderQuota,
+            CredentialImportCommit, CredentialImportResult, CredentialMutationResult,
+            CredentialRotationCommit, PendingAuthorizationMutation, PrepareCredentialImport,
+            PrepareCredentialRefresh, PrepareCredentialRotation, PreparedAuthorizationCommit,
+            PreparedCredentialImport, PreparedCredentialRotation, ProviderExport,
+            ProviderExportCredentialInput, ProviderModels, ProviderQuota,
         },
         settings::{
             AdminApiKey, AdminApiKeyMutation, ModelMappings, ReplaceRuntimeSettings,
@@ -97,6 +96,8 @@ pub(super) struct AdminTestFixture {
     pub ops_errors: Arc<Mutex<Vec<OpsError>>>,
     pub dashboard_observation: Arc<Mutex<Option<DashboardObservation>>>,
     pub dashboard_summary_range: Arc<Mutex<Option<TimeRange>>>,
+    pub provider_error: Arc<Mutex<Option<ProviderAdminError>>>,
+    pub account: Arc<Mutex<Option<AccountPageItem>>>,
 }
 
 impl AdminTestFixture {
@@ -116,6 +117,8 @@ impl AdminTestFixture {
         let ops_errors = Arc::new(Mutex::new(Vec::new()));
         let dashboard_observation = Arc::new(Mutex::new(None));
         let dashboard_summary_range = Arc::new(Mutex::new(None));
+        let provider_error = Arc::new(Mutex::new(None));
+        let account = Arc::new(Mutex::new(None));
         let unused = Arc::new(UnusedStore {
             usage_records: Arc::clone(&usage_records),
             usage_detail: Arc::clone(&usage_detail),
@@ -123,6 +126,7 @@ impl AdminTestFixture {
             ops_errors: Arc::clone(&ops_errors),
             dashboard_observation: Arc::clone(&dashboard_observation),
             dashboard_summary_range: Arc::clone(&dashboard_summary_range),
+            account: Arc::clone(&account),
         });
         let stores = AdminStorePorts::new(
             AdminAccountStorePorts::new(
@@ -138,8 +142,8 @@ impl AdminTestFixture {
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
         );
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
-            Arc::new(UnusedProvider::new("openai")),
-            Arc::new(UnusedProvider::new("xai")),
+            Arc::new(UnusedProvider::new("openai", Arc::clone(&provider_error))),
+            Arc::new(UnusedProvider::new("xai", Arc::clone(&provider_error))),
         ];
         let bundle = gateway_admin::initialize(
             AdminConfig {
@@ -166,6 +170,8 @@ impl AdminTestFixture {
             ops_errors,
             dashboard_observation,
             dashboard_summary_range,
+            provider_error,
+            account,
         }
     }
 
@@ -708,6 +714,7 @@ struct UnusedStore {
     ops_errors: Arc<Mutex<Vec<OpsError>>>,
     dashboard_observation: Arc<Mutex<Option<DashboardObservation>>>,
     dashboard_summary_range: Arc<Mutex<Option<TimeRange>>>,
+    account: Arc<Mutex<Option<AccountPageItem>>>,
 }
 
 #[async_trait]
@@ -722,9 +729,12 @@ impl AccountStore for UnusedStore {
 
     async fn load_account(
         &self,
-        _: &str,
+        id: &str,
         _: AccountRuntimeSnapshot,
     ) -> AdminStoreResult<Option<AccountPageItem>> {
+        if let Some(account) = self.account.lock().expect("account").as_ref() {
+            return Ok((account.account.id == id).then(|| account.clone()));
+        }
         Err(unavailable("account"))
     }
 
@@ -741,14 +751,6 @@ impl AccountStore for UnusedStore {
         _: &[AccountUsageWindowQuery],
     ) -> AdminStoreResult<Vec<AccountUsageWindowResult>> {
         Err(unavailable("account quota window usage"))
-    }
-
-    async fn list_credentials(
-        &self,
-        _: &ProviderKind,
-        _: CredentialListQuery,
-    ) -> AdminStoreResult<CredentialPage> {
-        Err(unavailable("credential list"))
     }
 
     async fn credential_details(
@@ -941,12 +943,14 @@ impl ObservabilityStore for UnusedStore {
 
 struct UnusedProvider {
     kind: ProviderKind,
+    error: Arc<Mutex<Option<ProviderAdminError>>>,
 }
 
 impl UnusedProvider {
-    fn new(kind: &str) -> Self {
+    fn new(kind: &str, error: Arc<Mutex<Option<ProviderAdminError>>>) -> Self {
         Self {
             kind: ProviderKind::new(kind).expect("provider kind"),
+            error,
         }
     }
 }
@@ -987,7 +991,12 @@ impl ProviderAdmin for UnusedProvider {
         &self,
         _: PrepareCredentialImport,
     ) -> Result<PreparedCredentialImport, ProviderAdminError> {
-        Err(unsupported_provider())
+        Err(self
+            .error
+            .lock()
+            .expect("provider error")
+            .clone()
+            .unwrap_or_else(unsupported_provider))
     }
 
     async fn start_authorization(
@@ -1015,7 +1024,12 @@ impl ProviderAdmin for UnusedProvider {
         &self,
         _: PrepareCredentialRefresh,
     ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
-        Err(unsupported_provider())
+        Err(self
+            .error
+            .lock()
+            .expect("provider error")
+            .clone()
+            .unwrap_or_else(unsupported_provider))
     }
 
     async fn quota(

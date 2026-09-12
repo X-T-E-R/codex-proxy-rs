@@ -110,12 +110,16 @@ flowchart LR
 | `upstream` | 跨 Engine、Event、Error 与 Provider 共用的 transport 名称、发送状态和不透明上游值 |
 | `lifecycle` | 取消信号、连接注册与 drain 合同 |
 | `engine` | attempt、发送/提交屏障、执行编排和持久化调用时序 |
-| `routing` | 冻结路由事实、请求计划以及运行时快照的表示与编译 |
+| `routing` | 冻结路由事实、请求计划、Provider 只读目录合同以及运行时快照的表示与编译 |
 | `runtime` | 当前快照的发布、读取、revision 订阅与周期对账任务 |
 
 `event` 通过 `validation` / `upstream` 使用基础值，不再依赖承载原始事件的执行错误；账号值对象和
 选择策略通过 `identity` / `account::scope` 使用身份与范围，不依赖路由计划。`routing` 和 `error` 的
 既有公开类型路径保留 re-export，定义与 Core 内部使用均归属上述 owner。架构测试约束这些叶子依赖。
+
+Provider 模型能力、目录代次与 `ProviderCatalogPort` 由 `routing::catalog` 定义。快照编译和对账只消费
+该只读合同，不反向依赖执行注册表；现有 `ProviderRegistry` 直接实现目录端口，仍只维护一份 Provider
+注册集合。已知空目录与查询失败的未知目录保持不同语义，目录替身无需实现请求执行。
 
 `engine::observation` 统一维护单次响应的用量、费用、时间和响应 ID，并负责重试前清理；协调器继续
 独占发送、提交、重试和终结顺序。Provider 上报费用优先于本地估算，丢弃的 attempt 不得污染最终计量。
@@ -174,6 +178,9 @@ Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 ca
 
 - OpenAI 是透明边界。Responses 请求保留未知字段和字段顺序；SSE、WebSocket、Images 与 standalone
   Search 的业务正文按原始字节转发。canonical facts 从同一数据旁路提取，只用于路由、观测和计费。
+- Responses 的业务扩展头保留原始多值字节；传输与反代请求头分类由 `gateway-protocol` 统一定义，
+  API 入站与 OpenAI Provider 编码共同使用。下游链路元数据和压缩协商不跨越该边界，
+  上游认证、请求画像与传输字段仍由 Provider 生成；响应方向的诊断头不受请求过滤规则影响。
 - xAI 是翻译边界。Provider 把 Grok wire 转换为 Responses wire；上游结构化错误的 message/code/type
   可以透出，但账号指纹会先脱敏。
 - response ID 是不透明 UTF-8 bytes，不假设 UUID、固定长度或跨 Provider 可复用。
@@ -188,6 +195,9 @@ Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 ca
 
 连接池按出口隔离。修改代理推进配置 revision，使后续请求使用新出口；已执行请求可沿原连接完成。
 代理变更不推进 `credential_revision`，不会使进行中的令牌刷新因凭据版本冲突而丢失结果。
+xAI 的推理连接池继续按账号绑定隔离；OAuth、目录/计费辅助请求在各自 transport 内复用有界出口
+client，OIDC 的 JWKS 缓存与单飞归属对应出口状态。自动刷新提交凭据后的目录预热重新读取当前账号
+出口，不从 token-only 路径绕过代理；JWKS 过期或获取失败仍不使用 stale fallback。
 
 代理独立保存和测试，通过 `outboundProxyId` 绑定账号；账号保留解析后的 URL 供 Provider 使用。
 连接配置改变时在同一事务内同步关联账号并清除旧测试结果，已绑定的代理不可删除。
@@ -239,6 +249,13 @@ Proxy changes advance the runtime configuration revision without invalidating in
 3. **原始上游诊断**：只在连接测试、运维错误详情等明确诊断界面展示已经捕获的原始字段，不翻译、不补造，
    也不塞入普通 Admin 错误信封。原始 body 不进入 Debug、普通日志或持久化错误消息。
 
+Provider 管理适配在仍持有结构化失败事实时选择静态 `public_message`；Admin 将其转为可安全展示的
+`AdminError.message`，API 保留其中的 502／503 具体原因，无公开消息时才使用通用回退。认证与未知
+内部异常仍保持固定文案，不能把任意 Provider／Store 的 message 直接放行。
+管理提示与 Worker 的处置分类是不同职责：例如 OpenAI 刷新已收到 401 时，可以提示已解析的令牌
+拒绝原因，但不因此改变现有有界恢复退避和账号终态判定。刷新繁忙、已知上游失败与结果未知分别映射为
+409、50201、50202；结果未知不能触发自动重放一次性凭据，Vue 也不重新解析上游错误码或正文。
+
 连接测试的 `gateway` / `provider` / `upstream` 来源以及 `not_sent` / `sent` / `ambiguous` 发送状态由 Core 在
 仍持有完整执行错误时一次判定；Vue 只能根据稳定字段生成摘要，不能匹配英文错误句子反推来源。
 
@@ -279,6 +296,8 @@ Core 负责准入与结算时序，Store 持久化费用账本，Admin 负责限
   换号和内部重试复用同一名额，Key 与账号并发上限同时生效；预算拒绝或启动失败释放名额。
 
 完成、失败、取消和断连使用同一结算路径，在结束时以网关请求 ID 幂等累计已取得费用。
+执行会话持有结算与准入释放的同一个清理 future；协议等待被取消后，后续驱动或宿主 detached finalizer
+继续原清理，不重复结算。只有执行终态、结算与释放均已返回，协议层才可视为 finalized 并放弃清理责任。
 缺少用量或价格、无法取得 USD 费用的尝试按零累计，不创建待核账记录，也不会阻断 Key；
 内部重试中已经取得的费用仍须累计。发送状态只决定重放是否安全，不能据此推断费用。
 请求日志继续保留真实错误、用量与费用来源，账本按零累计不表示上游实际免费。
@@ -297,8 +316,9 @@ HTTP validation
   -> Admin use case
   -> Provider prepare/verify when needed
   -> PostgreSQL transaction + audit
+  -> invalidate affected Provider-derived facts when needed
   -> publish committed runtime snapshot
-  -> notify Provider-derived caches
+  -> best-effort observations when needed
 ```
 
 会改变路由快照或安全配置的 mutation 在同一 PostgreSQL 事务中提交业务事实、推进内部
@@ -309,6 +329,10 @@ HTTP validation
 revision；credential 轮换只推进账号自己的 `credential_revision`。Redis 通知用于缩短收敛延迟，
 PostgreSQL 周期对账才是正确性基础。
 
+同一 publisher 的管理提交、订阅通知与周期对账共享编译到发布/暂停的临界区，避免旧结果覆盖新授权或
+晚到的失败暂停新快照；请求读取不等待刷新锁。对账仍允许持久 revision 回退，不能只比较版本大小。
+配置不可确认时暂停新请求；仅目录 generation 变化且编译失败时继续使用旧快照，留待下次对账。
+
 ## 8. 状态所有权
 
 | 状态 | 唯一权威 | 说明 |
@@ -317,7 +341,7 @@ PostgreSQL 周期对账才是正确性基础。
 | Client Key 金额窗口与费用事件 | PostgreSQL | 准入与幂等结算的权威账本，独立于请求观测与日志保留策略 |
 | admission、lease、cooldown、circuit、会话亲和、continuation、OAuth pending、目录 cache | Redis | 可重建、可过期的协调状态 |
 | 日志、OAuth 恢复记录、在线更新状态、备份暂存 | `.runtime/` | 部署节点本地运行文件 |
-| 重置卡库存与消费结果 | OpenAI upstream | 后端不建立本地卡库存；前端只保留当前浏览器会话的最近查询 |
+| 重置卡库存与消费结果 | OpenAI upstream | 后端不建立本地卡库存；前端按账号保留当前浏览器会话的最近查询、未决消费幂等键与发送锁，展开行卸载不会清空 |
 | Provider 公开模型与请求画像 | Provider/runtime cache | 由官方目录或发布源刷新，不写成第二份业务配置 |
 | Windows 安装包临时直链 | Host 进程内短缓存 | 按需解析、严格校验、到期前丢弃；不写 PostgreSQL/Redis，也不代理包字节 |
 
@@ -343,7 +367,9 @@ credential 与 quota 是两组独立事实：credential refresh 不等于 quota 
   原工具类型及对应 item ID，`call_id` 始终保持配对。转换仅处理协议字段，超限或转换失败终止流。
   默认 `store: false` 的续接使用现有会话 owner 重放完整历史；上一轮要求上游存储且指令未变时，
   原生续接移除本轮 `instructions`，避免 Grok 拒绝与 `previous_response_id` 同传。
-- 新账号导入和首次 OAuth 在 credential 提交后尽力读取一次额度；失败只留下观测，不回滚账号事务。
+- 账号导入和 OAuth complete（包括重新授权）在 credential 提交、Provider 事实失效及快照发布后，
+  由 Admin 共用流程后台读取一次额度；不等待观测完成才返回管理请求，失败记录告警但不回滚账号事务。
+  手工和后台 credential refresh 仍不隐式刷新 quota。
 - quota refresh、正常推理返回的 rate-limit headers 和后台健康任务汇入同一额度事实；套餐只用于展示与
   目录 cache 隔离，不创建套餐专属状态机。
 
@@ -356,6 +382,25 @@ credential 与 quota 是两组独立事实：credential refresh 不等于 quota 
 请求观测通过有界进程内队列异步投影到 PostgreSQL。队列满、Store 暂不可用或进程退出超时时，允许丢失
 可恢复观测并累计指标，但不允许改变客户端响应。Usage 详情中的 attempt 因此是 best-effort，并通过
 `attemptsComplete: false` 明示不完整性。
+
+模型执行沿用 `model_requests.id`，上游身份沿用 `upstream_request_id`，不新增入口 ID 列或查询索引。
+API 的 `x-gateway-request-id` 标识模型执行；HTTP `x-request-id` 优先保留上游值，只有上游别名
+`x-oai-request-id` 时复用其值，两者均缺失时回传模型执行 ID。该规则属于客户端协议，不依赖所选
+Provider 或客户端名称。入口 middleware 的 ID 仍可用于入口日志，但不作为模型请求的主键或检索映射。
+失败终态及中间失败的上游请求 ID 优先取对应 `ProviderError`，缺失时再取该 attempt 的响应
+observation、调用 metadata；最终失败的关联头不与 opening 身份混合。HTTP 错误仍按既有合同
+返回已采集的 turn state 等允许的会话头，不为修复 ID 关联丢弃续接状态。
+
+正常路径的请求行仍在首次合法 ProviderStream 建立后随 attempt 合并创建。已进入 Core 执行会话、
+但在首次合法冷流建立前发生的无可用账号、准备失败、超时或取消，复用同一请求表补写失败终态与
+诊断快照；没有实际 attempt 时计数为零，账号与传输保持空值。Provider 的准备过程不得发送本次请求的
+上游握手或业务载荷，也不得启动独立发送任务；已合法登记冷流后，即使没有首事件也保留真实 attempt。
+不能因首写失败或缺少 metadata 而伪造零尝试、账号、传输或 `not_sent`。
+
+终态观测写入由会话持有；事件等待被取消后，后续 poll 或 detached finalizer 继续同一个 future，
+保留原结果及完成时间，不重复创建请求。观测写入失败仍为 best-effort，不阻断费用结算与准入释放。
+鉴权、解析、路由或准入等尚未进入执行会话的入口拒绝不纳入此请求记录边界；异步投影也仍可能延迟或
+丢弃。排障需结合入口日志，不能将“无记录”解释成没有发生错误。
 
 只有完整交付客户端的成功响应进入 Token、延迟和成本聚合。实际 `service_tier` 只接受上游响应事件确认，
 不能用请求期望值替代。
@@ -398,6 +443,9 @@ HTTP Client 构造失败也不会阻断网关启动。外部解析在已认证�
 - Provider 将安全诊断的阶段、原因码与消息独立于错误大类和发送状态传入 Core；
   `attempt.failed` 保存这些字段，最终错误记录优先持久化诊断消息。重试包装不能覆盖底层诊断，
   也不能因为错误更详细而改变已有重试安全边界。
+- 默认诊断区分 transport 采集的真实头部与用户 JSON；未知 map 的键和值均不原样保留，
+  嵌套的同名 header 不获得头部白名单权限。管理端反馈包只导出明确允许的关联、分类、阶段和计时，
+  不复制 trace 的事件 data，也不因历史 `sanitized` 标记而信任旧正文。
 - 真实 secret 不进入普通日志、Debug、fixture 或 audit details；明文只能通过账号导出、Key reveal、
   备份设置等明确的敏感 Admin 合同返回。
 - OAuth pending flow 使用有期限、带 owner 的一次性 claim；事务成功后才消费，失败释放 claim。
