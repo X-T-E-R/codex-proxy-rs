@@ -82,7 +82,7 @@ impl CodexWebSocketPool {
     }
 
     pub(super) fn spawn_maintenance_task(&self) {
-        let Some(interval_duration) = self.config.maintenance_interval else {
+        let Some(interval_duration) = self.config_snapshot().maintenance_interval else {
             return;
         };
         if interval_duration.is_zero() {
@@ -105,10 +105,10 @@ impl CodexWebSocketPool {
             return;
         }
         let inner = Arc::downgrade(&self.inner);
-        let config = self.config;
+        let config = Arc::clone(&self.config);
         let tasks = self.tasks.clone();
         let shutdown = self.shutdown.clone();
-        let connect_semaphore = Arc::clone(&self.connect_semaphore);
+        let connect_permits = Arc::clone(&self.connect_permits);
         let maintenance_started = Arc::clone(&self.maintenance_started);
         drop(self.tasks.spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
@@ -122,10 +122,10 @@ impl CodexWebSocketPool {
                 };
                 let pool = CodexWebSocketPool {
                     inner,
-                    config,
+                    config: Arc::clone(&config),
                     tasks: tasks.clone(),
                     shutdown: shutdown.clone(),
-                    connect_semaphore: Arc::clone(&connect_semaphore),
+                    connect_permits: Arc::clone(&connect_permits),
                     maintenance_started: Arc::clone(&maintenance_started),
                 };
                 if pool.is_shutdown().await {
@@ -145,25 +145,30 @@ impl CodexWebSocketPool {
         let mut close = Vec::new();
         let now = Instant::now();
         let mut state = self.lock_state();
-        if state.shutting_down || !self.config.enabled {
+        if state.shutting_down {
             return close;
         }
+        let config = self.config_snapshot();
+        let enabled = config.enabled;
+        let max_age = config.max_age;
         let keys = state
             .slots
             .iter()
             .filter_map(|(key, slot)| match slot {
+                // 运行期禁用池后，存量 idle 连接不会再被复用（acquire 已短路），
+                // 由维护任务统一关闭，避免闲置连接滞留在池中。
                 WebSocketPoolSlot::Idle { connection, .. }
-                    if should_close_idle_connection(connection, now, self.config.max_age) =>
+                    if !enabled || should_close_idle_connection(connection, now, max_age) =>
                 {
                     Some(key.clone())
                 }
                 WebSocketPoolSlot::Busy(reservation)
-                    if now.duration_since(reservation.reserved_at) >= self.config.max_age =>
+                    if now.duration_since(reservation.reserved_at) >= max_age =>
                 {
                     Some(key.clone())
                 }
                 WebSocketPoolSlot::Connecting(connecting)
-                    if now.duration_since(connecting.started_at) >= self.config.max_age =>
+                    if now.duration_since(connecting.started_at) >= max_age =>
                 {
                     Some(key.clone())
                 }

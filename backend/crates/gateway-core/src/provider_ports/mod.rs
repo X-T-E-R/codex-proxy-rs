@@ -866,6 +866,74 @@ pub trait ProviderRuntimePolicyPort: Send + Sync {
     ) -> BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>>;
 }
 
+/// 上游 WebSocket 连接池的运行策略事实；Core 只拥有稳定值与校验边界，
+/// 具体池语义由 Provider 自行解释。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderWebSocketPoolPolicy {
+    enabled: bool,
+    max_age: Duration,
+    max_connecting: NonZeroU32,
+    stream_idle_timeout: Duration,
+    fast_path_budget: Duration,
+}
+
+impl ProviderWebSocketPoolPolicy {
+    pub fn try_new(
+        enabled: bool,
+        max_age: Duration,
+        max_connecting: NonZeroU32,
+        stream_idle_timeout: Duration,
+        fast_path_budget: Duration,
+    ) -> Result<Self, ProviderStoreError> {
+        if max_age.is_zero() || stream_idle_timeout.is_zero() || fast_path_budget.is_zero() {
+            return Err(ProviderStoreError::new(
+                ProviderStoreErrorKind::InvalidData,
+                "validate WebSocket pool policy",
+            ));
+        }
+        Ok(Self {
+            enabled,
+            max_age,
+            max_connecting,
+            stream_idle_timeout,
+            fast_path_budget,
+        })
+    }
+
+    #[must_use]
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub const fn max_age(self) -> Duration {
+        self.max_age
+    }
+
+    #[must_use]
+    pub const fn max_connecting(self) -> NonZeroU32 {
+        self.max_connecting
+    }
+
+    #[must_use]
+    pub const fn stream_idle_timeout(self) -> Duration {
+        self.stream_idle_timeout
+    }
+
+    #[must_use]
+    pub const fn fast_path_budget(self) -> Duration {
+        self.fast_path_budget
+    }
+}
+
+/// Provider 周期拉取 WebSocket 连接池运行策略的端口；策略随 runtime_settings
+/// 原子替换，Provider 侧按周期对账换入，无需重启生效。
+pub trait ProviderWebSocketPoolPolicyPort: Send + Sync {
+    fn load_websocket_pool_policy(
+        &self,
+    ) -> BoxFuture<'_, Result<ProviderWebSocketPoolPolicy, ProviderStoreError>>;
+}
+
 /// OAuth pending flow 的原始绑定只在 Provider 与 Store 边界内短暂存在。
 #[derive(Clone, PartialEq, Eq)]
 pub struct OAuthPendingBinding(String);
@@ -1055,6 +1123,7 @@ pub struct ProviderStorePorts {
     credential_state: Arc<dyn ProviderCredentialStatePort>,
     cooldowns: Arc<dyn ProviderCooldownPort>,
     runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
+    ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
     oauth_pending: Arc<dyn OAuthPendingFlowPort>,
 }
 
@@ -1072,6 +1141,7 @@ impl ProviderStorePorts {
         credential_state: Arc<dyn ProviderCredentialStatePort>,
         cooldowns: Arc<dyn ProviderCooldownPort>,
         runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
+        ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
         oauth_pending: Arc<dyn OAuthPendingFlowPort>,
     ) -> Self {
         Self {
@@ -1085,6 +1155,7 @@ impl ProviderStorePorts {
             credential_state,
             cooldowns,
             runtime_policy,
+            ws_pool_policy,
             oauth_pending,
         }
     }
@@ -1137,6 +1208,11 @@ impl ProviderStorePorts {
     #[must_use]
     pub fn runtime_policy(&self) -> Arc<dyn ProviderRuntimePolicyPort> {
         Arc::clone(&self.runtime_policy)
+    }
+
+    #[must_use]
+    pub fn ws_pool_policy(&self) -> Arc<dyn ProviderWebSocketPoolPolicyPort> {
+        Arc::clone(&self.ws_pool_policy)
     }
 
     #[must_use]

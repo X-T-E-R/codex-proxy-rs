@@ -50,7 +50,12 @@ fn update_body() -> Value {
         "minCodexCliVersion": "0.40.0",
         "usageRetentionDays": 32,
         "opsEventRetentionDays": 31,
-        "auditRetentionDays": 91
+        "auditRetentionDays": 91,
+        "wsPoolEnabled": true,
+        "wsPoolMaxAgeMs": 3_600_000,
+        "wsPoolMaxConnecting": 6,
+        "wsPoolStreamIdleTimeoutMs": 240_000,
+        "wsPoolFastPathBudgetMs": 1_200
     })
 }
 
@@ -75,6 +80,147 @@ fn settings_request_should_reject_non_semver_client_min() {
         request.validate().unwrap_err().field(),
         "minCodexCliVersion"
     );
+}
+
+#[test]
+fn settings_request_should_reject_zero_ws_pool_numeric_fields() {
+    // 四个 wsPool 数值字段任一为 0 都在 wire 层按字段名拒绝，不进入 store。
+    for field in [
+        "wsPoolMaxAgeMs",
+        "wsPoolMaxConnecting",
+        "wsPoolStreamIdleTimeoutMs",
+        "wsPoolFastPathBudgetMs",
+    ] {
+        let mut body = update_body();
+        body[field] = json!(0);
+        let request: UpdateRuntimeSettingsRequest =
+            serde_json::from_value(body).expect("decode settings");
+
+        assert_eq!(
+            request.validate().unwrap_err().field(),
+            field,
+            "field {field}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn settings_post_should_reject_ws_pool_max_connecting_overflow() {
+    // maxConnecting 超过 u32 时命令转换失败，按 400 与固定中文消息返回。
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let mut body = update_body();
+    body["wsPoolMaxConnecting"] = json!(u64::from(u32::MAX) + 1);
+    let response = app(fixture.state())
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .expect("settings update response");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload = response_json(response).await;
+    assert_eq!(payload["message"], json!("wsPoolMaxConnecting 不合法"));
+}
+
+#[tokio::test]
+async fn settings_post_should_reject_invalid_ws_pool_durations_without_mutation() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let router = app(fixture.state());
+    let before = response_json(
+        router
+            .clone()
+            .oneshot(request(Method::GET, "/api/admin/settings", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    for field in [
+        "wsPoolMaxAgeMs",
+        "wsPoolStreamIdleTimeoutMs",
+        "wsPoolFastPathBudgetMs",
+    ] {
+        for (value, status) in [
+            (json!(0), StatusCode::BAD_REQUEST),
+            (json!(-1), StatusCode::UNPROCESSABLE_ENTITY),
+            (json!(1.5), StatusCode::UNPROCESSABLE_ENTITY),
+            (json!(i64::MAX as u64 + 1), StatusCode::BAD_REQUEST),
+        ] {
+            let mut body = update_body();
+            body[field] = value;
+            let response = router
+                .clone()
+                .oneshot(request(
+                    Method::POST,
+                    "/api/admin/settings/update",
+                    Some(body),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "{field}");
+        }
+    }
+    let after = response_json(
+        router
+            .oneshot(request(Method::GET, "/api/admin/settings", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        before, after,
+        "rejected settings must preserve the saved values"
+    );
+}
+
+#[tokio::test]
+async fn settings_post_should_require_all_ws_pool_fields_without_resetting_values() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let router = app(fixture.state());
+    let before = response_json(
+        router
+            .clone()
+            .oneshot(request(Method::GET, "/api/admin/settings", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    for field in [
+        "wsPoolEnabled",
+        "wsPoolMaxAgeMs",
+        "wsPoolMaxConnecting",
+        "wsPoolStreamIdleTimeoutMs",
+        "wsPoolFastPathBudgetMs",
+    ] {
+        let mut body = update_body();
+        body.as_object_mut().unwrap().remove(field);
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/admin/settings/update",
+                Some(body),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{field}"
+        );
+    }
+    let after = response_json(
+        router
+            .oneshot(request(Method::GET, "/api/admin/settings", None))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(before, after);
 }
 
 #[test]
@@ -110,6 +256,11 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         usage_retention_days: 32,
         ops_event_retention_days: 31,
         audit_retention_days: 91,
+        ws_pool_enabled: true,
+        ws_pool_max_age_ms: 3_600_000,
+        ws_pool_max_connecting: 6,
+        ws_pool_stream_idle_timeout_ms: 240_000,
+        ws_pool_fast_path_budget_ms: 1_200,
         updated_at: Utc
             .with_ymd_and_hms(2026, 8, 2, 10, 30, 0)
             .single()
@@ -134,6 +285,11 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "usageRetentionDays": 32,
             "opsEventRetentionDays": 31,
             "auditRetentionDays": 91,
+            "wsPoolEnabled": true,
+            "wsPoolMaxAgeMs": 3_600_000,
+            "wsPoolMaxConnecting": 6,
+            "wsPoolStreamIdleTimeoutMs": 240_000,
+            "wsPoolFastPathBudgetMs": 1_200,
             "updatedAt": "2026-08-02T10:30:00Z"
         })
     );
@@ -183,6 +339,11 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         usage_retention_days: u32::try_from(request.usage_retention_days).expect("u32"),
         ops_event_retention_days: u32::try_from(request.ops_event_retention_days).expect("u32"),
         audit_retention_days: u32::try_from(request.audit_retention_days).expect("u32"),
+        ws_pool_enabled: request.ws_pool_enabled,
+        ws_pool_max_age_ms: request.ws_pool_max_age_ms,
+        ws_pool_max_connecting: u32::try_from(request.ws_pool_max_connecting).expect("u32"),
+        ws_pool_stream_idle_timeout_ms: request.ws_pool_stream_idle_timeout_ms,
+        ws_pool_fast_path_budget_ms: request.ws_pool_fast_path_budget_ms,
         updated_at: chrono::Utc::now(),
     };
 
@@ -253,6 +414,9 @@ async fn settings_post_should_replace_global_model_mappings() {
     assert!(data.get("configRevision").is_none());
     assert_eq!(data["modelMappings"]["gpt-5.4"], "gpt-5.5");
     assert_eq!(data["modelMappings"]["grok-latest"], "grok-4.5");
+    // ws_pool 字段经过 wire 校验与设置用例后完整返回；这里的 store 是内存 fixture。
+    assert_eq!(data["wsPoolMaxConnecting"], json!(6));
+    assert_eq!(data["wsPoolFastPathBudgetMs"], json!(1_200));
 }
 
 #[tokio::test]

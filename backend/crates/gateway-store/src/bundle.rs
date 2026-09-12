@@ -187,6 +187,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         artifact_profiles,
         credential_state,
         cooldowns,
+        runtime_policy.clone(),
         runtime_policy,
         oauth_pending,
     );

@@ -43,6 +43,11 @@ pub struct RuntimeSettingsView {
     pub usage_retention_days: u64,
     pub ops_event_retention_days: u64,
     pub audit_retention_days: u64,
+    pub ws_pool_enabled: bool,
+    pub ws_pool_max_age_ms: u64,
+    pub ws_pool_max_connecting: u64,
+    pub ws_pool_stream_idle_timeout_ms: u64,
+    pub ws_pool_fast_path_budget_ms: u64,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -61,6 +66,11 @@ pub struct UpdateRuntimeSettingsRequest {
     pub usage_retention_days: u64,
     pub ops_event_retention_days: u64,
     pub audit_retention_days: u64,
+    pub ws_pool_enabled: bool,
+    pub ws_pool_max_age_ms: u64,
+    pub ws_pool_max_connecting: u64,
+    pub ws_pool_stream_idle_timeout_ms: u64,
+    pub ws_pool_fast_path_budget_ms: u64,
 }
 
 impl UpdateRuntimeSettingsRequest {
@@ -74,6 +84,13 @@ impl UpdateRuntimeSettingsRequest {
             (self.usage_retention_days, "usageRetentionDays"),
             (self.ops_event_retention_days, "opsEventRetentionDays"),
             (self.audit_retention_days, "auditRetentionDays"),
+            (self.ws_pool_max_age_ms, "wsPoolMaxAgeMs"),
+            (self.ws_pool_max_connecting, "wsPoolMaxConnecting"),
+            (
+                self.ws_pool_stream_idle_timeout_ms,
+                "wsPoolStreamIdleTimeoutMs",
+            ),
+            (self.ws_pool_fast_path_budget_ms, "wsPoolFastPathBudgetMs"),
         ] {
             require_positive_i64(value, field)?;
         }
@@ -114,6 +131,12 @@ impl UpdateRuntimeSettingsRequest {
                 .map_err(|_| WireValidationError::new("settingsOpsRetentionOverflow"))?,
             audit_retention_days: u32::try_from(self.audit_retention_days)
                 .map_err(|_| WireValidationError::new("settingsAuditRetentionOverflow"))?,
+            ws_pool_enabled: self.ws_pool_enabled,
+            ws_pool_max_age_ms: self.ws_pool_max_age_ms,
+            ws_pool_max_connecting: u32::try_from(self.ws_pool_max_connecting)
+                .map_err(|_| WireValidationError::new("settingsWsPoolMaxConnectingOverflow"))?,
+            ws_pool_stream_idle_timeout_ms: self.ws_pool_stream_idle_timeout_ms,
+            ws_pool_fast_path_budget_ms: self.ws_pool_fast_path_budget_ms,
         })
     }
 }
@@ -132,6 +155,11 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
             usage_retention_days: u64::from(settings.usage_retention_days),
             ops_event_retention_days: u64::from(settings.ops_event_retention_days),
             audit_retention_days: u64::from(settings.audit_retention_days),
+            ws_pool_enabled: settings.ws_pool_enabled,
+            ws_pool_max_age_ms: settings.ws_pool_max_age_ms,
+            ws_pool_max_connecting: u64::from(settings.ws_pool_max_connecting),
+            ws_pool_stream_idle_timeout_ms: settings.ws_pool_stream_idle_timeout_ms,
+            ws_pool_fast_path_budget_ms: settings.ws_pool_fast_path_budget_ms,
             updated_at: settings.updated_at,
         }
     }
@@ -434,6 +462,7 @@ fn map_wire_error(error: WireValidationError) -> AdminError {
         "settingsUsageRetentionOverflow" => "usageRetentionDays 不合法".to_owned(),
         "settingsOpsRetentionOverflow" => "opsEventRetentionDays 不合法".to_owned(),
         "settingsAuditRetentionOverflow" => "auditRetentionDays 不合法".to_owned(),
+        "settingsWsPoolMaxConnectingOverflow" => "wsPoolMaxConnecting 不合法".to_owned(),
         "minCodexDesktopVersion" => "Codex Desktop 最低版本格式不合法".to_owned(),
         "minCodexCliVersion" => "Codex CLI 最低版本格式不合法".to_owned(),
         field => format!("{field} 字段不合法"),

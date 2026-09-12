@@ -29,6 +29,11 @@ pub struct RuntimeSettings {
     pub usage_retention_days: u32,
     pub ops_event_retention_days: u32,
     pub audit_retention_days: u32,
+    pub ws_pool_enabled: bool,
+    pub ws_pool_max_age_ms: u64,
+    pub ws_pool_max_connecting: u32,
+    pub ws_pool_stream_idle_timeout_ms: u64,
+    pub ws_pool_fast_path_budget_ms: u64,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -46,6 +51,11 @@ pub struct ReplaceRuntimeSettings {
     pub usage_retention_days: u32,
     pub ops_event_retention_days: u32,
     pub audit_retention_days: u32,
+    pub ws_pool_enabled: bool,
+    pub ws_pool_max_age_ms: u64,
+    pub ws_pool_max_connecting: u32,
+    pub ws_pool_stream_idle_timeout_ms: u64,
+    pub ws_pool_fast_path_budget_ms: u64,
 }
 
 /// 明文管理员 API Key；按产品约束明文落库，但禁止 Debug 泄漏。

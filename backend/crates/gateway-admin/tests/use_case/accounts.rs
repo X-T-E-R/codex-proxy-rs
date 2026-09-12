@@ -846,6 +846,11 @@ impl SettingsStore for StaticSettingsStore {
             usage_retention_days: 30,
             ops_event_retention_days: 30,
             audit_retention_days: 30,
+            ws_pool_enabled: true,
+            ws_pool_max_age_ms: 3_300_000,
+            ws_pool_max_connecting: 8,
+            ws_pool_stream_idle_timeout_ms: 300_000,
+            ws_pool_fast_path_budget_ms: 800,
             updated_at: Utc::now(),
         })
     }

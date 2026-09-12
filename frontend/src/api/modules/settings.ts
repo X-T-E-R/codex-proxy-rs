@@ -14,6 +14,11 @@ export interface RuntimeSettings {
   usageRetentionDays: number
   opsEventRetentionDays: number
   auditRetentionDays: number
+  wsPoolEnabled: boolean
+  wsPoolMaxAgeMs: number
+  wsPoolMaxConnecting: number
+  wsPoolStreamIdleTimeoutMs: number
+  wsPoolFastPathBudgetMs: number
   updatedAt: string
 }
 

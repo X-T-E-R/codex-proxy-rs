@@ -47,8 +47,28 @@ impl SettingsStore for UnusedSettingsStore {
     }
 }
 
-#[tokio::test]
-async fn settings_should_reject_zero_refresh_margin_before_store_call() {
+fn valid_replace_command() -> ReplaceRuntimeSettings {
+    ReplaceRuntimeSettings {
+        model_mappings: Default::default(),
+        refresh_margin_seconds: 3_600,
+        refresh_concurrency: 1,
+        max_concurrent_per_account: 1,
+        request_interval_ms: 0,
+        rotation_strategy: RotationStrategy::Smart,
+        min_codex_desktop_version: None,
+        min_codex_cli_version: None,
+        usage_retention_days: 31,
+        ops_event_retention_days: 30,
+        audit_retention_days: 30,
+        ws_pool_enabled: true,
+        ws_pool_max_age_ms: 3_300_000,
+        ws_pool_max_connecting: 8,
+        ws_pool_stream_idle_timeout_ms: 300_000,
+        ws_pool_fast_path_budget_ms: 800,
+    }
+}
+
+async fn replace_and_expect_invalid(command: ReplaceRuntimeSettings) {
     let services = super::AdminHarness::new()
         .settings(std::sync::Arc::new(UnusedSettingsStore))
         .build()
@@ -60,24 +80,42 @@ async fn settings_should_reject_zero_refresh_margin_before_store_call() {
                 actor: gateway_admin::model::MutationActor::System,
                 request_id: "request-settings".to_owned(),
             },
-            ReplaceRuntimeSettings {
-                model_mappings: Default::default(),
-                refresh_margin_seconds: 0,
-                refresh_concurrency: 1,
-                max_concurrent_per_account: 1,
-                request_interval_ms: 0,
-                rotation_strategy: RotationStrategy::Smart,
-                min_codex_desktop_version: None,
-                min_codex_cli_version: None,
-                usage_retention_days: 31,
-                ops_event_retention_days: 30,
-                audit_retention_days: 30,
-            },
+            command,
         )
         .await
         .expect_err("invalid settings");
 
     assert_eq!(error.kind(), AdminErrorKind::Invalid);
+}
+
+#[tokio::test]
+async fn settings_should_reject_zero_refresh_margin_before_store_call() {
+    replace_and_expect_invalid(ReplaceRuntimeSettings {
+        refresh_margin_seconds: 0,
+        ..valid_replace_command()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn settings_should_reject_zero_ws_pool_values_before_store_call() {
+    // 四个 ws_pool 数值字段任一归零都必须在到达 store 前拒绝。
+    for mutate in [
+        (|command: &mut ReplaceRuntimeSettings| command.ws_pool_max_age_ms = 0)
+            as fn(&mut ReplaceRuntimeSettings),
+        (|command: &mut ReplaceRuntimeSettings| command.ws_pool_max_connecting = 0)
+            as fn(&mut ReplaceRuntimeSettings),
+        (|command: &mut ReplaceRuntimeSettings| {
+            command.ws_pool_stream_idle_timeout_ms = 0;
+        }) as fn(&mut ReplaceRuntimeSettings),
+        (|command: &mut ReplaceRuntimeSettings| {
+            command.ws_pool_fast_path_budget_ms = 0;
+        }) as fn(&mut ReplaceRuntimeSettings),
+    ] {
+        let mut command = valid_replace_command();
+        mutate(&mut command);
+        replace_and_expect_invalid(command).await;
+    }
 }
 
 fn unused() -> AdminStoreError {

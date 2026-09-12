@@ -62,6 +62,7 @@ pub async fn initialize(
     let session_exclusions = ports.session_exclusions();
     let account_feedback = ports.account_feedback();
     let runtime_policy = ports.runtime_policy();
+    let ws_pool_policy = ports.ws_pool_policy();
     let credential_state = ports.credential_state();
     let profile = config.wire_profile_state();
     let artifact_cache =
@@ -96,9 +97,15 @@ pub async fn initialize(
     ));
     let desktop_release_status = desktop_release.status();
     let repository = CodexCredentialRepository::new(Arc::clone(&accounts));
+    // 在接收请求前恢复已保存的策略，避免重启后短暂使用 YAML 的旧值。
+    let initial_ws_pool_policy = ws_pool_policy
+        .load_websocket_pool_policy()
+        .await
+        .map_err(|_| OpenAiInitializeError::RuntimePolicy)?;
     let websocket_pool = Arc::new(CodexWebSocketPool::with_config(
         config.websocket_pool_config(),
     ));
+    websocket_pool.apply_runtime_policy(initial_ws_pool_policy);
     let catalog = Arc::new(CodexCredentialCatalogService::new(
         repository.clone(),
         profile.clone(),
@@ -194,7 +201,7 @@ pub async fn initialize(
             quota: Arc::clone(&quota),
             catalog: Arc::clone(&catalog),
         },
-        websocket_pool,
+        Arc::clone(&websocket_pool),
         desktop_release_status,
     ));
     let worker_contributions = provider::worker_contributions(
@@ -204,6 +211,8 @@ pub async fn initialize(
         config.quota_refresh_policy(),
         config.oauth_refresh_enabled(),
         desktop_release,
+        websocket_pool,
+        ws_pool_policy,
     )
     .map_err(|_| OpenAiInitializeError::Worker)?;
 

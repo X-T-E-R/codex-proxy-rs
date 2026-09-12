@@ -169,6 +169,9 @@ impl CodexApiConfig {
 }
 
 /// Codex Responses WebSocket pool 的 Provider-owned 启动设置。
+///
+/// 这些值只是进程启动期的引导默认：DB 的 runtime_settings 加载完成后，
+/// 池策略以运行设置为准并支持免重启换入。
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodexWebSocketPoolSettings {
@@ -176,6 +179,13 @@ pub struct CodexWebSocketPoolSettings {
     pub max_age_ms: u64,
     pub max_connecting: usize,
     pub stream_idle_timeout_ms: u64,
+    // 后加的字段必须带 serde 默认值，否则已部署的 config.yaml 无法启动。
+    #[serde(default = "default_fast_path_budget_ms")]
+    pub fast_path_budget_ms: u64,
+}
+
+const fn default_fast_path_budget_ms() -> u64 {
+    crate::transport::websocket::DEFAULT_FAST_PATH_BUDGET_MS
 }
 
 impl Default for CodexWebSocketPoolSettings {
@@ -185,13 +195,14 @@ impl Default for CodexWebSocketPoolSettings {
             max_age_ms: 55 * 60 * 1000,
             max_connecting: 8,
             stream_idle_timeout_ms: 300_000,
+            fast_path_budget_ms: default_fast_path_budget_ms(),
         }
     }
 }
 
 impl CodexWebSocketPoolSettings {
     fn validate(&self) -> Result<(), OpenAiConfigError> {
-        if self.max_age_ms == 0 || self.max_connecting == 0 {
+        if self.max_age_ms == 0 || self.max_connecting == 0 || self.fast_path_budget_ms == 0 {
             return Err(OpenAiConfigError::InvalidField("openai.ws_pool"));
         }
         Ok(())
@@ -204,6 +215,7 @@ impl CodexWebSocketPoolSettings {
             max_connecting: self.max_connecting,
             stream_idle_timeout: (self.stream_idle_timeout_ms != 0)
                 .then(|| Duration::from_millis(self.stream_idle_timeout_ms)),
+            fast_path_budget: Duration::from_millis(self.fast_path_budget_ms),
             ..CodexWebSocketPoolConfig::default()
         }
     }

@@ -14,6 +14,7 @@ import ClientVersionSettings from './components/client-version/index.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
+import WebSocketPoolCard from './components/WebSocketPoolCard.vue'
 import { useAdminApiKey } from './composables/useAdminApiKey'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { rotationOptions } from './constants'
@@ -49,6 +50,11 @@ const {
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
   requestIntervalMsValue,
+  wsPoolMaxAgeMsValue,
+  wsPoolMaxConnectingValue,
+  wsPoolStreamIdleTimeoutMsValue,
+  wsPoolFastPathBudgetMsValue,
+  wsPoolErrors,
   minCodexDesktopVersionError,
   minCodexCliVersionError,
   saveSettings,
@@ -127,6 +133,16 @@ watch(
         v-model:refresh-margin-seconds="refreshMarginSecondsValue"
         v-model:refresh-concurrency="refreshConcurrencyValue"
         v-model:request-interval-ms="requestIntervalMsValue"
+      />
+
+      <WebSocketPoolCard
+        v-model:ws-pool-enabled="form.wsPoolEnabled"
+        v-model:ws-pool-max-age-ms="wsPoolMaxAgeMsValue"
+        v-model:ws-pool-max-connecting="wsPoolMaxConnectingValue"
+        v-model:ws-pool-stream-idle-timeout-ms="wsPoolStreamIdleTimeoutMsValue"
+        v-model:ws-pool-fast-path-budget-ms="wsPoolFastPathBudgetMsValue"
+        :disabled="loading || saving"
+        :errors="wsPoolErrors"
       />
 
       <ClientVersionSettings

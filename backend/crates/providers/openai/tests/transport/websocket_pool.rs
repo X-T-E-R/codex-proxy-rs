@@ -1,5 +1,19 @@
 use super::*;
+use gateway_core::provider_ports::ProviderWebSocketPoolPolicy;
 use provider_openai::transport::websocket::PreviousResponseUnavailableReason;
+use std::num::NonZeroU32;
+
+// DB 下发的池运行策略；数值与系统设置页默认值对齐，测试按需覆写单个字段。
+fn ws_pool_policy(enabled: bool, max_connecting: u32) -> ProviderWebSocketPoolPolicy {
+    ProviderWebSocketPoolPolicy::try_new(
+        enabled,
+        Duration::from_millis(3_300_000),
+        NonZeroU32::new(max_connecting).expect("max_connecting must be non-zero"),
+        Duration::from_millis(300_000),
+        Duration::from_millis(800),
+    )
+    .expect("websocket pool policy should be valid")
+}
 
 #[tokio::test]
 async fn codex_backend_client_should_reuse_pooled_websocket_for_same_account_and_conversation() {
@@ -585,6 +599,236 @@ async fn codex_backend_client_stream_should_use_http_when_connecting_limit_is_ex
 }
 
 #[tokio::test]
+async fn codex_backend_client_stream_should_use_http_when_pool_is_disabled_at_runtime() {
+    // 启动配置里连接池可用；DB 运行策略换入 enabled=false 后新请求立即回退 HTTP，
+    // 无需重启进程或重建客户端。
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted_connections = Arc::new(AtomicUsize::new(0));
+    let accepted_connections_for_server = Arc::clone(&accepted_connections);
+    let server = tokio::spawn(async move {
+        let (mut first_stream, _) = listener.accept().await.unwrap();
+        accepted_connections_for_server.fetch_add(1, Ordering::SeqCst);
+        let request = read_http_request(&mut first_stream).await;
+        assert!(request.starts_with("POST /codex/responses HTTP/1.1"));
+        write_completed_sse_response(&mut first_stream).await;
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
+        stream_idle_timeout: Some(Duration::from_millis(200)),
+        ..websocket_pool_config_for_tests(None, None, None)
+    }));
+    pool.apply_runtime_policy(ws_pool_policy(false, 8));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::clone(&pool));
+    let request = pooled_websocket_request("conversation-runtime-disabled");
+
+    let response = backend
+        .create_response_stream(
+            &request,
+            request_context("req_runtime_disabled", Some("chatgpt-account")),
+        )
+        .await
+        .expect("runtime-disabled pool should select HTTP before sending payload");
+    assert_eq!(response.transport, CodexBackendTransport::HttpSse);
+    assert_eq!(
+        response.transport_metrics.decision,
+        Some(CodexTransportDecision::Http2PoolUnavailable)
+    );
+    assert!(response.websocket_pool_decision.is_none());
+    let mut stream = response.body;
+    let mut body = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.expect("HTTP fallback stream chunk should be valid");
+        body.push_str(std::str::from_utf8(&chunk).unwrap());
+    }
+    server.await.unwrap();
+
+    assert!(body.contains("response.completed"));
+    assert_eq!(accepted_connections.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn codex_backend_client_should_resume_pooling_when_runtime_policy_reenables_pool() {
+    // enabled=false 换入后再换回 true：同一连接池不重建即恢复池化 WebSocket。
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        let _message = websocket.next().await.unwrap().unwrap();
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_pool_reenabled", 3, 1).into(),
+            ))
+            .await
+            .unwrap();
+        websocket.close(None).await.unwrap();
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(
+        websocket_pool_config_for_tests(None, None, None),
+    ));
+    pool.apply_runtime_policy(ws_pool_policy(false, 8));
+    pool.apply_runtime_policy(ws_pool_policy(true, 8));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::clone(&pool));
+    let request = pooled_websocket_request("conversation-pool-reenabled");
+
+    let response = backend
+        .create_response(
+            &request,
+            request_context("req_pool_reenabled", Some("chatgpt-account")),
+        )
+        .await
+        .expect("re-enabled pool should serve a pooled websocket response");
+    server.await.unwrap();
+
+    assert!(response.body.contains("resp_pool_reenabled"));
+    assert_eq!(response.transport, CodexBackendTransport::WebSocket);
+    assert_eq!(response.websocket_pool_decision.unwrap().kind(), "new");
+}
+
+#[tokio::test]
+async fn websocket_pool_should_use_runtime_fast_path_budget_before_sending_payload() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut opening, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut opening).await;
+        assert!(request.starts_with("GET /codex/responses HTTP/1.1"));
+        // 保持握手未完成，只有客户端自己的快路径预算能触发第二条 HTTP 请求。
+        let (mut fallback, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut fallback).await;
+        assert!(request.starts_with("POST /codex/responses HTTP/1.1"));
+        write_completed_sse_response(&mut fallback).await;
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(
+        websocket_pool_config_for_tests(None, None, None),
+    ));
+    pool.apply_runtime_policy(
+        ProviderWebSocketPoolPolicy::try_new(
+            true,
+            Duration::from_secs(60),
+            NonZeroU32::new(8).unwrap(),
+            Duration::from_secs(1),
+            Duration::from_millis(50),
+        )
+        .unwrap(),
+    );
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::clone(&pool));
+    let response = timeout(
+        // 启动值 800ms 会越过此边界；运行值 50ms 应在此之前回退并完成。
+        Duration::from_millis(500),
+        backend.create_response(
+            &pooled_websocket_request("runtime-fast-path"),
+            request_context("req_runtime_fast_path", Some("chatgpt-account")),
+        ),
+    )
+    .await
+    .expect("runtime budget should replace the 800ms startup budget")
+    .expect("HTTP fallback should complete");
+    assert_eq!(response.transport, CodexBackendTransport::HttpSse);
+    assert!(response.body.contains("resp_http_fallback"));
+    server.await.unwrap();
+    pool.shutdown().await;
+}
+
+#[tokio::test]
+async fn websocket_pool_should_freeze_timeout_before_connect_and_update_the_next_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (opening_tx, opening_rx) = tokio::sync::oneshot::channel();
+    let (continue_tx, continue_rx) = tokio::sync::oneshot::channel();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        opening_tx.send(()).unwrap();
+        continue_rx.await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket.next().await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_frozen", 2, 1).into(),
+            ))
+            .await
+            .unwrap();
+        websocket.next().await.unwrap().unwrap();
+        // 第二次请求不发业务帧，让它以更新后的空闲超时结束。
+        finish_rx.await.unwrap();
+        let _ = websocket.close(None).await;
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
+        stream_idle_timeout: Some(Duration::from_secs(1)),
+        ..websocket_pool_config_for_tests(None, None, None)
+    }));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::clone(&pool));
+    let request = pooled_websocket_request("runtime-timeout");
+    let update = async {
+        opening_rx.await.unwrap();
+        pool.apply_runtime_policy(
+            ProviderWebSocketPoolPolicy::try_new(
+                true,
+                Duration::from_secs(60),
+                NonZeroU32::new(8).unwrap(),
+                Duration::from_millis(20),
+                Duration::from_millis(800),
+            )
+            .unwrap(),
+        );
+        continue_tx.send(()).unwrap();
+    };
+    let (first, ()) = tokio::join!(
+        backend.create_response(
+            &request,
+            request_context("req_frozen", Some("chatgpt-account"))
+        ),
+        update
+    );
+    assert!(
+        first
+            .expect("in-flight request retains its 1s timeout")
+            .body
+            .contains("resp_frozen")
+    );
+    let error = timeout(
+        Duration::from_millis(500),
+        backend.create_response(
+            &request,
+            request_context("req_new_timeout", Some("chatgpt-account")),
+        ),
+    )
+    .await
+    .expect("new 20ms timeout should apply to the reused socket")
+    .expect_err("stalled request should fail");
+    std::assert_matches!(
+        error,
+        CodexClientError::WebSocket(CodexWebSocketExchangeError::PostSendAmbiguous { message, .. })
+            if message.contains("20ms")
+    );
+    finish_tx.send(()).unwrap();
+    server.await.unwrap();
+    pool.shutdown().await;
+}
+
+#[tokio::test]
 async fn codex_backend_client_should_not_reuse_pooled_websocket_across_local_accounts() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -826,6 +1070,75 @@ async fn account_eviction_should_let_busy_stream_finish_without_returning_it_to_
 }
 
 #[tokio::test]
+async fn runtime_disable_should_allow_active_stream_to_finish_and_close_its_socket() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket.next().await.unwrap().unwrap();
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.output_text.delta", "delta": "still running"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        finish_rx.await.unwrap();
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_runtime_disabled_inflight", 2, 1).into(),
+            ))
+            .await
+            .unwrap();
+        let close = timeout(Duration::from_secs(2), websocket.next())
+            .await
+            .expect("disabled pool must close the returned socket")
+            .expect("close frame")
+            .expect("valid close frame");
+        std::assert_matches!(close, Message::Close(_));
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(
+        websocket_pool_config_for_tests(None, None, None),
+    ));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(Arc::clone(&pool));
+    let mut response = backend
+        .create_response_stream(
+            &pooled_websocket_request("runtime-disable-inflight"),
+            request_context("req_disable_inflight", Some("chatgpt-account")),
+        )
+        .await
+        .unwrap();
+    let first = response.body.next().await.unwrap().unwrap();
+    assert!(
+        std::str::from_utf8(&first)
+            .unwrap()
+            .contains("still running")
+    );
+    pool.apply_runtime_policy(ws_pool_policy(false, 8));
+    pool.maintain_idle_connections().await;
+    finish_tx.send(()).unwrap();
+    let mut body = String::new();
+    while let Some(chunk) = response.body.next().await {
+        body.push_str(
+            std::str::from_utf8(&chunk.expect("in-flight stream must complete")).unwrap(),
+        );
+    }
+    assert!(body.contains("resp_runtime_disabled_inflight"));
+    server.await.unwrap();
+    pool.shutdown().await;
+}
+
+#[tokio::test]
 async fn websocket_pool_should_release_slot_when_client_drops_stream() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1053,11 +1366,39 @@ async fn websocket_pool_should_allow_all_openings_when_connect_permits_are_avail
     assert_eq!((websockets, http), (8, 0));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn websocket_pool_should_bound_concurrent_openings_after_runtime_shrink() {
+    // 启动上限 8；DB 运行策略把并发建连收紧到 2，不重建连接池即生效，
+    // 超出新上限的请求回退 HTTP。
+    let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
+        max_connecting: 8,
+        ..websocket_pool_config_for_tests(None, None, None)
+    }));
+    pool.apply_runtime_policy(ws_pool_policy(true, 2));
+
+    let (websockets, http) =
+        concurrent_pool_transport_counts_with_pool("runtime_shrink", pool).await;
+
+    assert_eq!((websockets, http), (2, 6));
+}
+
 async fn concurrent_pool_transport_counts(max_connecting: usize) -> (usize, usize) {
+    let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
+        max_connecting,
+        ..websocket_pool_config_for_tests(None, None, None)
+    }));
+    concurrent_pool_transport_counts_with_pool(&format!("cap_{max_connecting}"), pool).await
+}
+
+async fn concurrent_pool_transport_counts_with_pool(
+    label: &str,
+    pool: Arc<CodexWebSocketPool>,
+) -> (usize, usize) {
     const REQUEST_COUNT: usize = 8;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let label = label.to_owned();
     let server = tokio::spawn(async move {
         let mut websocket_streams = Vec::new();
         let mut http_count = 0;
@@ -1091,22 +1432,14 @@ async fn concurrent_pool_transport_counts(max_connecting: usize) -> (usize, usiz
             let _ = websocket.next().await.unwrap().unwrap();
             websocket
                 .send(Message::Text(
-                    completed_websocket_response(
-                        &format!("resp_connecting_cap_{max_connecting}_{index}"),
-                        2,
-                        1,
-                    )
-                    .into(),
+                    completed_websocket_response(&format!("resp_connecting_{label}_{index}"), 2, 1)
+                        .into(),
                 ))
                 .await
                 .unwrap();
         }
         (websocket_count, http_count)
     });
-    let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
-        max_connecting,
-        ..websocket_pool_config_for_tests(None, None, None)
-    }));
     let backend = CodexBackendClient::new(
         reqwest::Client::builder().no_proxy().build().unwrap(),
         format!("http://{addr}"),
@@ -1282,6 +1615,15 @@ async fn websocket_pool_should_replace_idle_connection_after_pong_deadline() {
 
 #[tokio::test]
 async fn websocket_pool_should_gc_expired_idle_connections() {
+    gc_expired_idle_connections(false).await;
+}
+
+#[tokio::test]
+async fn websocket_pool_should_apply_runtime_max_age_to_existing_idle_connections() {
+    gc_expired_idle_connections(true).await;
+}
+
+async fn gc_expired_idle_connections(runtime_update: bool) {
     const MAX_AGE: Duration = Duration::from_secs(30);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1319,7 +1661,7 @@ async fn websocket_pool_should_gc_expired_idle_connections() {
         second_websocket.close(None).await.unwrap();
     });
     let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
-        max_age: MAX_AGE,
+        max_age: if runtime_update { MAX_AGE * 2 } else { MAX_AGE },
         maintenance_interval: None,
         ping_interval: None,
         liveness_timeout: None,
@@ -1340,6 +1682,18 @@ async fn websocket_pool_should_gc_expired_idle_connections() {
         )
         .await
         .expect("first websocket response should succeed");
+    if runtime_update {
+        pool.apply_runtime_policy(
+            ProviderWebSocketPoolPolicy::try_new(
+                true,
+                MAX_AGE,
+                NonZeroU32::new(8).unwrap(),
+                Duration::from_secs(300),
+                Duration::from_millis(800),
+            )
+            .unwrap(),
+        );
+    }
     tokio::time::pause();
     tokio::time::advance(MAX_AGE).await;
     pool.maintain_idle_connections().await;

@@ -120,9 +120,16 @@ fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError>
         && command.usage_retention_days >= 31
         && command.ops_event_retention_days > 0
         && command.audit_retention_days > 0
+        && command.ws_pool_max_age_ms > 0
+        && command.ws_pool_max_connecting > 0
+        && command.ws_pool_stream_idle_timeout_ms > 0
+        && command.ws_pool_fast_path_budget_ms > 0
         && valid_client_version(command.min_codex_desktop_version.as_deref())
         && valid_client_version(command.min_codex_cli_version.as_deref())
-        && i64::try_from(command.request_interval_ms).is_ok();
+        && i64::try_from(command.request_interval_ms).is_ok()
+        && i64::try_from(command.ws_pool_max_age_ms).is_ok()
+        && i64::try_from(command.ws_pool_stream_idle_timeout_ms).is_ok()
+        && i64::try_from(command.ws_pool_fast_path_budget_ms).is_ok();
     if valid {
         Ok(())
     } else {

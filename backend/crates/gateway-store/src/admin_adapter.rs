@@ -50,6 +50,11 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                 usage_retention_days: command.usage_retention_days,
                 ops_event_retention_days: command.ops_event_retention_days,
                 audit_retention_days: command.audit_retention_days,
+                ws_pool_enabled: command.ws_pool_enabled,
+                ws_pool_max_age_ms: command.ws_pool_max_age_ms,
+                ws_pool_max_connecting: command.ws_pool_max_connecting,
+                ws_pool_stream_idle_timeout_ms: command.ws_pool_stream_idle_timeout_ms,
+                ws_pool_fast_path_budget_ms: command.ws_pool_fast_path_budget_ms,
             },
             audit: mutation_audit(
                 context,
@@ -66,6 +71,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                     "min_codex_desktop_version".to_owned(),
                     "min_codex_cli_version".to_owned(),
                     "retention".to_owned(),
+                    "ws_pool".to_owned(),
                 ],
             ),
         };
@@ -171,6 +177,11 @@ pub(crate) fn admin_runtime_settings(
         usage_retention_days: settings.usage_retention_days,
         ops_event_retention_days: settings.ops_event_retention_days,
         audit_retention_days: settings.audit_retention_days,
+        ws_pool_enabled: settings.ws_pool_enabled,
+        ws_pool_max_age_ms: settings.ws_pool_max_age_ms,
+        ws_pool_max_connecting: settings.ws_pool_max_connecting,
+        ws_pool_stream_idle_timeout_ms: settings.ws_pool_stream_idle_timeout_ms,
+        ws_pool_fast_path_budget_ms: settings.ws_pool_fast_path_budget_ms,
         updated_at: settings.updated_at,
     })
 }

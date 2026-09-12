@@ -1,5 +1,7 @@
 //! OpenAI Provider 向 Host 贡献的后台 worker。
 
+use gateway_core::provider_ports::ProviderWebSocketPoolPolicyPort;
+
 use super::*;
 
 pub(super) const WORKER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -8,10 +10,15 @@ pub(super) const WORKER_LEASE_TTL: Duration = Duration::from_secs(15 * 60);
 pub(super) const WORKER_LEASE_RENEWAL: Duration = Duration::from_secs(5 * 60);
 pub(super) const OAUTH_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 pub(super) const QUOTA_CHECK_INTERVAL: Duration = Duration::from_secs(30);
+/// 池策略对账周期与 Core 的运行快照对账（5 秒）同量级：设置提交后最迟
+/// 一个周期内换入，config.yaml 的启动值只是这之前的引导默认。
+pub(super) const WS_POOL_POLICY_SYNC_INTERVAL: Duration = Duration::from_secs(5);
 pub(super) const DESKTOP_RELEASE_WORKER_OWNER: &str = "openai-desktop-release";
 pub(super) const MODEL_ETAG_WORKER_OWNER: &str = "openai-model-etag";
 pub(super) const MODEL_CATALOG_WORKER_OWNER: &str = "openai-model-catalog";
+pub(super) const WS_POOL_POLICY_WORKER_OWNER: &str = "openai-websocket-pool";
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn worker_contributions(
     refresh: Arc<CodexCredentialRefreshService>,
     quota: Arc<CodexCredentialQuotaService>,
@@ -19,6 +26,8 @@ pub(crate) fn worker_contributions(
     quota_refresh_policy: CodexQuotaRefreshPolicy,
     oauth_refresh_enabled: bool,
     desktop_release: Arc<CodexDesktopReleaseService>,
+    websocket_pool: Arc<CodexWebSocketPool>,
+    ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
 ) -> Result<Vec<WorkerContribution>, WorkerDefinitionError> {
     let refresh_id = WorkerId::try_new(WorkerKind::OAuthRefresh, PROVIDER_NAME)?;
     let quota_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, PROVIDER_NAME)?;
@@ -26,6 +35,10 @@ pub(crate) fn worker_contributions(
     let etag_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, MODEL_ETAG_WORKER_OWNER)?;
     let desktop_release_id =
         WorkerId::try_new(WorkerKind::QuotaCatalogHealth, DESKTOP_RELEASE_WORKER_OWNER)?;
+    let ws_pool_policy_id = WorkerId::try_new(
+        WorkerKind::RuntimeSnapshotReconciliation,
+        WS_POOL_POLICY_WORKER_OWNER,
+    )?;
     let mut contributions = Vec::new();
     if oauth_refresh_enabled {
         contributions.push(WorkerContribution::Registration(scheduled_registration(
@@ -34,6 +47,26 @@ pub(crate) fn worker_contributions(
             Box::new(OpenAiOAuthRefreshTask { service: refresh }),
         )?));
     }
+    contributions.push(WorkerContribution::Registration(
+        // 每个实例都要同步自己的池，不能用 leader lease 只让单个实例生效。
+        WorkerRegistration::try_new(
+            ws_pool_policy_id,
+            WorkerRunnable::Scheduled {
+                schedule: WorkerSchedule::try_new(
+                    WS_POOL_POLICY_SYNC_INTERVAL,
+                    WORKER_INITIAL_BACKOFF,
+                    WORKER_MAXIMUM_BACKOFF,
+                    WORKER_LEASE_TTL,
+                    WORKER_LEASE_RENEWAL,
+                )?,
+                lease: None,
+                task: Box::new(OpenAiWebSocketPoolPolicyTask {
+                    pool: websocket_pool,
+                    policy: ws_pool_policy,
+                }),
+            },
+        )?,
+    ));
     contributions.extend([
         WorkerContribution::Registration(scheduled_registration(
             quota_id,
@@ -178,6 +211,35 @@ pub(super) struct OpenAiCatalogEtagTask {
 
 pub(super) struct OpenAiDesktopReleaseTask {
     service: Arc<CodexDesktopReleaseService>,
+}
+
+pub(super) struct OpenAiWebSocketPoolPolicyTask {
+    pool: Arc<CodexWebSocketPool>,
+    policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
+}
+
+impl ScheduledTask for OpenAiWebSocketPoolPolicyTask {
+    fn run_cycle(&self, context: WorkerCycleContext) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
+            if context.cancellation().is_cancelled() {
+                return Ok(());
+            }
+            match self.policy.load_websocket_pool_policy().await {
+                Ok(policy) => {
+                    self.pool.apply_runtime_policy(policy);
+                }
+                // 读取失败保留最近一次已知值：池在旧参数下仍可正确工作，
+                // 不放大成 worker 故障重启。
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "OpenAI WebSocket pool policy synchronization failed"
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
 }
 
 impl ScheduledTask for OpenAiDesktopReleaseTask {

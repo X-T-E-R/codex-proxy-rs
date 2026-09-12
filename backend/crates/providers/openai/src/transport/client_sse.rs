@@ -1,6 +1,9 @@
 use gateway_core::diagnostics::{StreamCapture, StreamFormat, TraceContext, diagnostic_json};
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures::{StreamExt, TryStreamExt};
 use gateway_protocol::openai::{
@@ -33,8 +36,8 @@ use crate::transport::{
     response_meta,
     websocket::{
         CodexWebSocketConnection, CodexWebSocketExchangeError, CodexWebSocketPool,
-        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, DEFAULT_STREAM_IDLE_TIMEOUT,
-        WEBSOCKET_FAST_PATH_BUDGET, WebSocketFastPath, WebSocketOriginBreaker,
+        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, DEFAULT_FAST_PATH_BUDGET_MS,
+        DEFAULT_STREAM_IDLE_TIMEOUT, WebSocketFastPath, WebSocketOriginBreaker,
         execute_prepared_response_create_request_stream, post_send_ambiguous,
         prepare_response_create_request_with_pool, websocket_audit_dir,
         write_websocket_audit_artifact_from_env,
@@ -271,9 +274,18 @@ impl CodexBackendClient {
             self.websocket_pool_key(request, context, pool_account_id, &connection_profile);
         let pool_log_context = pool_key.as_ref().map(WebSocketPoolLogContext::from_key);
         let pool = self.websocket_pool.as_deref().zip(pool_key);
+        // 快路径预算与流空闲超时都是 per-request 语义：按请求的当前运行参数读取，
+        // 设置换入后对新请求立即生效，进行中的请求保持原冻结值。
+        let pool_config = self
+            .websocket_pool
+            .as_deref()
+            .map(CodexWebSocketPool::config_snapshot);
         let fast_path_budget = match requirement {
             TransportRequirement::PersistedContinuation | TransportRequirement::NewChain => {
-                Some(WEBSOCKET_FAST_PATH_BUDGET)
+                Some(pool_config.map_or(
+                    Duration::from_millis(DEFAULT_FAST_PATH_BUDGET_MS),
+                    |config| config.fast_path_budget,
+                ))
             }
             TransportRequirement::ExplicitWebSocketWarmup
             | TransportRequirement::WebSocketNewChain
@@ -281,6 +293,9 @@ impl CodexBackendClient {
             | TransportRequirement::ExternalUnknown => None,
             TransportRequirement::HttpRequired => None,
         };
+        let stream_idle_timeout = pool_config
+            .and_then(|config| config.stream_idle_timeout)
+            .or(Some(DEFAULT_STREAM_IDLE_TIMEOUT));
         let prepare_started_at = Instant::now();
         let prepared = prepare_response_create_request_with_pool(
             &websocket_create,
@@ -289,7 +304,7 @@ impl CodexBackendClient {
             &self.websocket_origin_key,
             fast_path_budget,
             requirement.requires_websocket(),
-            Some(DEFAULT_STREAM_IDLE_TIMEOUT),
+            stream_idle_timeout,
         )
         .await;
         let prepared = match prepared {

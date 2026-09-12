@@ -7,7 +7,7 @@ use gateway_core::account::{
 };
 use gateway_core::provider_ports::{
     NewOAuthPendingFlow, OAuthPendingBinding, ProviderRefreshPolicy, ProviderSchedulingState,
-    ProviderSessionAffinityKey, ProviderStoreErrorKind,
+    ProviderSessionAffinityKey, ProviderStoreErrorKind, ProviderWebSocketPoolPolicy,
 };
 use gateway_core::routing::ProviderKind;
 
@@ -80,6 +80,52 @@ fn refresh_policy_should_mark_expired_tokens_due() {
     let observed_at = SystemTime::UNIX_EPOCH + Duration::from_secs(10_000);
 
     assert!(policy.is_refresh_due(observed_at - Duration::from_secs(1), observed_at));
+}
+
+#[test]
+fn websocket_pool_policy_rejects_zero_durations() {
+    // max_age / stream_idle_timeout / fast_path_budget 为 0 时池语义不成立。
+    let valid_max_connecting = NonZeroU32::new(8).expect("positive concurrency");
+    for (max_age, idle, budget) in [
+        (
+            Duration::ZERO,
+            Duration::from_secs(300),
+            Duration::from_millis(800),
+        ),
+        (
+            Duration::from_secs(3_300),
+            Duration::ZERO,
+            Duration::from_millis(800),
+        ),
+        (
+            Duration::from_secs(3_300),
+            Duration::from_secs(300),
+            Duration::ZERO,
+        ),
+    ] {
+        let error =
+            ProviderWebSocketPoolPolicy::try_new(true, max_age, valid_max_connecting, idle, budget)
+                .expect_err("zero duration must fail");
+        assert_eq!(error.kind(), ProviderStoreErrorKind::InvalidData);
+    }
+}
+
+#[test]
+fn websocket_pool_policy_round_trips_stable_values() {
+    let policy = ProviderWebSocketPoolPolicy::try_new(
+        false,
+        Duration::from_millis(3_300_000),
+        NonZeroU32::new(4).expect("positive concurrency"),
+        Duration::from_millis(120_000),
+        Duration::from_millis(3_000),
+    )
+    .expect("valid policy");
+
+    assert!(!policy.enabled());
+    assert_eq!(policy.max_age(), Duration::from_millis(3_300_000));
+    assert_eq!(policy.max_connecting().get(), 4);
+    assert_eq!(policy.stream_idle_timeout(), Duration::from_millis(120_000));
+    assert_eq!(policy.fast_path_budget(), Duration::from_millis(3_000));
 }
 
 #[test]

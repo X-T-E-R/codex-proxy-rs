@@ -357,6 +357,11 @@ impl SettingsStore for MemorySettingsStore {
             usage_retention_days: command.usage_retention_days,
             ops_event_retention_days: command.ops_event_retention_days,
             audit_retention_days: command.audit_retention_days,
+            ws_pool_enabled: command.ws_pool_enabled,
+            ws_pool_max_age_ms: command.ws_pool_max_age_ms,
+            ws_pool_max_connecting: command.ws_pool_max_connecting,
+            ws_pool_stream_idle_timeout_ms: command.ws_pool_stream_idle_timeout_ms,
+            ws_pool_fast_path_budget_ms: command.ws_pool_fast_path_budget_ms,
             updated_at: Utc::now(),
         };
         *settings = updated.clone();
@@ -1115,6 +1120,11 @@ fn test_runtime_settings() -> RuntimeSettings {
         usage_retention_days: 31,
         ops_event_retention_days: 30,
         audit_retention_days: 90,
+        ws_pool_enabled: true,
+        ws_pool_max_age_ms: 3_300_000,
+        ws_pool_max_connecting: 8,
+        ws_pool_stream_idle_timeout_ms: 300_000,
+        ws_pool_fast_path_budget_ms: 800,
         updated_at: Utc::now(),
     }
 }

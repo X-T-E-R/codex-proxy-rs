@@ -1,9 +1,6 @@
 //! WebSocket 连接池 reservation、handoff 与 lease 生命周期。
 
-use tokio::{
-    sync::{OwnedSemaphorePermit, watch},
-    time::Instant,
-};
+use tokio::{sync::watch, time::Instant};
 use tokio_util::{
     sync::CancellationToken,
     task::{TaskTracker, task_tracker::TaskTrackerToken},
@@ -11,7 +8,7 @@ use tokio_util::{
 use uuid::Uuid;
 
 use super::state::{CodexWebSocketPoolKey, PooledWebSocketConnection, WebSocketPoolReservation};
-use super::{CodexWebSocketPool, WebSocketPoolBypassReason};
+use super::{CodexWebSocketPool, WebSocketConnectPermit, WebSocketPoolBypassReason};
 use crate::transport::websocket::pump::WebSocketConnectionObservation;
 
 pub(crate) enum WebSocketPoolAcquire {
@@ -64,7 +61,7 @@ pub(crate) struct WebSocketPoolConnectLease {
     pub(super) cancellation: CancellationToken,
     // slot 分配时即注册，封闭 acquire 与后台 task spawn 之间的 shutdown 竞态。
     _task_registration: TaskTrackerToken,
-    _connect_permit: OwnedSemaphorePermit,
+    _connect_permit: WebSocketConnectPermit,
     armed: bool,
 }
 
@@ -72,7 +69,7 @@ impl WebSocketPoolConnectLease {
     pub(super) fn reserve(
         pool: CodexWebSocketPool,
         key: CodexWebSocketPoolKey,
-        connect_permit: OwnedSemaphorePermit,
+        connect_permit: WebSocketConnectPermit,
     ) -> Self {
         let (outcome, _) = watch::channel(WebSocketPoolConnectOutcome::Pending);
         let cancellation = pool.shutdown.child_token();

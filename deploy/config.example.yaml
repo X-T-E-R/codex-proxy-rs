@@ -62,7 +62,16 @@ api:
   request_id_header: 'x-request-id'
 
 openai:
-  # 上游地址、WebSocket 池、额度刷新和 OAuth 使用 Provider 内置默认值；模板只保留画像启动基线。
+  # 上游地址、额度刷新和 OAuth 使用 Provider 内置默认值；模板保留画像启动基线。
+  # WebSocket 连接池在管理端「系统设置 → WebSocket 连接池」调整，保存后约 5 秒内生效。
+  # 旧 ws_pool 配置仍可解析，但对外服务前会恢复数据库设置，不使用这里的值覆盖数据库。
+  # 迁移 0006 使用下列默认值；升级时如有旧的自定义参数，请在管理端重新保存。
+  # ws_pool:
+  #   enabled: true
+  #   max_age_ms: 3300000
+  #   max_connecting: 8
+  #   stream_idle_timeout_ms: 300000
+  #   fast_path_budget_ms: 800
   wire_profile:
     # 版本元组来自同一个官方 macOS Desktop ZIP；Provider 每 24 小时检查 appcast，
     # 仅在包内 Core 核验和 Redis 条件覆盖都成功后原子更新。
