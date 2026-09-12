@@ -28,9 +28,13 @@ export function useSettingsForm() {
     wsPoolMaxConnecting: null as number | null,
     wsPoolStreamIdleTimeoutMs: null as number | null,
     wsPoolFastPathBudgetMs: null as number | null,
+    overloadCooldownEnabled: false,
+    openaiUserAgent: '',
+    overloadCooldownThreshold: null as number | null,
+    overloadCooldownSeconds: null as number | null,
   })
 
-  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs') {
+  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs' | 'overloadCooldownThreshold' | 'overloadCooldownSeconds') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -52,6 +56,12 @@ export function useSettingsForm() {
   const wsPoolMaxConnectingValue = numericModel('wsPoolMaxConnecting')
   const wsPoolStreamIdleTimeoutMsValue = numericModel('wsPoolStreamIdleTimeoutMs')
   const wsPoolFastPathBudgetMsValue = numericModel('wsPoolFastPathBudgetMs')
+  const overloadCooldownThresholdValue = numericModel('overloadCooldownThreshold')
+  const overloadCooldownSecondsValue = numericModel('overloadCooldownSeconds')
+  const overloadCooldownErrors = computed(() => ({
+    threshold: positiveIntegerError(form.overloadCooldownThreshold, 4_294_967_295),
+    seconds: positiveIntegerError(form.overloadCooldownSeconds, 4_294_967_295),
+  }))
   const wsPoolErrors = computed(() => ({
     maxAge: positiveIntegerError(form.wsPoolMaxAgeMs),
     maxConnecting: positiveIntegerError(form.wsPoolMaxConnecting, 4_294_967_295),
@@ -60,6 +70,12 @@ export function useSettingsForm() {
   }))
   const minCodexDesktopVersionError = computed(() => versionError(form.minCodexDesktopVersion))
   const minCodexCliVersionError = computed(() => versionError(form.minCodexCliVersion))
+  const openaiUserAgentError = computed(() => {
+    const value = form.openaiUserAgent.trim()
+    return value && (value.length > 512 || !/^[\x20-\x7E]+$/.test(value))
+      ? '请输入最多 512 个可打印 ASCII 字符，不含换行'
+      : ''
+  })
 
   function positiveIntegerError(value: number | null, max = Number.MAX_SAFE_INTEGER): string {
     if (loading.value)
@@ -90,6 +106,10 @@ export function useSettingsForm() {
     form.wsPoolMaxConnecting = data.wsPoolMaxConnecting
     form.wsPoolStreamIdleTimeoutMs = data.wsPoolStreamIdleTimeoutMs
     form.wsPoolFastPathBudgetMs = data.wsPoolFastPathBudgetMs
+    form.overloadCooldownEnabled = data.overloadCooldownEnabled
+    form.overloadCooldownThreshold = data.overloadCooldownThreshold
+    form.overloadCooldownSeconds = data.overloadCooldownSeconds
+    form.openaiUserAgent = data.openaiUserAgent ?? ''
     mappings.value = Object.entries(data.modelMappings || {}).map(([requestedModel, upstreamModel]) => ({
       requestedModel,
       upstreamModel: String(upstreamModel),
@@ -146,7 +166,7 @@ export function useSettingsForm() {
   async function saveSettings() {
     if (saving.value || loading.value)
       return
-    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs } = form
+    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs, overloadCooldownThreshold, overloadCooldownSeconds } = form
     if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy) {
       toast.warning('请完整填写运行参数和调度策略')
       return
@@ -159,8 +179,16 @@ export function useSettingsForm() {
       toast.warning('请修正 WebSocket 连接池参数')
       return
     }
+    if (overloadCooldownThreshold === null || overloadCooldownSeconds === null || Object.values(overloadCooldownErrors.value).some(Boolean)) {
+      toast.warning('请修正过载冷号参数')
+      return
+    }
     if (minCodexDesktopVersionError.value || minCodexCliVersionError.value) {
       toast.warning('请修正客户端最低版本格式')
+      return
+    }
+    if (openaiUserAgentError.value) {
+      toast.warning('请修正上游 User-Agent')
       return
     }
     try {
@@ -182,6 +210,10 @@ export function useSettingsForm() {
         wsPoolMaxConnecting,
         wsPoolStreamIdleTimeoutMs,
         wsPoolFastPathBudgetMs,
+        overloadCooldownEnabled: form.overloadCooldownEnabled,
+        overloadCooldownThreshold,
+        overloadCooldownSeconds,
+        openaiUserAgent: form.openaiUserAgent.trim() || null,
       })
       applySettings(result)
       toast.success('设置已保存')
@@ -214,6 +246,10 @@ export function useSettingsForm() {
     wsPoolStreamIdleTimeoutMsValue,
     wsPoolFastPathBudgetMsValue,
     wsPoolErrors,
+    overloadCooldownThresholdValue,
+    overloadCooldownSecondsValue,
+    overloadCooldownErrors,
+    openaiUserAgentError,
     minCodexDesktopVersionError,
     minCodexCliVersionError,
     saveSettings,

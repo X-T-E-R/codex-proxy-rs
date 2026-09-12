@@ -12,8 +12,10 @@ import AdminApiKeyCard from './components/AdminApiKeyCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
 import ClientVersionSettings from './components/client-version/index.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
+import OverloadCooldownCard from './components/OverloadCooldownCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
+import UserAgentCard from './components/UserAgentCard.vue'
 import WebSocketPoolCard from './components/WebSocketPoolCard.vue'
 import { useAdminApiKey } from './composables/useAdminApiKey'
 import { useSettingsForm } from './composables/useSettingsForm'
@@ -55,6 +57,10 @@ const {
   wsPoolStreamIdleTimeoutMsValue,
   wsPoolFastPathBudgetMsValue,
   wsPoolErrors,
+  overloadCooldownThresholdValue,
+  overloadCooldownSecondsValue,
+  overloadCooldownErrors,
+  openaiUserAgentError,
   minCodexDesktopVersionError,
   minCodexCliVersionError,
   saveSettings,
@@ -143,6 +149,20 @@ watch(
         v-model:ws-pool-fast-path-budget-ms="wsPoolFastPathBudgetMsValue"
         :disabled="loading || saving"
         :errors="wsPoolErrors"
+      />
+
+      <OverloadCooldownCard
+        v-model:enabled="form.overloadCooldownEnabled"
+        v-model:threshold="overloadCooldownThresholdValue"
+        v-model:seconds="overloadCooldownSecondsValue"
+        :disabled="loading || saving"
+        :errors="overloadCooldownErrors"
+      />
+
+      <UserAgentCard
+        v-model="form.openaiUserAgent"
+        :disabled="loading || saving"
+        :error="openaiUserAgentError"
       />
 
       <ClientVersionSettings

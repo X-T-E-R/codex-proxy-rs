@@ -304,6 +304,71 @@ async fn repository() -> Option<(RedisCredentialCooldownRepository, ConnectionMa
     Some((repository, connection, namespace))
 }
 
+#[tokio::test]
+async fn overload_cooldown_survives_rate_limit_clear_and_is_visible_to_admin() {
+    use gateway_admin::ports::store::AccountRuntimeStore;
+    use gateway_store::redis::{RedisAdminAccountRuntimeStore, RedisCredentialLeaseRepository};
+    let Some((repository, connection, namespace)) = repository().await else {
+        return;
+    };
+    let account = ProviderAccountId::new("acct_overload").expect("account");
+    let revision = CredentialRevision::new(1).expect("revision");
+    let until = SystemTime::now() + StdDuration::from_secs(120);
+    repository
+        .put_scoped_if_later(ProviderScopedCooldown::new(
+            account.clone(),
+            revision,
+            ProviderCooldownScope::AccountOverload,
+            until,
+        ))
+        .await
+        .expect("overload cooldown");
+    repository
+        .clear(&account, revision)
+        .await
+        .expect("successful inference clears only 429");
+    let runtime = RedisAdminAccountRuntimeStore::new(
+        repository.clone(),
+        RedisCredentialLeaseRepository::new(connection, &namespace).expect("leases"),
+    );
+    let account_runtime = runtime
+        .account_runtime(&[account.to_string()])
+        .await
+        .expect("admin runtime");
+    assert!(
+        account_runtime
+            .rate_limited_until
+            .contains_key(account.as_str())
+    );
+    let active = runtime
+        .active_rate_limits()
+        .await
+        .expect("active cooldowns");
+    assert_eq!(
+        active.rate_limited_until,
+        account_runtime.rate_limited_until
+    );
+    assert!(
+        repository
+            .read_scoped(&account, &ProviderCooldownScope::AccountOverload)
+            .await
+            .expect("read overload")
+            .is_some()
+    );
+    repository
+        .clear_all(&account)
+        .await
+        .expect("delete account cooldowns");
+    assert!(
+        runtime
+            .active_rate_limits()
+            .await
+            .expect("empty index")
+            .rate_limited_until
+            .is_empty()
+    );
+}
+
 async fn namespace_keys(connection: &mut ConnectionManager, namespace: &str) -> Vec<String> {
     redis::cmd("KEYS")
         .arg(format!("{namespace}:*"))

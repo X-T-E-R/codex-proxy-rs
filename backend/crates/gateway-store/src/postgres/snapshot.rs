@@ -28,6 +28,9 @@ pub struct SnapshotRuntimeSettings {
     pub model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u32,
+    pub overload_cooldown_seconds: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +150,11 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 data.settings.model_mappings,
                 data.settings.min_codex_desktop_version,
                 data.settings.min_codex_cli_version,
+            )
+            .with_overload_cooldown(
+                data.settings.overload_cooldown_enabled,
+                data.settings.overload_cooldown_threshold,
+                data.settings.overload_cooldown_seconds,
             );
             let client_policies = data
                 .client_api_keys
@@ -228,12 +236,16 @@ async fn load_settings(
             sqlx::types::Json<BTreeMap<String, String>>,
             Option<String>,
             Option<String>,
+            bool,
+            i64,
+            i64,
         ),
     >(
         "select config_revision, refresh_margin_seconds, refresh_concurrency,
                 max_concurrent_per_account, request_interval_ms, rotation_strategy,
                 model_mappings_json, min_codex_desktop_version,
-                min_codex_cli_version
+                min_codex_cli_version, overload_cooldown_enabled,
+                overload_cooldown_threshold, overload_cooldown_seconds
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -254,6 +266,9 @@ async fn load_settings(
             model_mappings: row.6.0,
             min_codex_desktop_version: row.7,
             min_codex_cli_version: row.8,
+            overload_cooldown_enabled: row.9,
+            overload_cooldown_threshold: to_u32(row.10)?,
+            overload_cooldown_seconds: to_u32(row.11)?,
         },
     ))
 }

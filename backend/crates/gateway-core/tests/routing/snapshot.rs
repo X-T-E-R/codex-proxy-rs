@@ -250,6 +250,55 @@ fn facts(config_revision: u64, observed_current_revision: u64) -> SnapshotFacts 
     facts_with_min_versions(config_revision, observed_current_revision, None, None)
 }
 
+#[test]
+fn overload_cooldown_policy_is_frozen_and_validated() {
+    for (enabled, threshold, seconds) in [
+        (false, 2, 120),
+        (true, 3, 180),
+        (true, 0, 120),
+        (false, 2, 0),
+    ] {
+        let settings = SnapshotSettingsFacts::new(3, 0, "smart", BTreeMap::new(), None, None)
+            .with_overload_cooldown(enabled, threshold, seconds);
+        let store = Arc::new(TestSnapshotStore::new(Ok(SnapshotFacts::new(
+            revision(1),
+            revision(1),
+            settings,
+            vec![],
+            vec![],
+            vec![SnapshotProviderAccountFacts::new(
+                gateway_core::account::ProviderAccountId::new("acct_one").expect("account"),
+                "alpha",
+            )],
+            vec![],
+        ))));
+        let result = block_on(
+            RuntimeSnapshotCompiler::new(store, Arc::new(TestCatalog::Unavailable)).compile(),
+        );
+        if threshold == 0 || seconds == 0 {
+            assert_eq!(
+                result.expect_err("invalid policy"),
+                RuntimeSnapshotCompileError::InvalidData
+            );
+        } else {
+            let snapshot = result.expect("snapshot");
+            let plan = snapshot
+                .plan(
+                    &PublicModelId::new("public-model").expect("model"),
+                    &super::operation(),
+                    snapshot.all_account_scope(),
+                    &gateway_core::routing::RoutingContext::default(),
+                )
+                .expect("plan");
+            let policy = plan
+                .account_selection_policy()
+                .overload_cooldown()
+                .map(|(threshold, seconds)| (threshold.get(), seconds.get()));
+            assert_eq!(policy, enabled.then_some((threshold, seconds)));
+        }
+    }
+}
+
 fn facts_with_min_versions(
     config_revision: u64,
     observed_current_revision: u64,

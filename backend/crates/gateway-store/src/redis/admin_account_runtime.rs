@@ -10,8 +10,8 @@ use gateway_admin::{
 };
 
 use super::{
-    CredentialCooldownRepository as _, CredentialLeaseRepository as _,
-    RedisCredentialCooldownRepository, RedisCredentialLeaseRepository,
+    CredentialLeaseRepository as _, RedisCredentialCooldownRepository,
+    RedisCredentialLeaseRepository,
 };
 
 /// 只组合可丢失 Redis 事实；不持有 PostgreSQL，也不执行状态投影。
@@ -46,11 +46,9 @@ impl AccountRuntimeStore for RedisAdminAccountRuntimeStore {
     ) -> AdminStoreResult<AccountRuntimeSnapshot> {
         let reads = account_ids.iter().map(|account_id| async move {
             self.cooldowns
-                .read_credential_cooldown(account_id)
+                .account_cooldown_until(account_id)
                 .await
-                .map(|cooldown| {
-                    cooldown.map(|cooldown| (account_id.clone(), cooldown.cooldown_until))
-                })
+                .map(|cooldown| cooldown.map(|until| (account_id.clone(), until)))
         });
         let mut rate_limited_until = BTreeMap::new();
         for result in join_all(reads).await {

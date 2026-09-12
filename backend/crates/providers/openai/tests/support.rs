@@ -918,11 +918,12 @@ pub(crate) fn account_policy() -> gateway_core::account::AccountSelectionPolicy 
     )
 }
 
-/// 内存 `ProviderCooldownPort`：只实现 `read`/`put_if_later`（openai selector
-/// 429 冷却路径用），其余 scope 变体测试不涉及，返回占位。
+/// 内存 cooldown port，分别保存账号级与细分作用域，并遵守 revision fence。
 #[derive(Clone, Default)]
 pub(crate) struct MemoryCooldownPort {
     pub(crate) cooldowns: Arc<Mutex<BTreeMap<ProviderAccountId, ProviderCooldown>>>,
+    scoped_cooldowns:
+        Arc<Mutex<BTreeMap<(ProviderAccountId, ProviderCooldownScope), ProviderScopedCooldown>>>,
 }
 
 impl MemoryCooldownPort {
@@ -967,40 +968,91 @@ impl ProviderCooldownPort for MemoryCooldownPort {
 
     fn clear<'a>(
         &'a self,
-        _account_id: &'a ProviderAccountId,
-        _through_revision: CredentialRevision,
+        account_id: &'a ProviderAccountId,
+        through_revision: CredentialRevision,
     ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
+        Box::pin(async move {
+            let mut cooldowns = self.cooldowns.lock().expect("cooldown lock");
+            if cooldowns
+                .get(account_id)
+                .is_some_and(|value| value.credential_revision() <= through_revision)
+            {
+                cooldowns.remove(account_id);
+                return Ok(true);
+            }
+            Ok(false)
+        })
     }
 
     fn put_scoped_if_later(
         &self,
-        _cooldown: ProviderScopedCooldown,
+        cooldown: ProviderScopedCooldown,
     ) -> BoxFuture<'_, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
+        Box::pin(async move {
+            let mut cooldowns = self.scoped_cooldowns.lock().expect("scoped cooldown lock");
+            let key = (cooldown.account_id().clone(), cooldown.scope().clone());
+            let should_write = cooldowns.get(&key).is_none_or(|current| {
+                current.credential_revision() < cooldown.credential_revision()
+                    || (current.credential_revision() == cooldown.credential_revision()
+                        && current.until() < cooldown.until())
+            });
+            if should_write {
+                cooldowns.insert(key, cooldown);
+            }
+            Ok(should_write)
+        })
     }
 
     fn read_scoped<'a>(
         &'a self,
-        _account_id: &'a ProviderAccountId,
-        _scope: &'a ProviderCooldownScope,
+        account_id: &'a ProviderAccountId,
+        scope: &'a ProviderCooldownScope,
     ) -> BoxFuture<'a, Result<Option<ProviderScopedCooldown>, ProviderStoreError>> {
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            Ok(self
+                .scoped_cooldowns
+                .lock()
+                .expect("scoped cooldown lock")
+                .get(&(account_id.clone(), scope.clone()))
+                .cloned())
+        })
     }
 
     fn clear_scoped<'a>(
         &'a self,
-        _account_id: &'a ProviderAccountId,
-        _scope: &'a ProviderCooldownScope,
-        _through_revision: CredentialRevision,
+        account_id: &'a ProviderAccountId,
+        scope: &'a ProviderCooldownScope,
+        through_revision: CredentialRevision,
     ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
+        Box::pin(async move {
+            let mut cooldowns = self.scoped_cooldowns.lock().expect("scoped cooldown lock");
+            let key = (account_id.clone(), scope.clone());
+            if cooldowns
+                .get(&key)
+                .is_some_and(|value| value.credential_revision() <= through_revision)
+            {
+                cooldowns.remove(&key);
+                return Ok(true);
+            }
+            Ok(false)
+        })
     }
 
     fn clear_all<'a>(
         &'a self,
-        _account_id: &'a ProviderAccountId,
+        account_id: &'a ProviderAccountId,
     ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
+        Box::pin(async move {
+            let removed = self
+                .cooldowns
+                .lock()
+                .expect("cooldown lock")
+                .remove(account_id)
+                .is_some();
+            let mut scoped = self.scoped_cooldowns.lock().expect("scoped cooldown lock");
+            let before = scoped.len();
+            scoped.retain(|(id, _), _| id != account_id);
+            Ok(removed || scoped.len() != before)
+        })
     }
 }

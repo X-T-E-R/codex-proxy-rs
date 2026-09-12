@@ -55,7 +55,11 @@ fn update_body() -> Value {
         "wsPoolMaxAgeMs": 3_600_000,
         "wsPoolMaxConnecting": 6,
         "wsPoolStreamIdleTimeoutMs": 240_000,
-        "wsPoolFastPathBudgetMs": 1_200
+        "wsPoolFastPathBudgetMs": 1_200,
+        "overloadCooldownEnabled": true,
+        "overloadCooldownThreshold": 2,
+        "overloadCooldownSeconds": 120,
+        "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)"
     })
 }
 
@@ -261,6 +265,10 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         ws_pool_max_connecting: 6,
         ws_pool_stream_idle_timeout_ms: 240_000,
         ws_pool_fast_path_budget_ms: 1_200,
+        overload_cooldown_enabled: true,
+        overload_cooldown_threshold: 2,
+        overload_cooldown_seconds: 120,
+        openai_user_agent: Some("Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)".to_owned()),
         updated_at: Utc
             .with_ymd_and_hms(2026, 8, 2, 10, 30, 0)
             .single()
@@ -290,6 +298,10 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "wsPoolMaxConnecting": 6,
             "wsPoolStreamIdleTimeoutMs": 240_000,
             "wsPoolFastPathBudgetMs": 1_200,
+            "overloadCooldownEnabled": true,
+            "overloadCooldownThreshold": 2,
+            "overloadCooldownSeconds": 120,
+            "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)",
             "updatedAt": "2026-08-02T10:30:00Z"
         })
     );
@@ -344,6 +356,11 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         ws_pool_max_connecting: u32::try_from(request.ws_pool_max_connecting).expect("u32"),
         ws_pool_stream_idle_timeout_ms: request.ws_pool_stream_idle_timeout_ms,
         ws_pool_fast_path_budget_ms: request.ws_pool_fast_path_budget_ms,
+        overload_cooldown_enabled: request.overload_cooldown_enabled,
+        overload_cooldown_threshold: u32::try_from(request.overload_cooldown_threshold)
+            .expect("u32"),
+        overload_cooldown_seconds: u32::try_from(request.overload_cooldown_seconds).expect("u32"),
+        openai_user_agent: request.openai_user_agent,
         updated_at: chrono::Utc::now(),
     };
 
@@ -417,6 +434,37 @@ async fn settings_post_should_replace_global_model_mappings() {
     // ws_pool 字段经过 wire 校验与设置用例后完整返回；这里的 store 是内存 fixture。
     assert_eq!(data["wsPoolMaxConnecting"], json!(6));
     assert_eq!(data["wsPoolFastPathBudgetMs"], json!(1_200));
+    assert_eq!(data["overloadCooldownEnabled"], true);
+    assert_eq!(data["overloadCooldownThreshold"], 2);
+    assert_eq!(data["overloadCooldownSeconds"], 120);
+    assert_eq!(data["openaiUserAgent"], update_body()["openaiUserAgent"]);
+}
+
+#[tokio::test]
+async fn overload_cooldown_and_user_agent_settings_reject_invalid_values() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    for (field, value) in [
+        ("overloadCooldownThreshold", json!(0)),
+        ("overloadCooldownSeconds", json!(0)),
+        ("overloadCooldownThreshold", json!(u64::from(u32::MAX) + 1)),
+        ("overloadCooldownSeconds", json!(u64::from(u32::MAX) + 1)),
+        ("openaiUserAgent", json!("agent\r\nAuthorization: injected")),
+        ("openaiUserAgent", json!(" ")),
+        ("openaiUserAgent", json!("a".repeat(513))),
+    ] {
+        let mut body = update_body();
+        body[field] = value;
+        let response = app(fixture.state())
+            .oneshot(request(
+                Method::POST,
+                "/api/admin/settings/update",
+                Some(body),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+    }
 }
 
 #[tokio::test]

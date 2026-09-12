@@ -639,6 +639,8 @@ impl ProviderCooldown {
 pub enum ProviderCooldownScope {
     /// 只阻止同一账号调用指定上游模型。
     UpstreamModel(UpstreamModelId),
+    /// 阻止该账号的所有新请求，已在途的成功不提前解除冷却。
+    AccountOverload,
 }
 
 impl ProviderCooldownScope {
@@ -651,6 +653,7 @@ impl ProviderCooldownScope {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::UpstreamModel(_) => "model",
+            Self::AccountOverload => "overload",
         }
     }
 
@@ -658,6 +661,7 @@ impl ProviderCooldownScope {
     pub fn value(&self) -> &str {
         match self {
             Self::UpstreamModel(model) => model.as_str(),
+            Self::AccountOverload => "account",
         }
     }
 }
@@ -864,6 +868,23 @@ pub trait ProviderRuntimePolicyPort: Send + Sync {
     fn load_refresh_policy(
         &self,
     ) -> BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>>;
+
+    /// None 沿用 Provider 的自动请求画像。
+    fn load_user_agent_override(
+        &self,
+    ) -> BoxFuture<'_, Result<Option<String>, ProviderStoreError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+/// 单行可打印 ASCII 请求头；拒绝空值、控制符与过长内容。
+#[must_use]
+pub fn valid_user_agent_override(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        !value.trim().is_empty()
+            && value.len() <= 512
+            && value.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+    })
 }
 
 /// 上游 WebSocket 连接池的运行策略事实；Core 只拥有稳定值与校验边界，

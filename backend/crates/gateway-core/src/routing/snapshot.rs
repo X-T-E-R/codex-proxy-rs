@@ -33,6 +33,9 @@ pub struct SnapshotSettingsFacts {
     model_mappings: BTreeMap<String, String>,
     min_codex_desktop_version: Option<String>,
     min_codex_cli_version: Option<String>,
+    overload_cooldown_enabled: bool,
+    overload_cooldown_threshold: u32,
+    overload_cooldown_seconds: u32,
 }
 
 impl SnapshotSettingsFacts {
@@ -52,7 +55,23 @@ impl SnapshotSettingsFacts {
             model_mappings,
             min_codex_desktop_version,
             min_codex_cli_version,
+            overload_cooldown_enabled: false,
+            overload_cooldown_threshold: 2,
+            overload_cooldown_seconds: 120,
         }
+    }
+
+    #[must_use]
+    pub const fn with_overload_cooldown(
+        mut self,
+        enabled: bool,
+        threshold: u32,
+        seconds: u32,
+    ) -> Self {
+        self.overload_cooldown_enabled = enabled;
+        self.overload_cooldown_threshold = threshold;
+        self.overload_cooldown_seconds = seconds;
+        self
     }
 }
 
@@ -355,11 +374,21 @@ async fn compile_runtime_snapshot(
     );
     let rotation_strategy = RotationStrategy::parse(facts.settings.rotation_strategy.as_str())
         .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
+    let overload_threshold = NonZeroU32::new(facts.settings.overload_cooldown_threshold)
+        .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
+    let overload_seconds = NonZeroU32::new(facts.settings.overload_cooldown_seconds)
+        .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
     let selection_policy = AccountSelectionPolicy::new(
         rotation_strategy,
         NonZeroU32::new(facts.settings.max_concurrent_per_account)
             .ok_or(RuntimeSnapshotCompileError::InvalidData)?,
         Duration::from_millis(facts.settings.request_interval_ms),
+    )
+    .with_overload_cooldown(
+        facts
+            .settings
+            .overload_cooldown_enabled
+            .then_some((overload_threshold, overload_seconds)),
     );
     let mut client_policies = Vec::with_capacity(facts.client_policies.len());
     for policy in facts.client_policies {

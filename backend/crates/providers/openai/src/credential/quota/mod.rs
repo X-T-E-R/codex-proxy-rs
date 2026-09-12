@@ -24,7 +24,10 @@ use gateway_core::account::{
     QuotaAccessChange, QuotaAccessState, QuotaEvidence, QuotaObservation, QuotaObservationTouch,
     QuotaState, QuotaWriteOutcome,
 };
-use gateway_core::provider_ports::{ProviderCooldown, ProviderCooldownPort};
+use gateway_core::provider_ports::{
+    ProviderCooldown, ProviderCooldownPort, ProviderCooldownScope, ProviderScopedCooldown,
+    ProviderStoreError,
+};
 use gateway_protocol::openai::events::{
     ParsedRateLimits, RateLimitDetails, RateLimitWindow, parse_rate_limit_headers,
 };
@@ -954,6 +957,34 @@ impl CodexCredentialQuotaService {
                 detail: error.to_string(),
             })?;
         Ok(())
+    }
+
+    pub(crate) async fn apply_overload_cooldown(
+        &self,
+        account: &ProviderAccount,
+        duration: Duration,
+    ) -> Result<(), ProviderStoreError> {
+        self.cooldowns
+            .put_scoped_if_later(ProviderScopedCooldown::new(
+                account.id().clone(),
+                account.revision(),
+                ProviderCooldownScope::AccountOverload,
+                SystemTime::now() + duration,
+            ))
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn overload_cooldown_until(
+        &self,
+        account: &ProviderAccount,
+    ) -> Result<Option<SystemTime>, ProviderStoreError> {
+        Ok(self
+            .cooldowns
+            .read_scoped(account.id(), &ProviderCooldownScope::AccountOverload)
+            .await?
+            .filter(|cooldown| cooldown.until() > SystemTime::now())
+            .map(|cooldown| cooldown.until()))
     }
 
     /// 读取账号当前是否处于临时限流（429）冷却，及到期时间。

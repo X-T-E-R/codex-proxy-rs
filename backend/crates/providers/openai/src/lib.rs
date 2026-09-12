@@ -65,6 +65,12 @@ pub async fn initialize(
     let ws_pool_policy = ports.ws_pool_policy();
     let credential_state = ports.credential_state();
     let profile = config.wire_profile_state();
+    profile.update_user_agent_override(
+        runtime_policy
+            .load_user_agent_override()
+            .await
+            .map_err(|_| OpenAiInitializeError::RuntimePolicy)?,
+    );
     let artifact_cache =
         CodexArtifactProfileCache::new(provider_kind.clone(), ports.artifact_profiles());
     let configured_build = profile.snapshot().desktop_build.parse::<u64>().ok();
@@ -192,7 +198,7 @@ pub async fn initialize(
     );
     let admin_provider: Arc<dyn ProviderAdmin> = Arc::new(OpenAiAdminProvider::new(
         provider_kind,
-        profile,
+        profile.clone(),
         accounts,
         OpenAiAdminServices {
             credentials: credential_admin,
@@ -213,6 +219,8 @@ pub async fn initialize(
         desktop_release,
         websocket_pool,
         ws_pool_policy,
+        runtime_policy,
+        profile,
     )
     .map_err(|_| OpenAiInitializeError::Worker)?;
 

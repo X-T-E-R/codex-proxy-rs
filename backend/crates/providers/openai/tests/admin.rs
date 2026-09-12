@@ -2096,6 +2096,7 @@ mod errors {
             Arc::new(TestCredentialState),
             Arc::new(TestCooldown),
             Arc::new(TestRuntimePolicy),
+            Arc::new(TestWsPoolPolicy::default()),
             Arc::new(TestOAuthPending::default()),
         )
     }

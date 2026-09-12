@@ -2,6 +2,11 @@
 
 use super::*;
 
+const OVERLOAD_COOLDOWN_KEYWORDS: &[&str] = &[
+    "Our servers are currently overloaded. Please try again later.",
+    "Selected model is at capacity.",
+];
+
 /// OpenAI 失败对 Smart 账号分数的结构化 reason 闭集。
 ///
 /// 已归一的上游 code 优先；code 缺失时才读取结构化客户端错误的 code/type。
@@ -43,6 +48,7 @@ pub(super) struct MappedProviderFailure {
     /// 原始上游错误描述，仅在凭据错误状态下持久化。
     pub(super) error_message: Option<String>,
     pub(super) cyber_policy_failure: bool,
+    pub(super) overload_failure: bool,
     pub(super) set_cookie_headers: Vec<String>,
     pub(super) rate_limit_headers: Vec<(String, String)>,
     pub(super) observation: Option<ProviderResponseObservation>,
@@ -57,6 +63,7 @@ impl MappedProviderFailure {
             account_failure: None,
             error_message: None,
             cyber_policy_failure: false,
+            overload_failure: false,
             set_cookie_headers: Vec::new(),
             rate_limit_headers: Vec::new(),
             observation: None,
@@ -201,6 +208,7 @@ pub(super) struct OpenAiFailureContext<'a> {
     pub(super) response_origin: &'a Url,
     pub(super) cyber_policy_scope: Option<&'a CodexCyberPolicyScope>,
     pub(super) allows_account_state_mutation: bool,
+    pub(super) selection_policy: gateway_core::account::AccountSelectionPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -351,6 +359,24 @@ pub(super) async fn apply_failure(
 ) {
     if !context.allows_account_state_mutation {
         return;
+    }
+    match context
+        .selector
+        .observe_overload_failure(account, context.selection_policy, failure.overload_failure)
+        .await
+    {
+        Ok(true) => {
+            context
+                .client
+                .evict_websocket_account(account.id().as_str())
+                .await
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            account_id = %account.id(),
+            error = %error,
+            "Failed to persist OpenAI overload cooldown"
+        ),
     }
     synchronize_passive_quota_headers(context.quota, account, &failure.rate_limit_headers).await;
     let needs_authoritative_quota_refresh = matches!(
@@ -1134,6 +1160,13 @@ pub(super) fn map_upstream_failure(
     replay_boundary: ReplayBoundary,
 ) -> MappedProviderFailure {
     let category = failure.category();
+    let overload_failure = OVERLOAD_COOLDOWN_KEYWORDS.iter().any(|keyword| {
+        failure
+            .client_message
+            .as_deref()
+            .is_some_and(|message| message.contains(keyword))
+            || failure.raw_body.contains(keyword)
+    });
     let cyber_policy_failure = failure
         .status
         .is_some_and(|status| status.is_client_error())
@@ -1223,6 +1256,7 @@ pub(super) fn map_upstream_failure(
         ),
         error_message: failure.client_message,
         cyber_policy_failure,
+        overload_failure,
         set_cookie_headers: failure.set_cookie_headers,
         rate_limit_headers: failure.rate_limit_headers,
         observation,

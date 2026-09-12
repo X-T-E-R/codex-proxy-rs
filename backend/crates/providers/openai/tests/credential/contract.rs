@@ -152,6 +152,7 @@ fn selector_with_runtime(
     cooldowns: Arc<dyn ProviderCooldownPort>,
 ) -> CodexCredentialSelector {
     let profile = CodexWireProfileState::new(CodexWireProfile {
+        user_agent_override: None,
         originator: "codex_cli_rs".to_owned(),
         codex_version: "0.144.0".to_owned(),
         desktop_version: "1.0.0".to_owned(),

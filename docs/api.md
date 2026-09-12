@@ -327,6 +327,8 @@ concurrent proxy mutations return 409. OAuth commits still reject a deleted, cha
 }
 ```
 
+账号处于过载冷却时，连接测试也会在发送上游请求前被拒绝，需等待冷却到期或显式恢复账号。
+
 - `source` 为 `gateway`、`provider` 或 `upstream`：分别表示尚未进入 Provider、Provider 本地且未发送、
   已发送/可能已发送或已经捕获到上游事实。
 - `gatewayErrorCode` 是 `GatewayErrorKind` 的稳定机器值，管理端据此生成中文摘要。
@@ -603,6 +605,10 @@ wsPoolMaxAgeMs
 wsPoolMaxConnecting
 wsPoolStreamIdleTimeoutMs
 wsPoolFastPathBudgetMs
+overloadCooldownEnabled
+overloadCooldownThreshold
+overloadCooldownSeconds
+openaiUserAgent
 ```
 
 `rotationStrategy` 可取 `smart`、`quota_reset_priority`、`round_robin`、`sticky`。
@@ -629,6 +635,32 @@ wsPoolFastPathBudgetMs
 `openai.ws_pool` 自定义值。升级后在管理端核对并保存所需参数。每次启动均在对外服务前恢复数据库
 中的策略；配置文件保留兼容解析，但不覆盖已保存的运行设置。旧管理 API 调用方需补齐五个字段，
 缺失时返回 `422`，不会用默认值覆盖当前配置。
+
+过载冷号由以下三个必填字段控制，保存后新请求使用更新的调度策略：
+
+| 字段 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `overloadCooldownEnabled` | `false` | 是否启用 OpenAI 过载冷号 |
+| `overloadCooldownThreshold` | `2` | 同一账号连续过载次数，正整数，最大 `4294967295` |
+| `overloadCooldownSeconds` | `120` | 冷号时长（秒），正整数，最大 `4294967295` |
+
+上游错误文本包含 `Our servers are currently overloaded. Please try again later.` 或
+`Selected model is at capacity.` 即累计一次；覆盖 HTTP 503、HTTP SSE 和 WebSocket 错误。
+两个关键词共享同一账号的计数，成功响应或其他错误清零。计数在各进程内独立维护，重启后重新计数；
+冷却到期时间保存在共享 Redis。冷号期间拒绝该账号的新推理、指定账号请求和连接测试，已有请求可继续完成，
+其成功不会提前解冻。关闭开关停止新触发，已有冷却按原期限结束。账号列表通过 `rate_limited` 展示冷却状态。
+
+`openaiUserAgent` 为 `string | null`，默认 `null`，此时使用启动配置的平台和自动更新的版本。
+自定义模板支持 `{originator}`、`{codex_version}`、`{desktop_version}`；版本变量使用当前已核验的
+Core/Desktop 版本，无需每次发版修改模板。例如保持 Windows 平台并自动跟随版本：
+
+```text
+{originator}/{codex_version} (Windows 10.0.26100; x86_64) unknown ({originator}; {desktop_version})
+```
+
+模板最多 512 个可打印 ASCII 字符，不接受空白字符串或控制符；填写固定版本号则保持原文。
+设置持久化后约 5 秒内用于新 HTTP 请求和 WebSocket 握手，重启后也会在对外服务前恢复。
+已开始的请求继续完成；依赖旧 WebSocket 连接的续接可能因画像变化而失效。
 
 Windows 离线包接口固定解析 Microsoft Store Product ID `9PLM9XGG6VKS` 的 Retail 包，不接受调用方提供
 产品 ID、上游地址、ring 或文件名。后端只返回通过包名、架构、Microsoft CDN host/path、scheme 和失效

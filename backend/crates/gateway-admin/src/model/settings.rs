@@ -34,6 +34,10 @@ pub struct RuntimeSettings {
     pub ws_pool_max_connecting: u32,
     pub ws_pool_stream_idle_timeout_ms: u64,
     pub ws_pool_fast_path_budget_ms: u64,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u32,
+    pub overload_cooldown_seconds: u32,
+    pub openai_user_agent: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -56,6 +60,10 @@ pub struct ReplaceRuntimeSettings {
     pub ws_pool_max_connecting: u32,
     pub ws_pool_stream_idle_timeout_ms: u64,
     pub ws_pool_fast_path_budget_ms: u64,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u32,
+    pub overload_cooldown_seconds: u32,
+    pub openai_user_agent: Option<String>,
 }
 
 /// 明文管理员 API Key；按产品约束明文落库，但禁止 Debug 泄漏。

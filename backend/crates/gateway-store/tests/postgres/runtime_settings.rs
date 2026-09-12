@@ -31,7 +31,53 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
         ws_pool_max_connecting: 8,
         ws_pool_stream_idle_timeout_ms: 300_000,
         ws_pool_fast_path_budget_ms: 800,
+        overload_cooldown_enabled: false,
+        overload_cooldown_threshold: 2,
+        overload_cooldown_seconds: 120,
+        openai_user_agent: None,
     }
+}
+
+#[tokio::test]
+async fn overload_cooldown_and_user_agent_settings_round_trip_with_snapshot() {
+    use gateway_core::provider_ports::ProviderRuntimePolicyPort;
+    use gateway_store::postgres::{PgRuntimeSnapshotRepository, RuntimeSnapshotRepository};
+    let Some(database) = TestDatabase::create("overload_settings").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let defaults = repository.load_runtime_settings().await.expect("defaults");
+    assert!(!defaults.overload_cooldown_enabled);
+    assert_eq!(defaults.overload_cooldown_threshold, 2);
+    assert_eq!(defaults.overload_cooldown_seconds, 120);
+    assert_eq!(defaults.openai_user_agent, None);
+    let user_agent = "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)";
+    repository
+        .update_runtime_settings(RuntimeSettingsUpdate {
+            overload_cooldown_enabled: true,
+            overload_cooldown_threshold: 3,
+            overload_cooldown_seconds: 180,
+            openai_user_agent: Some(user_agent.to_owned()),
+            ..settings_with_margin(3_600)
+        })
+        .await
+        .expect("save settings");
+    let settings = repository.load_runtime_settings().await.expect("reload");
+    assert!(settings.overload_cooldown_enabled);
+    assert_eq!(settings.overload_cooldown_threshold, 3);
+    assert_eq!(settings.overload_cooldown_seconds, 180);
+    assert_eq!(
+        repository.load_user_agent_override().await.expect("UA"),
+        Some(user_agent.to_owned())
+    );
+    let snapshot = PgRuntimeSnapshotRepository::new(database.pool.clone())
+        .load_runtime_snapshot()
+        .await
+        .expect("snapshot");
+    assert!(snapshot.settings.overload_cooldown_enabled);
+    assert_eq!(snapshot.settings.overload_cooldown_threshold, 3);
+    assert_eq!(snapshot.settings.overload_cooldown_seconds, 180);
+    database.close().await;
 }
 
 #[test]

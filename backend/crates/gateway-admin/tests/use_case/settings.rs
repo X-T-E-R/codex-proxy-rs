@@ -65,6 +65,10 @@ fn valid_replace_command() -> ReplaceRuntimeSettings {
         ws_pool_max_connecting: 8,
         ws_pool_stream_idle_timeout_ms: 300_000,
         ws_pool_fast_path_budget_ms: 800,
+        overload_cooldown_enabled: false,
+        overload_cooldown_threshold: 2,
+        overload_cooldown_seconds: 120,
+        openai_user_agent: None,
     }
 }
 
@@ -124,4 +128,18 @@ fn unused() -> AdminStoreError {
         "settings",
         "unused in this test",
     )
+}
+
+#[tokio::test]
+async fn overload_cooldown_settings_reject_zero_even_when_disabled() {
+    replace_and_expect_invalid(ReplaceRuntimeSettings {
+        overload_cooldown_threshold: 0,
+        ..valid_replace_command()
+    })
+    .await;
+    replace_and_expect_invalid(ReplaceRuntimeSettings {
+        overload_cooldown_seconds: 0,
+        ..valid_replace_command()
+    })
+    .await;
 }

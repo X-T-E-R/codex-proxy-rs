@@ -1,6 +1,6 @@
 //! OpenAI Provider 向 Host 贡献的后台 worker。
 
-use gateway_core::provider_ports::ProviderWebSocketPoolPolicyPort;
+use gateway_core::provider_ports::{ProviderRuntimePolicyPort, ProviderWebSocketPoolPolicyPort};
 
 use super::*;
 
@@ -28,6 +28,8 @@ pub(crate) fn worker_contributions(
     desktop_release: Arc<CodexDesktopReleaseService>,
     websocket_pool: Arc<CodexWebSocketPool>,
     ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
+    runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
+    profile: CodexWireProfileState,
 ) -> Result<Vec<WorkerContribution>, WorkerDefinitionError> {
     let refresh_id = WorkerId::try_new(WorkerKind::OAuthRefresh, PROVIDER_NAME)?;
     let quota_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, PROVIDER_NAME)?;
@@ -63,6 +65,8 @@ pub(crate) fn worker_contributions(
                 task: Box::new(OpenAiWebSocketPoolPolicyTask {
                     pool: websocket_pool,
                     policy: ws_pool_policy,
+                    runtime_policy,
+                    profile,
                 }),
             },
         )?,
@@ -216,6 +220,8 @@ pub(super) struct OpenAiDesktopReleaseTask {
 pub(super) struct OpenAiWebSocketPoolPolicyTask {
     pool: Arc<CodexWebSocketPool>,
     policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
+    runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
+    profile: CodexWireProfileState,
 }
 
 impl ScheduledTask for OpenAiWebSocketPoolPolicyTask {
@@ -236,6 +242,13 @@ impl ScheduledTask for OpenAiWebSocketPoolPolicyTask {
                         "OpenAI WebSocket pool policy synchronization failed"
                     );
                 }
+            }
+            match self.runtime_policy.load_user_agent_override().await {
+                Ok(value) => self.profile.update_user_agent_override(value),
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "OpenAI User-Agent synchronization failed"
+                ),
             }
             Ok(())
         })

@@ -653,6 +653,7 @@ fn client(base_url: &str) -> CodexBackendClient {
 
 fn profile() -> CodexWireProfileState {
     CodexWireProfileState::new(CodexWireProfile {
+        user_agent_override: None,
         originator: "codex_cli_rs".to_owned(),
         codex_version: "0.144.0".to_owned(),
         desktop_version: "1.0.0".to_owned(),

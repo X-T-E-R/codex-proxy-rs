@@ -116,6 +116,19 @@ impl RedisCredentialCooldownRepository {
         format!("{}:account:active-cooldowns", self.namespace)
     }
 
+    fn overload_index_key(&self) -> String {
+        format!("{}:account:active-overload-cooldowns", self.namespace)
+    }
+
+    fn scoped_index<'a>(
+        &self,
+        scope: &ProviderCooldownScope,
+        account_id: &'a str,
+    ) -> Option<(String, &'a str)> {
+        matches!(scope, ProviderCooldownScope::AccountOverload)
+            .then(|| (self.overload_index_key(), account_id))
+    }
+
     fn scoped_key(
         &self,
         provider_account_id: &str,
@@ -135,17 +148,17 @@ impl RedisCredentialCooldownRepository {
         key: String,
         credential_revision: Revision,
         cooldown_until: DateTime<Utc>,
-        index_member: Option<&str>,
+        index: Option<(String, &str)>,
     ) -> StoreResult<bool> {
         let until_ms = cooldown_until.timestamp_millis();
         if until_ms <= 0 {
             return Err(invalid("cooldown expiry must be positive"));
         }
         let mut connection = self.connection.clone();
-        let written = if let Some(index_member) = index_member {
+        let written = if let Some((index_key, index_member)) = index {
             Script::new(WRITE_SCRIPT)
                 .key(key)
-                .key(self.active_index_key())
+                .key(index_key)
                 .arg(credential_revision.get())
                 .arg(until_ms)
                 .arg(index_member)
@@ -167,13 +180,13 @@ impl RedisCredentialCooldownRepository {
     async fn read_at_key(
         &self,
         key: String,
-        index_member: Option<&str>,
+        index: Option<(String, &str)>,
     ) -> StoreResult<Option<(Revision, DateTime<Utc>)>> {
         let mut connection = self.connection.clone();
-        let result = if let Some(index_member) = index_member {
+        let result = if let Some((index_key, index_member)) = index {
             Script::new(READ_SCRIPT)
                 .key(key)
-                .key(self.active_index_key())
+                .key(index_key)
                 .arg(index_member)
                 .invoke_async(&mut connection)
                 .await
@@ -204,13 +217,13 @@ impl RedisCredentialCooldownRepository {
         &self,
         key: String,
         through_revision: Revision,
-        index_member: Option<&str>,
+        index: Option<(String, &str)>,
     ) -> StoreResult<bool> {
         let mut connection = self.connection.clone();
-        let removed = if let Some(index_member) = index_member {
+        let removed = if let Some((index_key, index_member)) = index {
             Script::new(INVALIDATE_SCRIPT)
                 .key(key)
-                .key(self.active_index_key())
+                .key(index_key)
                 .arg(through_revision.get())
                 .arg(index_member)
                 .invoke_async::<i64>(&mut connection)
@@ -229,11 +242,16 @@ impl RedisCredentialCooldownRepository {
 
     pub(crate) async fn active_cooldowns(&self) -> StoreResult<AccountRuntimeSnapshot> {
         let mut connection = self.connection.clone();
-        let values = Script::new(ACTIVE_COOLDOWNS_SCRIPT)
-            .key(self.active_index_key())
-            .invoke_async::<Vec<String>>(&mut connection)
-            .await
-            .map_err(|_| redis_unavailable("list active credential cooldowns"))?;
+        let mut values = Vec::new();
+        for index in [self.active_index_key(), self.overload_index_key()] {
+            values.extend(
+                Script::new(ACTIVE_COOLDOWNS_SCRIPT)
+                    .key(index)
+                    .invoke_async::<Vec<String>>(&mut connection)
+                    .await
+                    .map_err(|_| redis_unavailable("list active credential cooldowns"))?,
+            );
+        }
         if values.len() % 2 != 0 {
             return Err(invalid("active cooldown index is invalid"));
         }
@@ -244,12 +262,33 @@ impl RedisCredentialCooldownRepository {
                 .map_err(|_| invalid("active cooldown expiry is invalid"))?;
             let until = DateTime::from_timestamp_millis(until_ms)
                 .ok_or_else(|| invalid("active cooldown expiry is invalid"))?;
-            rate_limited_until.insert(pair[0].clone(), until);
+            rate_limited_until
+                .entry(pair[0].clone())
+                .and_modify(|current: &mut DateTime<Utc>| *current = (*current).max(until))
+                .or_insert(until);
         }
         Ok(AccountRuntimeSnapshot {
             rate_limited_until,
             in_flight: None,
         })
+    }
+
+    /// 管理端展示账号级限流与过载冷却的较晚期限；模型级冷却不扩散到账号。
+    pub(crate) async fn account_cooldown_until(
+        &self,
+        account_id: &str,
+    ) -> StoreResult<Option<DateTime<Utc>>> {
+        let rate_limit = self.read_credential_cooldown(account_id).await?;
+        let scope = ProviderCooldownScope::AccountOverload;
+        let overload = self
+            .read_at_key(
+                self.scoped_key(account_id, &scope)?,
+                self.scoped_index(&scope, account_id),
+            )
+            .await?;
+        Ok(rate_limit
+            .map(|value| value.cooldown_until)
+            .max(overload.map(|value| value.1)))
     }
 }
 
@@ -265,7 +304,7 @@ impl CredentialCooldownRepository for RedisCredentialCooldownRepository {
             self.key(&cooldown.provider_account_id)?,
             cooldown.credential_revision,
             cooldown.cooldown_until,
-            Some(&cooldown.provider_account_id),
+            Some((self.active_index_key(), &cooldown.provider_account_id)),
         )
         .await
     }
@@ -279,15 +318,18 @@ impl CredentialCooldownRepository for RedisCredentialCooldownRepository {
             "provider_account_id",
             provider_account_id,
         )?;
-        self.read_at_key(self.key(provider_account_id)?, Some(provider_account_id))
-            .await
-            .map(|value| {
-                value.map(|(credential_revision, cooldown_until)| CredentialCooldown {
-                    provider_account_id: provider_account_id.to_owned(),
-                    credential_revision,
-                    cooldown_until,
-                })
+        self.read_at_key(
+            self.key(provider_account_id)?,
+            Some((self.active_index_key(), provider_account_id)),
+        )
+        .await
+        .map(|value| {
+            value.map(|(credential_revision, cooldown_until)| CredentialCooldown {
+                provider_account_id: provider_account_id.to_owned(),
+                credential_revision,
+                cooldown_until,
             })
+        })
     }
 
     async fn invalidate_credential_cooldown(
@@ -303,7 +345,7 @@ impl CredentialCooldownRepository for RedisCredentialCooldownRepository {
         self.invalidate_at_key(
             self.key(provider_account_id)?,
             through_revision,
-            Some(provider_account_id),
+            Some((self.active_index_key(), provider_account_id)),
         )
         .await
     }
@@ -355,7 +397,13 @@ impl CredentialCooldownRepository for RedisCredentialCooldownRepository {
             .query_async(&mut connection)
             .await
             .map_err(|_| redis_unavailable("remove active account cooldown"))?;
-        Ok(removed > 0 || index_removed > 0)
+        let overload_index_removed: i64 = redis::cmd("ZREM")
+            .arg(self.overload_index_key())
+            .arg(provider_account_id)
+            .query_async(&mut connection)
+            .await
+            .map_err(|_| redis_unavailable("remove active overload cooldown"))?;
+        Ok(removed > 0 || index_removed > 0 || overload_index_removed > 0)
     }
 }
 
@@ -430,7 +478,7 @@ impl ProviderCooldownPort for RedisCredentialCooldownRepository {
                     .map_err(|_| provider_invalid("encode scoped credential cooldown"))?,
                 revision,
                 cooldown.until().into(),
-                None,
+                self.scoped_index(cooldown.scope(), cooldown.account_id().as_str()),
             )
             .await
             .map_err(|_| provider_unavailable("cache scoped credential cooldown"))
@@ -447,7 +495,7 @@ impl ProviderCooldownPort for RedisCredentialCooldownRepository {
             self.read_at_key(
                 self.scoped_key(account_id.as_str(), scope)
                     .map_err(|_| provider_invalid("encode scoped credential cooldown"))?,
-                None,
+                self.scoped_index(scope, account_id.as_str()),
             )
             .await
             .map_err(|_| provider_unavailable("read scoped credential cooldown"))?
@@ -477,7 +525,7 @@ impl ProviderCooldownPort for RedisCredentialCooldownRepository {
                 self.scoped_key(account_id.as_str(), scope)
                     .map_err(|_| provider_invalid("encode scoped credential cooldown"))?,
                 revision,
-                None,
+                self.scoped_index(scope, account_id.as_str()),
             )
             .await
             .map_err(|_| provider_unavailable("clear scoped credential cooldown"))

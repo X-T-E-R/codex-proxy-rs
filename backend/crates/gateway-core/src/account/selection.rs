@@ -49,6 +49,7 @@ pub struct AccountSelectionPolicy {
     strategy: RotationStrategy,
     max_concurrent_per_account: NonZeroU32,
     request_interval: Duration,
+    overload_cooldown: Option<(NonZeroU32, NonZeroU32)>,
 }
 
 impl AccountSelectionPolicy {
@@ -62,7 +63,23 @@ impl AccountSelectionPolicy {
             strategy,
             max_concurrent_per_account,
             request_interval,
+            overload_cooldown: None,
         }
+    }
+
+    /// 连续过载阈值与冷却秒数；None 停止触发新的冷却。
+    #[must_use]
+    pub const fn with_overload_cooldown(
+        mut self,
+        policy: Option<(NonZeroU32, NonZeroU32)>,
+    ) -> Self {
+        self.overload_cooldown = policy;
+        self
+    }
+
+    #[must_use]
+    pub const fn overload_cooldown(self) -> Option<(NonZeroU32, NonZeroU32)> {
+        self.overload_cooldown
     }
 
     #[must_use]

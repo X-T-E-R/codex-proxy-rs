@@ -134,3 +134,90 @@ fn residency_is_explicit_and_survives_artifact_updates() {
     assert_eq!(model["version"], "2.0.0");
     assert!(!account.contains_key("x-openai-internal-codex-residency"));
 }
+
+#[tokio::test]
+async fn user_agent_override_reaches_new_requests_and_can_return_to_automatic_profile() {
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    let profile = test_wire_profile();
+    let automatic = profile.snapshot().user_agent();
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        server.uri(),
+        profile.clone(),
+    );
+    let windows = "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)";
+    for configured in [None, Some(windows.to_owned()), None] {
+        profile.update_user_agent_override(configured.clone());
+        client
+            .fetch_usage(request_context("ua", Some("ua-account")))
+            .await
+            .expect_err("fixture rejection");
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(
+            requests.last().expect("request").headers["user-agent"],
+            configured.as_deref().unwrap_or(&automatic)
+        );
+        let download = provider_openai::transport::headers::build_codex_download_headers(
+            &profile.snapshot(),
+            "Bearer fixture",
+            None,
+        )
+        .expect("desktop headers");
+        if configured.is_some() {
+            assert_eq!(download["user-agent"], windows);
+        }
+    }
+}
+
+#[tokio::test]
+async fn user_agent_windows_template_keeps_following_bundled_versions() {
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(400))
+        .mount(&server)
+        .await;
+    let profile = test_wire_profile();
+    profile.update_user_agent_override(Some(
+        "{originator}/{codex_version} (Windows 10.0.26100; x86_64) unknown ({originator}; {desktop_version})".to_owned(),
+    ));
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        server.uri(),
+        profile.clone(),
+    );
+    for (core, desktop, build) in [
+        ("0.153.4", "26.901.51231", "8109"),
+        ("0.154.0", "26.912.12345", "8200"),
+    ] {
+        profile.update_bundled_release(&CodexBundledReleaseProfile {
+            codex_version: core.to_owned(),
+            desktop_version: desktop.to_owned(),
+            desktop_build: build.to_owned(),
+            verified_at: Utc::now(),
+        });
+        client
+            .fetch_usage(request_context("ua-template", Some("account")))
+            .await
+            .expect_err("fixture");
+        let requests = server.received_requests().await.expect("requests");
+        let actual = requests.last().expect("request").headers["user-agent"]
+            .to_str()
+            .expect("UA");
+        assert_eq!(
+            actual,
+            format!(
+                "codex_cli_rs/{core} (Windows 10.0.26100; x86_64) unknown (codex_cli_rs; {desktop})"
+            )
+        );
+    }
+}

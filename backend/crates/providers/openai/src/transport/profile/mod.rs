@@ -63,6 +63,8 @@ pub struct CodexWireProfile {
     pub terminal: String,
     /// 未配置时不发送 residency 头；不随制品版本更新而改变。
     pub residency: Option<CodexResidency>,
+    /// 管理端 UA 模板；版本占位符使用当前已核验版本，None 使用默认画像。
+    pub user_agent_override: Option<String>,
     /// 版本元组最后一次经制品核验的时间；不表示 TLS 传输已重新核验。
     pub verified_at: DateTime<Utc>,
 }
@@ -70,6 +72,9 @@ pub struct CodexWireProfile {
 impl CodexWireProfile {
     /// 按 bundled Core app-server 的官方格式生成最终 User-Agent。
     pub fn user_agent(&self) -> String {
+        if let Some(value) = self.render_user_agent_override() {
+            return value;
+        }
         format!(
             "{}/{} ({} {}; {}) {} ({}; {})",
             self.originator,
@@ -90,10 +95,22 @@ impl CodexWireProfile {
     /// 复合 User-Agent 是两个独立 surface。
     #[must_use]
     pub fn desktop_user_agent(&self) -> String {
+        if let Some(value) = self.render_user_agent_override() {
+            return value;
+        }
         format!(
             "{}/{} ({}; {})",
             self.originator, self.desktop_version, self.os_type, self.arch
         )
+    }
+
+    fn render_user_agent_override(&self) -> Option<String> {
+        self.user_agent_override.as_ref().map(|template| {
+            template
+                .replace("{originator}", &self.originator)
+                .replace("{codex_version}", &self.codex_version)
+                .replace("{desktop_version}", &self.desktop_version)
+        })
     }
 }
 
@@ -117,6 +134,14 @@ impl CodexWireProfileState {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// 不改动制品版本事实；模板在生成请求头时读取当前版本。
+    pub fn update_user_agent_override(&self, value: Option<String>) {
+        self.profile
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .user_agent_override = value;
     }
 
     /// 原子发布同一 Desktop ZIP 中核验出的完整版本元组。

@@ -379,6 +379,7 @@ impl From<CodexWireProfileConfig> for CodexWireProfile {
             arch: value.arch,
             terminal: value.terminal,
             residency: value.residency,
+            user_agent_override: None,
             verified_at: value.verified_at,
         }
     }

@@ -121,6 +121,7 @@ where
 
 fn test_wire_profile() -> CodexWireProfileState {
     CodexWireProfileState::new(CodexWireProfile {
+        user_agent_override: None,
         originator: "codex_cli_rs".to_owned(),
         codex_version: "1.2.3".to_owned(),
         desktop_version: "1.2.3".to_owned(),

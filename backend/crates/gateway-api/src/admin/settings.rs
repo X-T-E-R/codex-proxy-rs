@@ -48,6 +48,10 @@ pub struct RuntimeSettingsView {
     pub ws_pool_max_connecting: u64,
     pub ws_pool_stream_idle_timeout_ms: u64,
     pub ws_pool_fast_path_budget_ms: u64,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u64,
+    pub overload_cooldown_seconds: u64,
+    pub openai_user_agent: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -71,12 +75,21 @@ pub struct UpdateRuntimeSettingsRequest {
     pub ws_pool_max_connecting: u64,
     pub ws_pool_stream_idle_timeout_ms: u64,
     pub ws_pool_fast_path_budget_ms: u64,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u64,
+    pub overload_cooldown_seconds: u64,
+    pub openai_user_agent: Option<String>,
 }
 
 impl UpdateRuntimeSettingsRequest {
     /// 校验公共运行参数。
     pub fn validate(&self) -> Result<(), WireValidationError> {
         validate_model_mappings(&self.model_mappings)?;
+        if !gateway_core::provider_ports::valid_user_agent_override(
+            self.openai_user_agent.as_deref(),
+        ) {
+            return Err(WireValidationError::new("openaiUserAgent"));
+        }
         for (value, field) in [
             (self.refresh_margin_seconds, "refreshMarginSeconds"),
             (self.refresh_concurrency, "refreshConcurrency"),
@@ -91,6 +104,11 @@ impl UpdateRuntimeSettingsRequest {
                 "wsPoolStreamIdleTimeoutMs",
             ),
             (self.ws_pool_fast_path_budget_ms, "wsPoolFastPathBudgetMs"),
+            (
+                self.overload_cooldown_threshold,
+                "overloadCooldownThreshold",
+            ),
+            (self.overload_cooldown_seconds, "overloadCooldownSeconds"),
         ] {
             require_positive_i64(value, field)?;
         }
@@ -137,6 +155,12 @@ impl UpdateRuntimeSettingsRequest {
                 .map_err(|_| WireValidationError::new("settingsWsPoolMaxConnectingOverflow"))?,
             ws_pool_stream_idle_timeout_ms: self.ws_pool_stream_idle_timeout_ms,
             ws_pool_fast_path_budget_ms: self.ws_pool_fast_path_budget_ms,
+            overload_cooldown_enabled: self.overload_cooldown_enabled,
+            overload_cooldown_threshold: u32::try_from(self.overload_cooldown_threshold)
+                .map_err(|_| WireValidationError::new("overloadCooldownThreshold"))?,
+            overload_cooldown_seconds: u32::try_from(self.overload_cooldown_seconds)
+                .map_err(|_| WireValidationError::new("overloadCooldownSeconds"))?,
+            openai_user_agent: self.openai_user_agent,
         })
     }
 }
@@ -160,6 +184,10 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
             ws_pool_max_connecting: u64::from(settings.ws_pool_max_connecting),
             ws_pool_stream_idle_timeout_ms: settings.ws_pool_stream_idle_timeout_ms,
             ws_pool_fast_path_budget_ms: settings.ws_pool_fast_path_budget_ms,
+            overload_cooldown_enabled: settings.overload_cooldown_enabled,
+            overload_cooldown_threshold: u64::from(settings.overload_cooldown_threshold),
+            overload_cooldown_seconds: u64::from(settings.overload_cooldown_seconds),
+            openai_user_agent: settings.openai_user_agent,
             updated_at: settings.updated_at,
         }
     }

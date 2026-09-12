@@ -368,6 +368,10 @@ impl SettingsStore for MemorySettingsStore {
             ws_pool_max_connecting: command.ws_pool_max_connecting,
             ws_pool_stream_idle_timeout_ms: command.ws_pool_stream_idle_timeout_ms,
             ws_pool_fast_path_budget_ms: command.ws_pool_fast_path_budget_ms,
+            overload_cooldown_enabled: command.overload_cooldown_enabled,
+            overload_cooldown_threshold: command.overload_cooldown_threshold,
+            overload_cooldown_seconds: command.overload_cooldown_seconds,
+            openai_user_agent: command.openai_user_agent,
             updated_at: Utc::now(),
         };
         *settings = updated.clone();
@@ -1139,6 +1143,10 @@ fn test_runtime_settings() -> RuntimeSettings {
         ws_pool_max_connecting: 8,
         ws_pool_stream_idle_timeout_ms: 300_000,
         ws_pool_fast_path_budget_ms: 800,
+        overload_cooldown_enabled: false,
+        overload_cooldown_threshold: 2,
+        overload_cooldown_seconds: 120,
+        openai_user_agent: None,
         updated_at: Utc::now(),
     }
 }

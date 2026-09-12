@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime};
 use gateway_core::account::{
     AccountCandidate, AccountCapacitySnapshot, AccountEligibilityPolicy, AccountErrorReason,
     AccountFeedbackStats, AccountRuntimeSignals, AccountSchedulingBlocker, AccountSelectionContext,
-    AccountSelector, AccountStatus, CredentialState, PreferredAccountSelection, ProviderAccount,
-    ProviderAccountId, QuotaEvidence,
+    AccountSelectionPolicy, AccountSelector, AccountStatus, CredentialState,
+    PreferredAccountSelection, ProviderAccount, ProviderAccountId, QuotaEvidence,
 };
 use gateway_core::engine::{AttemptContext, ContinuationAttempt};
 use gateway_core::provider_ports::{
@@ -80,6 +80,12 @@ struct RiskRecoveryState {
     observed_at: SystemTime,
 }
 
+#[derive(Debug)]
+struct OverloadStreak {
+    policy: AccountSelectionPolicy,
+    count: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CookieRecovery {
     ExpireAt(SystemTime),
@@ -122,6 +128,7 @@ pub struct CodexCredentialSelector {
     quota: Arc<CodexCredentialQuotaService>,
     cookie_policy: CodexCookiePolicy,
     risk_recovery: Mutex<HashMap<String, RiskRecoveryState>>,
+    overload_streaks: Mutex<HashMap<ProviderAccountId, OverloadStreak>>,
     account_feedback: Arc<AccountFeedbackStats>,
 }
 
@@ -285,6 +292,7 @@ impl CodexCredentialSelector {
             quota,
             cookie_policy,
             risk_recovery: Mutex::new(HashMap::new()),
+            overload_streaks: Mutex::new(HashMap::new()),
             account_feedback,
         }
     }
@@ -377,6 +385,14 @@ impl CodexCredentialSelector {
             self.quota.prepare_scheduling(&accounts).await;
         }
         let mut rate_limits = HashMap::with_capacity(accounts.len());
+        let mut overload_accounts = Vec::new();
+        // 诊断和指定账号同样遵守显式过载冷却；Redis 异常不按“没有冷却”放行。
+        for account in &accounts {
+            if let Some(until) = self.quota.overload_cooldown_until(account).await? {
+                overload_accounts.push(account.id().clone());
+                rate_limits.insert(account.id().clone(), Some(until));
+            }
+        }
         if !diagnostic {
             for account in &accounts {
                 let until = self
@@ -384,7 +400,8 @@ impl CodexCredentialSelector {
                     .rate_limited_until(account.id())
                     .await
                     .unwrap_or(None);
-                rate_limits.insert(account.id().clone(), until);
+                let overload = rate_limits.get(account.id()).copied().flatten();
+                rate_limits.insert(account.id().clone(), until.max(overload));
             }
         }
         let account_ids = accounts
@@ -464,6 +481,7 @@ impl CodexCredentialSelector {
             .prepare_cyber_policy_scope(cyber_policy_session_key)
             .await;
         let mut excluded = request.attempt.excluded_accounts().clone();
+        excluded.extend(overload_accounts);
         if let Some(state) = cyber_policy_scope
             .as_ref()
             .and_then(|scope| scope.state.as_ref())
@@ -553,6 +571,17 @@ impl CodexCredentialSelector {
                     excluded.insert(account.id().clone());
                 }
                 ProviderLeaseAcquisition::Acquired(guard) => {
+                    // 候选读取到 lease 获取之间可能刚触发冷号；准入前再确认一次。
+                    if self
+                        .quota
+                        .overload_cooldown_until(&account)
+                        .await?
+                        .is_some()
+                    {
+                        drop(guard);
+                        excluded.insert(account.id().clone());
+                        continue;
+                    }
                     let initial_affinity_claim = if !diagnostic
                         && observed_affinity_account.is_none()
                         && let Some(key) = request.session_affinity_key
@@ -977,12 +1006,65 @@ impl CodexCredentialSelector {
         Ok(())
     }
 
+    pub(crate) fn reset_overload_streak(&self, account: &ProviderAccount) {
+        self.overload_streaks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(account.id());
+    }
+
+    pub(crate) async fn observe_overload_failure(
+        &self,
+        account: &ProviderAccount,
+        policy: AccountSelectionPolicy,
+        matches_overload: bool,
+    ) -> Result<bool, ProviderStoreError> {
+        let Some((threshold, seconds)) = policy.overload_cooldown().filter(|_| matches_overload)
+        else {
+            self.reset_overload_streak(account);
+            return Ok(false);
+        };
+        if self.quota.overload_cooldown_until(account).await?.is_some() {
+            self.reset_overload_streak(account);
+            return Ok(false);
+        }
+        let reached = {
+            let mut streaks = self
+                .overload_streaks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let streak = streaks
+                .entry(account.id().clone())
+                .or_insert(OverloadStreak { policy, count: 0 });
+            if streak.policy.overload_cooldown() != policy.overload_cooldown() {
+                *streak = OverloadStreak { policy, count: 0 };
+            }
+            streak.count = streak.count.saturating_add(1);
+            streak.count >= threshold.get()
+        };
+        if !reached {
+            return Ok(false);
+        }
+        self.quota
+            .apply_overload_cooldown(account, Duration::from_secs(u64::from(seconds.get())))
+            .await?;
+        self.reset_overload_streak(account);
+        tracing::warn!(
+            account_id = %account.id(),
+            threshold = threshold.get(),
+            cooldown_seconds = seconds.get(),
+            "OpenAI account entered overload cooldown"
+        );
+        Ok(true)
+    }
+
     pub async fn record_success(
         &self,
         account: &ProviderAccount,
         session_affinity_key: Option<&ProviderSessionAffinityKey>,
         expected_affinity_account_id: &ProviderAccountId,
     ) {
+        self.reset_overload_streak(account);
         self.restore_recoverable_account_state(account).await;
         self.risk_recovery
             .lock()
