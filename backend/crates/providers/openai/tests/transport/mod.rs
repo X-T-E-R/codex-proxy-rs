@@ -516,6 +516,7 @@ fn websocket_pool_config_for_tests(
         ping_timeout: Duration::from_secs(1),
         liveness_timeout,
         stream_idle_timeout: None,
+        fast_path_budget: Duration::from_millis(800),
     }
 }
 

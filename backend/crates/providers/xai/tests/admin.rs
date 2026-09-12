@@ -31,7 +31,8 @@ use gateway_core::provider_ports::{
     ProviderCatalogCachePort, ProviderCooldown, ProviderCooldownPort, ProviderCooldownScope,
     ProviderCredentialState, ProviderCredentialStatePort, ProviderLeaseAcquisition,
     ProviderLeasePort, ProviderLeaseRequest, ProviderRefreshPolicy, ProviderRuntimePolicyPort,
-    ProviderScopedCooldown, ProviderStoreError, ProviderStorePorts,
+    ProviderScopedCooldown, ProviderStoreError, ProviderStorePorts, ProviderWebSocketPoolPolicy,
+    ProviderWebSocketPoolPolicyPort,
 };
 use gateway_core::routing::{ProviderKind, UpstreamModelId};
 use gateway_core::task::{
@@ -627,6 +628,7 @@ fn provider_ports_with_catalog(
         Arc::new(TestCredentialState),
         Arc::new(TestCooldown),
         Arc::new(TestRuntimePolicy),
+        Arc::new(TestWsPoolPolicy),
         pending,
     )
 }
@@ -920,6 +922,24 @@ impl ProviderRuntimePolicyPort for TestRuntimePolicy {
             ProviderRefreshPolicy::try_new(
                 Duration::from_secs(300),
                 NonZeroU32::new(4).expect("nonzero concurrency"),
+            )
+        })
+    }
+}
+
+struct TestWsPoolPolicy;
+
+impl ProviderWebSocketPoolPolicyPort for TestWsPoolPolicy {
+    fn load_websocket_pool_policy(
+        &self,
+    ) -> BoxFuture<'_, Result<ProviderWebSocketPoolPolicy, ProviderStoreError>> {
+        Box::pin(async {
+            ProviderWebSocketPoolPolicy::try_new(
+                true,
+                Duration::from_millis(3_300_000),
+                NonZeroU32::new(8).expect("nonzero max connecting"),
+                Duration::from_millis(300_000),
+                Duration::from_millis(800),
             )
         })
     }

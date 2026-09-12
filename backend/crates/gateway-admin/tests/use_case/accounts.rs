@@ -1017,13 +1017,11 @@ impl SettingsStore for StaticSettingsStore {
             usage_retention_days: 30,
             ops_event_retention_days: 30,
             audit_retention_days: 30,
-            account_auto_freeze_enabled: true,
-            account_auto_freeze_threshold: 12,
-            account_auto_freeze_window_seconds: 600,
-            account_auto_freeze_duration_seconds: 7_200,
-            account_auto_freeze_probe_enabled: true,
-            account_auto_freeze_probe_model: None,
-            account_auto_freeze_adaptive_concurrency: true,
+            ws_pool_enabled: true,
+            ws_pool_max_age_ms: 3_300_000,
+            ws_pool_max_connecting: 8,
+            ws_pool_stream_idle_timeout_ms: 300_000,
+            ws_pool_fast_path_budget_ms: 800,
             updated_at: Utc::now(),
         })
     }

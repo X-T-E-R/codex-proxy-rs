@@ -41,35 +41,14 @@ export function useSettingsForm() {
     usageRetentionDays: 31,
     opsEventRetentionDays: 30,
     auditRetentionDays: 90,
-
-    accountAutoFreezeEnabled: false,
-    accountAutoFreezeThreshold: null as number | null,
-    accountAutoFreezeWindowSeconds: null as number | null,
-    accountAutoFreezeDurationSeconds: null as number | null,
-    accountAutoFreezeProbeEnabled: true,
-    accountAutoFreezeProbeModel: '',
-    accountAutoFreezeAdaptiveConcurrency: true,
+    wsPoolEnabled: true,
+    wsPoolMaxAgeMs: null as number | null,
+    wsPoolMaxConnecting: null as number | null,
+    wsPoolStreamIdleTimeoutMs: null as number | null,
+    wsPoolFastPathBudgetMs: null as number | null,
   })
 
-  function snapshot() {
-    return {
-      form: { ...form, requestLocation: { ...form.requestLocation } },
-      mappings: mappings.value.map(row => ({ ...row })),
-    }
-  }
-
-  const saved = shallowRef<ReturnType<typeof snapshot>>()
-  const loaded = computed(() => saved.value !== undefined)
-  const hasChanges = computed(() => loaded.value && JSON.stringify(snapshot()) !== JSON.stringify(saved.value))
-
-  function resetSettings() {
-    if (!saved.value || saving.value)
-      return
-    Object.assign(form, saved.value.form, { requestLocation: { ...saved.value.form.requestLocation } })
-    mappings.value = saved.value.mappings.map(row => ({ ...row }))
-  }
-
-  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'concurrencyWaitTimeoutSeconds' | 'responsesMaxDecompressedBodyMiB' | 'accountAutoFreezeThreshold' | 'accountAutoFreezeWindowSeconds' | 'accountAutoFreezeDurationSeconds') {
+  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -87,16 +66,26 @@ export function useSettingsForm() {
   const refreshConcurrencyValue = numericModel('refreshConcurrency')
   const maxConcurrentPerAccountValue = numericModel('maxConcurrentPerAccount')
   const requestIntervalMsValue = numericModel('requestIntervalMs')
-  const maxWaitingPerKeyValue = numericModel('maxWaitingPerKey')
-  const maxWaitingPerAccountValue = numericModel('maxWaitingPerAccount')
-  const responsesMaxDecompressedBodyMiBValue = numericModel('responsesMaxDecompressedBodyMiB')
-  const concurrencyWaitTimeoutSecondsValue = numericModel('concurrencyWaitTimeoutSeconds')
-  const accountAutoFreezeThresholdValue = numericModel('accountAutoFreezeThreshold')
-  const accountAutoFreezeWindowSecondsValue = numericModel('accountAutoFreezeWindowSeconds')
-  const accountAutoFreezeDurationSecondsValue = numericModel('accountAutoFreezeDurationSeconds')
-
+  const wsPoolMaxAgeMsValue = numericModel('wsPoolMaxAgeMs')
+  const wsPoolMaxConnectingValue = numericModel('wsPoolMaxConnecting')
+  const wsPoolStreamIdleTimeoutMsValue = numericModel('wsPoolStreamIdleTimeoutMs')
+  const wsPoolFastPathBudgetMsValue = numericModel('wsPoolFastPathBudgetMs')
+  const wsPoolErrors = computed(() => ({
+    maxAge: positiveIntegerError(form.wsPoolMaxAgeMs),
+    maxConnecting: positiveIntegerError(form.wsPoolMaxConnecting, 4_294_967_295),
+    streamIdleTimeout: positiveIntegerError(form.wsPoolStreamIdleTimeoutMs),
+    fastPathBudget: positiveIntegerError(form.wsPoolFastPathBudgetMs),
+  }))
   const minCodexDesktopVersionError = computed(() => versionError(form.minCodexDesktopVersion))
   const minCodexCliVersionError = computed(() => versionError(form.minCodexCliVersion))
+
+  function positiveIntegerError(value: number | null, max = Number.MAX_SAFE_INTEGER): string {
+    if (loading.value)
+      return ''
+    if (value === null || !Number.isSafeInteger(value) || value < 1)
+      return '请输入大于 0 的整数'
+    return value > max ? `最大值为 ${max}` : ''
+  }
 
   function versionError(value: string): string {
     const normalized = value.trim()
@@ -124,13 +113,11 @@ export function useSettingsForm() {
     form.usageRetentionDays = data.usageRetentionDays
     form.opsEventRetentionDays = data.opsEventRetentionDays
     form.auditRetentionDays = data.auditRetentionDays
-    form.accountAutoFreezeEnabled = data.accountAutoFreezeEnabled
-    form.accountAutoFreezeThreshold = data.accountAutoFreezeThreshold
-    form.accountAutoFreezeWindowSeconds = data.accountAutoFreezeWindowSeconds
-    form.accountAutoFreezeDurationSeconds = data.accountAutoFreezeDurationSeconds
-    form.accountAutoFreezeProbeEnabled = data.accountAutoFreezeProbeEnabled
-    form.accountAutoFreezeProbeModel = data.accountAutoFreezeProbeModel ?? ''
-    form.accountAutoFreezeAdaptiveConcurrency = data.accountAutoFreezeAdaptiveConcurrency
+    form.wsPoolEnabled = data.wsPoolEnabled
+    form.wsPoolMaxAgeMs = data.wsPoolMaxAgeMs
+    form.wsPoolMaxConnecting = data.wsPoolMaxConnecting
+    form.wsPoolStreamIdleTimeoutMs = data.wsPoolStreamIdleTimeoutMs
+    form.wsPoolFastPathBudgetMs = data.wsPoolFastPathBudgetMs
     mappings.value = Object.entries(data.modelMappings || {}).map(([requestedModel, upstreamModel]) => ({
       requestedModel,
       upstreamModel: String(upstreamModel),
@@ -187,19 +174,17 @@ export function useSettingsForm() {
   async function saveSettings() {
     if (saving.value || loading.value || !savedRequestLocation.value || !form.openaiClientProfile || !form.xaiClientProfile)
       return
-    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, maxWaitingPerKey, maxWaitingPerAccount, concurrencyWaitTimeoutSeconds, responsesMaxDecompressedBodyMiB, accountAutoFreezeThreshold, accountAutoFreezeWindowSeconds, accountAutoFreezeDurationSeconds } = form
-    if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy || maxWaitingPerKey === null || maxWaitingPerAccount === null || concurrencyWaitTimeoutSeconds === null) {
-      toast.warning('请完整填写并发、队列、凭据刷新参数和调度策略')
+    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs } = form
+    if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy) {
+      toast.warning('请完整填写运行参数和调度策略')
       return
     }
-    if (responsesMaxDecompressedBodyMiB === null || !Number.isInteger(responsesMaxDecompressedBodyMiB) || responsesMaxDecompressedBodyMiB < 1
-      || !Number.isSafeInteger(responsesMaxDecompressedBodyMiB * MIB)) {
-      toast.warning('Responses 解压上限应为有效的正整数（MiB）')
+    if (wsPoolMaxAgeMs === null || wsPoolMaxConnecting === null || wsPoolStreamIdleTimeoutMs === null || wsPoolFastPathBudgetMs === null) {
+      toast.warning('请完整填写 WebSocket 连接池参数')
       return
     }
-    if (![maxWaitingPerKey, maxWaitingPerAccount].every(value => Number.isInteger(value) && value >= 0 && value <= 1000)
-      || !Number.isInteger(concurrencyWaitTimeoutSeconds) || concurrencyWaitTimeoutSeconds < 1 || concurrencyWaitTimeoutSeconds > 120) {
-      toast.warning('队列容量应为 0～1000 的整数，排队超时应为 1～120 秒的整数')
+    if (Object.values(wsPoolErrors.value).some(Boolean)) {
+      toast.warning('请修正 WebSocket 连接池参数')
       return
     }
     if (minCodexDesktopVersionError.value || minCodexCliVersionError.value) {
@@ -253,13 +238,11 @@ export function useSettingsForm() {
         usageRetentionDays: form.usageRetentionDays,
         opsEventRetentionDays: form.opsEventRetentionDays,
         auditRetentionDays: form.auditRetentionDays,
-        accountAutoFreezeEnabled: form.accountAutoFreezeEnabled,
-        accountAutoFreezeThreshold,
-        accountAutoFreezeWindowSeconds,
-        accountAutoFreezeDurationSeconds,
-        accountAutoFreezeProbeEnabled: form.accountAutoFreezeProbeEnabled,
-        accountAutoFreezeProbeModel: probeModel || null,
-        accountAutoFreezeAdaptiveConcurrency: form.accountAutoFreezeAdaptiveConcurrency,
+        wsPoolEnabled: form.wsPoolEnabled,
+        wsPoolMaxAgeMs,
+        wsPoolMaxConnecting,
+        wsPoolStreamIdleTimeoutMs,
+        wsPoolFastPathBudgetMs,
       })
       applySettings(result)
       toast.success('设置已保存')
@@ -286,13 +269,11 @@ export function useSettingsForm() {
     refreshConcurrencyValue,
     maxConcurrentPerAccountValue,
     requestIntervalMsValue,
-    maxWaitingPerKeyValue,
-    maxWaitingPerAccountValue,
-    concurrencyWaitTimeoutSecondsValue,
-    responsesMaxDecompressedBodyMiBValue,
-    accountAutoFreezeThresholdValue,
-    accountAutoFreezeWindowSecondsValue,
-    accountAutoFreezeDurationSecondsValue,
+    wsPoolMaxAgeMsValue,
+    wsPoolMaxConnectingValue,
+    wsPoolStreamIdleTimeoutMsValue,
+    wsPoolFastPathBudgetMsValue,
+    wsPoolErrors,
     minCodexDesktopVersionError,
     minCodexCliVersionError,
     saveSettings,

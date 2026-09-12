@@ -1,6 +1,10 @@
 use std::path::Path;
 
-use provider_openai::config::{DEFAULT_STREAM_MAX_RETRIES, MAX_STREAM_MAX_RETRIES, OpenAiConfig};
+use chrono::{TimeZone as _, Utc};
+use provider_openai::config::{
+    CodexWebSocketPoolSettings, CodexWireProfileConfig, DEFAULT_STREAM_MAX_RETRIES,
+    MAX_STREAM_MAX_RETRIES, OpenAiConfig,
+};
 
 #[test]
 fn openai_config_ignores_removed_yaml_identity_fields() {
@@ -77,6 +81,7 @@ fn openai_config_defaults_to_the_provider_owned_operating_values() {
             config.ws_pool.max_age_ms,
             config.ws_pool.max_connecting,
             config.ws_pool.stream_idle_timeout_ms,
+            config.ws_pool.fast_path_budget_ms,
             config.quota.refresh_interval_minutes,
             config.auth.refresh_enabled,
             config.auth.oauth_client_id.as_str(),
@@ -89,6 +94,7 @@ fn openai_config_defaults_to_the_provider_owned_operating_values() {
             3_300_000,
             8,
             300_000,
+            800,
             15,
             true,
             "app_EMoamEEZ73f0CkXaXp7hrann",
@@ -100,6 +106,40 @@ fn openai_config_defaults_to_the_provider_owned_operating_values() {
         provider_openai::transport::profile::CodexWireProfile::default().user_agent(),
         "Codex Desktop/0.153.4 (Mac OS 15.7.1; arm64) unknown (Codex Desktop; 26.901.51231)"
     );
+}
+
+#[test]
+fn openai_config_rejects_zero_ws_pool_numeric_fields() {
+    // max_age / max_connecting / fast_path_budget 为 0 时池语义不成立，启动即拒绝。
+    for mutate in [
+        (|config: &mut OpenAiConfig| config.ws_pool.max_age_ms = 0) as fn(&mut OpenAiConfig),
+        (|config: &mut OpenAiConfig| config.ws_pool.max_connecting = 0) as fn(&mut OpenAiConfig),
+        (|config: &mut OpenAiConfig| config.ws_pool.fast_path_budget_ms = 0)
+            as fn(&mut OpenAiConfig),
+    ] {
+        let mut config = valid_config();
+        mutate(&mut config);
+        assert!(
+            config
+                .resolve_and_validate(Path::new("/srv/gateway"))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn openai_ws_pool_settings_parse_without_fast_path_budget_field() {
+    // 已部署 config.yaml 的 ws_pool 段没有 fast_path_budget_ms；缺少该字段时必须
+    // 回落到代码默认值，否则旧配置无法启动。
+    let settings: CodexWebSocketPoolSettings = serde_json::from_value(serde_json::json!({
+        "enabled": true,
+        "max_age_ms": 3_300_000,
+        "max_connecting": 8,
+        "stream_idle_timeout_ms": 300_000
+    }))
+    .expect("ws_pool settings without fast_path_budget_ms should still parse");
+
+    assert_eq!(settings.fast_path_budget_ms, 800);
 }
 
 #[test]

@@ -26,13 +26,11 @@ export interface RuntimeSettings {
   usageRetentionDays: number
   opsEventRetentionDays: number
   auditRetentionDays: number
-  accountAutoFreezeEnabled: boolean
-  accountAutoFreezeThreshold: number
-  accountAutoFreezeWindowSeconds: number
-  accountAutoFreezeDurationSeconds: number
-  accountAutoFreezeProbeEnabled: boolean
-  accountAutoFreezeProbeModel: string | null
-  accountAutoFreezeAdaptiveConcurrency: boolean
+  wsPoolEnabled: boolean
+  wsPoolMaxAgeMs: number
+  wsPoolMaxConnecting: number
+  wsPoolStreamIdleTimeoutMs: number
+  wsPoolFastPathBudgetMs: number
   updatedAt: string
 }
 

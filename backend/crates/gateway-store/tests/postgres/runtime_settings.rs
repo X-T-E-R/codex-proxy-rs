@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use gateway_core::provider_ports::ProviderWebSocketPoolPolicyPort;
 use gateway_store::postgres::{
     PgRuntimeSettingsRepository, RuntimeSettingsRepository, RuntimeSettingsUpdate,
 };
@@ -32,13 +34,11 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
         usage_retention_days: 31,
         ops_event_retention_days: 30,
         audit_retention_days: 90,
-        account_auto_freeze_enabled: true,
-        account_auto_freeze_threshold: 12,
-        account_auto_freeze_window_seconds: 600,
-        account_auto_freeze_duration_seconds: 7_200,
-        account_auto_freeze_probe_enabled: true,
-        account_auto_freeze_probe_model: None,
-        account_auto_freeze_adaptive_concurrency: true,
+        ws_pool_enabled: true,
+        ws_pool_max_age_ms: 3_300_000,
+        ws_pool_max_connecting: 8,
+        ws_pool_stream_idle_timeout_ms: 300_000,
+        ws_pool_fast_path_budget_ms: 800,
     }
 }
 
@@ -90,6 +90,75 @@ fn runtime_settings_reject_non_semver_client_min() {
     };
 
     assert!(settings.validate().is_err());
+}
+
+#[test]
+fn runtime_settings_reject_zero_ws_pool_numeric_fields() {
+    // 四个 ws_pool 数值字段为 0 时池语义不成立；DB CHECK 之外的应用层校验先拒绝。
+    for mutate in [
+        (|update: &mut RuntimeSettingsUpdate| update.ws_pool_max_age_ms = 0)
+            as fn(&mut RuntimeSettingsUpdate),
+        (|update: &mut RuntimeSettingsUpdate| update.ws_pool_max_connecting = 0)
+            as fn(&mut RuntimeSettingsUpdate),
+        (|update: &mut RuntimeSettingsUpdate| {
+            update.ws_pool_stream_idle_timeout_ms = 0;
+        }) as fn(&mut RuntimeSettingsUpdate),
+        (|update: &mut RuntimeSettingsUpdate| {
+            update.ws_pool_fast_path_budget_ms = 0;
+        }) as fn(&mut RuntimeSettingsUpdate),
+    ] {
+        let mut update = settings_with_margin(3_600);
+        mutate(&mut update);
+        assert!(update.validate().is_err());
+    }
+}
+
+#[tokio::test]
+async fn ws_pool_settings_should_round_trip_through_settings_and_policy_port() {
+    let Some(database) = TestDatabase::create("ws_pool_settings").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let update = RuntimeSettingsUpdate {
+        ws_pool_enabled: false,
+        ws_pool_max_age_ms: 1_800_000,
+        ws_pool_max_connecting: 4,
+        ws_pool_stream_idle_timeout_ms: 120_000,
+        ws_pool_fast_path_budget_ms: 3_000,
+        ..settings_with_margin(3_600)
+    };
+
+    repository
+        .update_runtime_settings(update)
+        .await
+        .expect("update ws pool settings");
+    let settings = repository
+        .load_runtime_settings()
+        .await
+        .expect("load ws pool settings");
+
+    assert_eq!(
+        (
+            settings.ws_pool_enabled,
+            settings.ws_pool_max_age_ms,
+            settings.ws_pool_max_connecting,
+            settings.ws_pool_stream_idle_timeout_ms,
+            settings.ws_pool_fast_path_budget_ms,
+        ),
+        (false, 1_800_000, 4, 120_000, 3_000)
+    );
+
+    // Provider 拉取端口读同一行事实并解码为带校验的中性策略类型。
+    let policy = repository
+        .load_websocket_pool_policy()
+        .await
+        .expect("load websocket pool policy");
+    assert!(!policy.enabled());
+    assert_eq!(policy.max_age(), Duration::from_millis(1_800_000));
+    assert_eq!(policy.max_connecting().get(), 4);
+    assert_eq!(policy.stream_idle_timeout(), Duration::from_millis(120_000));
+    assert_eq!(policy.fast_path_budget(), Duration::from_millis(3_000));
+    database.close().await;
 }
 
 #[tokio::test]

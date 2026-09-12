@@ -33,8 +33,6 @@ use super::{
     pump::{PumpKeepalive, PumpLogContext, PumpedWebSocket, transport_metric_reason},
 };
 
-pub(crate) const WEBSOCKET_FAST_PATH_BUDGET: Duration = Duration::from_millis(800);
-
 /// WebSocket 快路径的控制流结果；预算未命中不代表连接失败。
 pub(crate) enum WebSocketFastPath<T> {
     /// 在前台预算内获得结果。
@@ -117,7 +115,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
     origin_key: &str,
     fast_path_budget: Option<Duration>,
     require_pool: bool,
-    fallback_stream_idle_timeout: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
 ) -> Result<WebSocketFastPath<PreparedWebSocket>, CodexWebSocketExchangeError> {
     let decision_started_at = Instant::now();
     let Some((pool, key)) = pool else {
@@ -131,7 +129,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
             breaker,
             origin_key,
             fast_path_budget,
-            fallback_stream_idle_timeout,
+            stream_idle_timeout,
             decision_started_at,
         )
         .await;
@@ -165,7 +163,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
                 },
                 connect_elapsed: None,
                 decision_wait_elapsed: decision_started_at.elapsed(),
-                stream_idle_timeout: pool.stream_idle_timeout(),
+                stream_idle_timeout,
             }))
         }
         WebSocketPoolAcquire::Connect(connect_lease) => {
@@ -182,6 +180,7 @@ pub(crate) async fn prepare_response_create_request_with_pool(
                 breaker,
                 origin_key,
                 fast_path_budget,
+                stream_idle_timeout,
                 decision_started_at,
             )
             .await
@@ -247,6 +246,7 @@ async fn prepare_unpooled_websocket(
     }))
 }
 
+#[expect(clippy::too_many_arguments)]
 async fn prepare_pooled_websocket(
     request: &CodexWebSocketRequest,
     pool: &CodexWebSocketPool,
@@ -254,6 +254,7 @@ async fn prepare_pooled_websocket(
     breaker: &WebSocketOriginBreaker,
     origin_key: &str,
     fast_path_budget: Option<Duration>,
+    stream_idle_timeout: Option<Duration>,
     decision_started_at: Instant,
 ) -> Result<WebSocketFastPath<PreparedWebSocket>, CodexWebSocketExchangeError> {
     let permit = match acquire_breaker_permit(breaker, origin_key, fast_path_budget.is_some()) {
@@ -279,7 +280,7 @@ async fn prepare_pooled_websocket(
             },
             connect_elapsed: Some(handoff.connect_elapsed),
             decision_wait_elapsed: decision_started_at.elapsed(),
-            stream_idle_timeout: pool.stream_idle_timeout(),
+            stream_idle_timeout,
         })),
         WebSocketFastPath::Missed => Ok(WebSocketFastPath::Missed),
     }
@@ -535,7 +536,7 @@ async fn wait_for_shared_connect(
     wait_for_fast_path(waiter.started_at(), fast_path_budget, waiter.wait()).await
 }
 
-// 同一次 opening 的所有等待者共享截止时间；后来的请求不会重置 800ms 预算。
+// 同一次 opening 的所有等待者共享截止时间；后来的请求不会重置快路径预算。
 async fn wait_for_fast_path<F: Future>(
     started_at: TokioInstant,
     budget: Option<Duration>,

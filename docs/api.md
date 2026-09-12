@@ -1050,13 +1050,11 @@ minCodexCliVersion
 usageRetentionDays
 opsEventRetentionDays
 auditRetentionDays
-accountAutoFreezeEnabled
-accountAutoFreezeThreshold
-accountAutoFreezeWindowSeconds
-accountAutoFreezeDurationSeconds
-accountAutoFreezeProbeEnabled
-accountAutoFreezeProbeModel
-accountAutoFreezeAdaptiveConcurrency
+wsPoolEnabled
+wsPoolMaxAgeMs
+wsPoolMaxConnecting
+wsPoolStreamIdleTimeoutMs
+wsPoolFastPathBudgetMs
 ```
 
 `requestLocationEnabled` 是必填布尔值，默认 `false`：关闭时不覆盖客户端原有位置和时区；开启时使用已保存的
@@ -1081,6 +1079,28 @@ accountAutoFreezeAdaptiveConcurrency
 
 `rotationStrategy` 可取 `smart`、`quota_reset_priority`、`round_robin`、`sticky`。
 两个 `minCodex*Version` 字段为 `string | null`，只设置最低版本，不存在最大版本字段。
+`wsPool*` 控制 OpenAI 上游 WebSocket 连接池，更新时五个字段均必填：
+
+| 字段 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `wsPoolEnabled` | `true` | 是否启用上游连接池 |
+| `wsPoolMaxAgeMs` | `3300000` | 连接最大存活时间，单位毫秒；到期后不再复用 |
+| `wsPoolMaxConnecting` | `8` | 所有账号合计的并发建连上限，非请求并发数；最大 `4294967295` |
+| `wsPoolStreamIdleTimeoutMs` | `300000` | 等待下一条上游业务消息的空闲超时，单位毫秒 |
+| `wsPoolFastPathBudgetMs` | `800` | 自动传输请求等待连接就绪的预算，单位毫秒；超时回退 HTTP SSE |
+
+四个数值字段均为正整数，关闭连接池时也需提交有效值。设置在同一事务内保存、推进
+`config_revision` 并记录审计；Provider 每 5 秒从数据库对账，无需重启。运行中读取失败时保留
+上次已加载的策略；请求开始准备连接时固定预算与空闲超时，后续更新不改变该请求的超时。
+
+关闭连接池后，自动传输的新请求改用 HTTP SSE，已开始的生成继续完成，空闲和归还的连接被关闭。
+必须使用 WebSocket 或原连接的续接仍遵守原协议限制，可能因连接池不可用而失败；此设置不关闭
+客户端到网关的 WebSocket 接口。
+
+迁移 `0006_ws_pool_runtime_settings.sql` 为已有实例填入表中默认值，不导入旧 `config.yaml` 的
+`openai.ws_pool` 自定义值。升级后在管理端核对并保存所需参数。每次启动均在对外服务前恢复数据库
+中的策略；配置文件保留兼容解析，但不覆盖已保存的运行设置。旧管理 API 调用方需补齐五个字段，
+缺失时返回 `422`，不会用默认值覆盖当前配置。
 
 ### 模型定价
 

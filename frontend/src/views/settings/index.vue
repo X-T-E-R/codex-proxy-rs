@@ -17,8 +17,8 @@ import RequestLocationCard from './components/RequestLocationCard.vue'
 import RequestQueueCard from './components/RequestQueueCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
-import SettingsAccessSection from './components/SettingsAccessSection.vue'
-import TokenRefreshCard from './components/TokenRefreshCard.vue'
+import WebSocketPoolCard from './components/WebSocketPoolCard.vue'
+import { useAdminApiKey } from './composables/useAdminApiKey'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { rotationOptions } from './constants'
 import PricingSection from './pricing/index.vue'
@@ -64,14 +64,11 @@ const {
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
   requestIntervalMsValue,
-  maxWaitingPerKeyValue,
-  maxWaitingPerAccountValue,
-  concurrencyWaitTimeoutSecondsValue,
-  responsesMaxDecompressedBodyMiBValue,
-  accountAutoFreezeThresholdValue,
-  accountAutoFreezeWindowSecondsValue,
-  accountAutoFreezeDurationSecondsValue,
-
+  wsPoolMaxAgeMsValue,
+  wsPoolMaxConnectingValue,
+  wsPoolStreamIdleTimeoutMsValue,
+  wsPoolFastPathBudgetMsValue,
+  wsPoolErrors,
   minCodexDesktopVersionError,
   minCodexCliVersionError,
   saveSettings,
@@ -132,9 +129,24 @@ watch(section, (value) => {
         </BaseButton>
       </div>
 
-      <SettingsAccessSection
-        v-if="visited.has('access')"
-        v-show="section === 'access'"
+      <RuntimeSettingsCard
+        v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
+        v-model:refresh-margin-seconds="refreshMarginSecondsValue"
+        v-model:refresh-concurrency="refreshConcurrencyValue"
+        v-model:request-interval-ms="requestIntervalMsValue"
+      />
+
+      <WebSocketPoolCard
+        v-model:ws-pool-enabled="form.wsPoolEnabled"
+        v-model:ws-pool-max-age-ms="wsPoolMaxAgeMsValue"
+        v-model:ws-pool-max-connecting="wsPoolMaxConnectingValue"
+        v-model:ws-pool-stream-idle-timeout-ms="wsPoolStreamIdleTimeoutMsValue"
+        v-model:ws-pool-fast-path-budget-ms="wsPoolFastPathBudgetMsValue"
+        :disabled="loading || saving"
+        :errors="wsPoolErrors"
+      />
+
+      <ClientVersionSettings
         v-model:min-codex-desktop-version="form.minCodexDesktopVersion"
         v-model:min-codex-cli-version="form.minCodexCliVersion"
         v-model:responses-max-decompressed-body-mi-b="responsesMaxDecompressedBodyMiBValue"

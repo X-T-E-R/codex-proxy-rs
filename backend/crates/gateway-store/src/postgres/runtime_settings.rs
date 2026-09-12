@@ -11,8 +11,8 @@ use sqlx::{PgPool, Postgres, Transaction};
 use gateway_core::account::RotationStrategy;
 use gateway_core::policy::CodexClientVersion;
 use gateway_core::provider_ports::{
-    ProviderFreezePolicy, ProviderRefreshPolicy, ProviderRuntimePolicyPort, ProviderStoreError,
-    ProviderStoreErrorKind,
+    ProviderRefreshPolicy, ProviderRuntimePolicyPort, ProviderStoreError, ProviderStoreErrorKind,
+    ProviderWebSocketPoolPolicy, ProviderWebSocketPoolPolicyPort,
 };
 
 use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
@@ -40,13 +40,11 @@ pub struct RuntimeSettings {
     pub usage_retention_days: u32,
     pub ops_event_retention_days: u32,
     pub audit_retention_days: u32,
-    pub account_auto_freeze_enabled: bool,
-    pub account_auto_freeze_threshold: u32,
-    pub account_auto_freeze_window_seconds: u64,
-    pub account_auto_freeze_duration_seconds: u64,
-    pub account_auto_freeze_probe_enabled: bool,
-    pub account_auto_freeze_probe_model: Option<String>,
-    pub account_auto_freeze_adaptive_concurrency: bool,
+    pub ws_pool_enabled: bool,
+    pub ws_pool_max_age_ms: u64,
+    pub ws_pool_max_connecting: u32,
+    pub ws_pool_stream_idle_timeout_ms: u64,
+    pub ws_pool_fast_path_budget_ms: u64,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -75,33 +73,16 @@ impl fmt::Debug for RuntimeSettings {
             .field("usage_retention_days", &self.usage_retention_days)
             .field("ops_event_retention_days", &self.ops_event_retention_days)
             .field("audit_retention_days", &self.audit_retention_days)
+            .field("ws_pool_enabled", &self.ws_pool_enabled)
+            .field("ws_pool_max_age_ms", &self.ws_pool_max_age_ms)
+            .field("ws_pool_max_connecting", &self.ws_pool_max_connecting)
             .field(
-                "account_auto_freeze_enabled",
-                &self.account_auto_freeze_enabled,
+                "ws_pool_stream_idle_timeout_ms",
+                &self.ws_pool_stream_idle_timeout_ms,
             )
             .field(
-                "account_auto_freeze_threshold",
-                &self.account_auto_freeze_threshold,
-            )
-            .field(
-                "account_auto_freeze_window_seconds",
-                &self.account_auto_freeze_window_seconds,
-            )
-            .field(
-                "account_auto_freeze_duration_seconds",
-                &self.account_auto_freeze_duration_seconds,
-            )
-            .field(
-                "account_auto_freeze_probe_enabled",
-                &self.account_auto_freeze_probe_enabled,
-            )
-            .field(
-                "account_auto_freeze_probe_model",
-                &self.account_auto_freeze_probe_model,
-            )
-            .field(
-                "account_auto_freeze_adaptive_concurrency",
-                &self.account_auto_freeze_adaptive_concurrency,
+                "ws_pool_fast_path_budget_ms",
+                &self.ws_pool_fast_path_budget_ms,
             )
             .field("updated_at", &self.updated_at)
             .finish()
@@ -130,13 +111,11 @@ pub struct RuntimeSettingsUpdate {
     pub usage_retention_days: u32,
     pub ops_event_retention_days: u32,
     pub audit_retention_days: u32,
-    pub account_auto_freeze_enabled: bool,
-    pub account_auto_freeze_threshold: u32,
-    pub account_auto_freeze_window_seconds: u64,
-    pub account_auto_freeze_duration_seconds: u64,
-    pub account_auto_freeze_probe_enabled: bool,
-    pub account_auto_freeze_probe_model: Option<String>,
-    pub account_auto_freeze_adaptive_concurrency: bool,
+    pub ws_pool_enabled: bool,
+    pub ws_pool_max_age_ms: u64,
+    pub ws_pool_max_connecting: u32,
+    pub ws_pool_stream_idle_timeout_ms: u64,
+    pub ws_pool_fast_path_budget_ms: u64,
 }
 
 impl fmt::Debug for RuntimeSettingsUpdate {
@@ -169,9 +148,10 @@ impl RuntimeSettingsUpdate {
             || self.usage_retention_days < 31
             || self.ops_event_retention_days == 0
             || self.audit_retention_days == 0
-            || !(2..=1_000).contains(&self.account_auto_freeze_threshold)
-            || !(60..=3_600).contains(&self.account_auto_freeze_window_seconds)
-            || !(300..=604_800).contains(&self.account_auto_freeze_duration_seconds)
+            || self.ws_pool_max_age_ms == 0
+            || self.ws_pool_max_connecting == 0
+            || self.ws_pool_stream_idle_timeout_ms == 0
+            || self.ws_pool_fast_path_budget_ms == 0
             || !valid_model_mappings(&self.model_mappings)
             || !valid_client_version(self.min_codex_desktop_version.as_deref())
             || !valid_client_version(self.min_codex_cli_version.as_deref())
@@ -237,11 +217,9 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                     rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
-                    min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds,
-                    account_auto_freeze_enabled, account_auto_freeze_threshold,
-                    account_auto_freeze_window_seconds, account_auto_freeze_duration_seconds,
-                    account_auto_freeze_probe_enabled, account_auto_freeze_probe_model,
-                    account_auto_freeze_adaptive_concurrency
+                    min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
+                    ws_pool_max_connecting, ws_pool_stream_idle_timeout_ms,
+                    ws_pool_fast_path_budget_ms, updated_at
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -315,6 +293,28 @@ impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
     }
 }
 
+impl ProviderWebSocketPoolPolicyPort for PgRuntimeSettingsRepository {
+    fn load_websocket_pool_policy(
+        &self,
+    ) -> futures::future::BoxFuture<'_, Result<ProviderWebSocketPoolPolicy, ProviderStoreError>>
+    {
+        Box::pin(async move {
+            let settings = RuntimeSettingsRepository::load_runtime_settings(self)
+                .await
+                .map_err(|_| provider_unavailable("load WebSocket pool policy"))?;
+            let max_connecting = NonZeroU32::new(settings.ws_pool_max_connecting)
+                .ok_or_else(|| provider_invalid("decode WebSocket pool policy"))?;
+            ProviderWebSocketPoolPolicy::try_new(
+                settings.ws_pool_enabled,
+                Duration::from_millis(settings.ws_pool_max_age_ms),
+                max_connecting,
+                Duration::from_millis(settings.ws_pool_stream_idle_timeout_ms),
+                Duration::from_millis(settings.ws_pool_fast_path_budget_ms),
+            )
+        })
+    }
+}
+
 pub(crate) async fn load_runtime_settings_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<RuntimeSettings> {
@@ -323,11 +323,9 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 refresh_concurrency, max_concurrent_per_account, request_interval_ms,
                 rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
-                min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds,
-                account_auto_freeze_enabled, account_auto_freeze_threshold,
-                account_auto_freeze_window_seconds, account_auto_freeze_duration_seconds,
-                account_auto_freeze_probe_enabled, account_auto_freeze_probe_model,
-                account_auto_freeze_adaptive_concurrency
+                min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
+                ws_pool_max_connecting, ws_pool_stream_idle_timeout_ms,
+                ws_pool_fast_path_budget_ms, updated_at
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -362,22 +360,11 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 audit_retention_days = $10,
 	                 min_codex_desktop_version = $11,
 	                 min_codex_cli_version = $12,
-                     max_waiting_per_key = $13,
-                     max_waiting_per_account = $14,
-                     concurrency_wait_timeout_seconds = $15,
-                     account_auto_freeze_enabled = $16,
-                     account_auto_freeze_threshold = $17,
-                     account_auto_freeze_window_seconds = $18,
-                     account_auto_freeze_duration_seconds = $19,
-                     account_auto_freeze_probe_enabled = $20,
-                     account_auto_freeze_probe_model = $21,
-                     account_auto_freeze_adaptive_concurrency = $22,
-                     request_location_json = $23,
-                     request_location_enabled = $24,
-                     responses_max_decompressed_body_bytes = $25,
-                     provider_request_profiles_json = provider_request_profiles_json
-                         || case when $26::jsonb is null then '{}'::jsonb else jsonb_build_object('openai', $26::jsonb) end
-                         || case when $27::jsonb is null then '{}'::jsonb else jsonb_build_object('xai', $27::jsonb) end,
+	                 ws_pool_enabled = $13,
+	                 ws_pool_max_age_ms = $14,
+	                 ws_pool_max_connecting = $15,
+	                 ws_pool_stream_idle_timeout_ms = $16,
+	                 ws_pool_fast_path_budget_ms = $17,
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -394,33 +381,11 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(i64::from(update.audit_retention_days))
     .bind(update.min_codex_desktop_version.as_deref())
     .bind(update.min_codex_cli_version.as_deref())
-    .bind(i64::from(update.max_waiting_per_key))
-    .bind(i64::from(update.max_waiting_per_account))
-    .bind(i64::from(update.concurrency_wait_timeout_seconds))
-    .bind(update.account_auto_freeze_enabled)
-    .bind(i64::from(update.account_auto_freeze_threshold))
-    .bind(i64::try_from(update.account_auto_freeze_window_seconds).map_err(|_| invalid_numeric())?)
-    .bind(
-        i64::try_from(update.account_auto_freeze_duration_seconds)
-            .map_err(|_| invalid_numeric())?,
-    )
-    .bind(update.account_auto_freeze_probe_enabled)
-    .bind(update.account_auto_freeze_probe_model.as_deref())
-    .bind(update.account_auto_freeze_adaptive_concurrency)
-    .bind(sqlx::types::Json(
-        update
-            .request_location
-            .clone()
-            .normalized()
-            .map_err(|_| invalid_location())?,
-    ))
-    .bind(update.request_location_enabled)
-    .bind(
-        i64::try_from(update.responses_max_decompressed_body_bytes)
-            .map_err(|_| invalid_numeric())?,
-    )
-    .bind(update.openai_client_profile.as_ref().map(|profile| sqlx::types::Json(profile.expose_to_provider())))
-    .bind(update.xai_client_profile.as_ref().map(|profile| sqlx::types::Json(profile.expose_to_provider())))
+    .bind(update.ws_pool_enabled)
+    .bind(i64::try_from(update.ws_pool_max_age_ms).map_err(|_| invalid_numeric())?)
+    .bind(i64::from(update.ws_pool_max_connecting))
+    .bind(i64::try_from(update.ws_pool_stream_idle_timeout_ms).map_err(|_| invalid_numeric())?)
+    .bind(i64::try_from(update.ws_pool_fast_path_budget_ms).map_err(|_| invalid_numeric())?)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -468,11 +433,9 @@ pub(crate) async fn update_admin_api_key_in_transaction(
     Ok(())
 }
 
+// 列数超过 sqlx 元组 FromRow 的元数上限，用具名列结构接收查询结果。
 #[derive(sqlx::FromRow)]
 struct RuntimeSettingsRow {
-    provider_request_profiles_json: sqlx::types::Json<
-        std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
-    >,
     config_revision: i64,
     admin_api_key: Option<String>,
     refresh_margin_seconds: i64,
@@ -480,40 +443,22 @@ struct RuntimeSettingsRow {
     max_concurrent_per_account: i64,
     request_interval_ms: i64,
     rotation_strategy: String,
-    request_location_enabled: bool,
-    request_location_json: sqlx::types::Json<gateway_core::account::RequestLocation>,
     model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
     usage_retention_days: i64,
     ops_event_retention_days: i64,
     audit_retention_days: i64,
     min_codex_desktop_version: Option<String>,
     min_codex_cli_version: Option<String>,
+    ws_pool_enabled: bool,
+    ws_pool_max_age_ms: i64,
+    ws_pool_max_connecting: i64,
+    ws_pool_stream_idle_timeout_ms: i64,
+    ws_pool_fast_path_budget_ms: i64,
     updated_at: DateTime<Utc>,
-    max_waiting_per_key: i64,
-    max_waiting_per_account: i64,
-    concurrency_wait_timeout_seconds: i64,
-    responses_max_decompressed_body_bytes: i64,
-    account_auto_freeze_enabled: bool,
-    account_auto_freeze_threshold: i64,
-    account_auto_freeze_window_seconds: i64,
-    account_auto_freeze_duration_seconds: i64,
-    account_auto_freeze_probe_enabled: bool,
-    account_auto_freeze_probe_model: Option<String>,
-    account_auto_freeze_adaptive_concurrency: bool,
 }
 
 fn runtime_settings_from_row(mut row: RuntimeSettingsRow) -> StoreResult<RuntimeSettings> {
     Ok(RuntimeSettings {
-        openai_client_profile: row
-            .provider_request_profiles_json
-            .0
-            .remove("openai")
-            .map(gateway_core::account::OpaqueProviderData::new),
-        xai_client_profile: row
-            .provider_request_profiles_json
-            .0
-            .remove("xai")
-            .map(gateway_core::account::OpaqueProviderData::new),
         config_revision: Revision::new(to_u64(row.config_revision)?)?,
         admin_api_key: row.admin_api_key,
         refresh_margin_seconds: to_u64(row.refresh_margin_seconds)?,
@@ -521,30 +466,18 @@ fn runtime_settings_from_row(mut row: RuntimeSettingsRow) -> StoreResult<Runtime
         max_concurrent_per_account: to_u32(row.max_concurrent_per_account)?,
         request_interval_ms: to_u64(row.request_interval_ms)?,
         rotation_strategy: row.rotation_strategy,
-        request_location_enabled: row.request_location_enabled,
-        request_location: row
-            .request_location_json
-            .0
-            .normalized()
-            .map_err(|_| invalid_location())?,
         model_mappings: row.model_mappings_json.0,
         usage_retention_days: to_u32(row.usage_retention_days)?,
         ops_event_retention_days: to_u32(row.ops_event_retention_days)?,
         audit_retention_days: to_u32(row.audit_retention_days)?,
         min_codex_desktop_version: row.min_codex_desktop_version,
         min_codex_cli_version: row.min_codex_cli_version,
+        ws_pool_enabled: row.ws_pool_enabled,
+        ws_pool_max_age_ms: to_u64(row.ws_pool_max_age_ms)?,
+        ws_pool_max_connecting: to_u32(row.ws_pool_max_connecting)?,
+        ws_pool_stream_idle_timeout_ms: to_u64(row.ws_pool_stream_idle_timeout_ms)?,
+        ws_pool_fast_path_budget_ms: to_u64(row.ws_pool_fast_path_budget_ms)?,
         updated_at: row.updated_at,
-        max_waiting_per_key: to_u32(row.max_waiting_per_key)?,
-        max_waiting_per_account: to_u32(row.max_waiting_per_account)?,
-        concurrency_wait_timeout_seconds: to_u32(row.concurrency_wait_timeout_seconds)?,
-        responses_max_decompressed_body_bytes: to_u64(row.responses_max_decompressed_body_bytes)?,
-        account_auto_freeze_enabled: row.account_auto_freeze_enabled,
-        account_auto_freeze_threshold: to_u32(row.account_auto_freeze_threshold)?,
-        account_auto_freeze_window_seconds: to_u64(row.account_auto_freeze_window_seconds)?,
-        account_auto_freeze_duration_seconds: to_u64(row.account_auto_freeze_duration_seconds)?,
-        account_auto_freeze_probe_enabled: row.account_auto_freeze_probe_enabled,
-        account_auto_freeze_probe_model: row.account_auto_freeze_probe_model,
-        account_auto_freeze_adaptive_concurrency: row.account_auto_freeze_adaptive_concurrency,
     })
 }
 

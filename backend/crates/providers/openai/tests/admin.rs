@@ -36,15 +36,16 @@ use gateway_core::provider_ports::{
     ProviderArtifactProfile, ProviderArtifactProfileCachePort, ProviderCatalogCacheKey,
     ProviderCatalogCachePort, ProviderCooldown, ProviderCooldownPort, ProviderCooldownScope,
     ProviderCredentialState, ProviderCredentialStatePort, ProviderRefreshPolicy,
-    ProviderRuntimePolicyPort, ProviderScopedCooldown, ProviderStoreError, ProviderStorePorts,
+    ProviderRuntimePolicyPort, ProviderScopedCooldown, ProviderStoreError, ProviderStoreErrorKind,
+    ProviderStorePorts, ProviderWebSocketPoolPolicy, ProviderWebSocketPoolPolicyPort,
 };
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ProviderKind,
     ProviderModel, PublicModelId, RoutingContext, RuntimeAccount, RuntimeAccountDirectory,
     RuntimeSnapshot, UpstreamModelId,
 };
-use gateway_core::task::{WorkerContribution, WorkerKind, WorkerRunnable};
-use provider_openai::config::OpenAiConfig;
+use gateway_core::task::{WorkerContribution, WorkerCycleContext, WorkerKind, WorkerRunnable};
+use provider_openai::config::{CodexWireProfileConfig, OpenAiConfig};
 use provider_openai::credential::{CodexCredentialCodec, ImportCodexOAuthCredential};
 use provider_openai::transport::profile::APPCAST_POLL_INTERVAL;
 use secrecy::SecretString;
@@ -74,7 +75,7 @@ async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions
     assert_eq!(bundle.core_provider().name(), "openai");
     assert_eq!(bundle.admin_provider().provider_kind().as_str(), "openai");
     let contributions = bundle.take_worker_contributions();
-    assert_eq!(contributions.len(), 7);
+    assert_eq!(contributions.len(), 6);
     assert!(
         contributions
             .iter()
@@ -85,6 +86,32 @@ async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions
             .iter()
             .any(|item| item.kind() == WorkerKind::QuotaCatalogHealth)
     );
+    // WebSocket 连接池策略同步 worker：每个实例都注册（lease: None），5 秒周期对账。
+    let ws_pool_worker = contributions
+        .iter()
+        .find_map(|contribution| match contribution {
+            WorkerContribution::Registration(registration)
+                if registration.id.owner() == "openai-websocket-pool" =>
+            {
+                Some(registration)
+            }
+            WorkerContribution::Registration(_) | WorkerContribution::Disabled { .. } => None,
+        })
+        .expect("WebSocket pool policy worker");
+    assert_eq!(
+        ws_pool_worker.id.kind(),
+        WorkerKind::RuntimeSnapshotReconciliation
+    );
+    let WorkerRunnable::Scheduled {
+        schedule,
+        lease: ws_pool_lease,
+        ..
+    } = &ws_pool_worker.runnable
+    else {
+        panic!("WebSocket pool policy worker must be scheduled");
+    };
+    assert_eq!(schedule.interval(), Duration::from_secs(5));
+    assert!(ws_pool_lease.is_none());
     let release_worker = contributions
         .iter()
         .find_map(|contribution| match contribution {
@@ -139,76 +166,143 @@ async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions
 }
 
 #[tokio::test]
-async fn quota_forecast_observation_reuses_protocol_parser_and_keeps_window_identity() {
+async fn openai_bundle_requires_saved_ws_pool_policy_before_serving() {
     let config = valid_config();
-    let bundle = provider_openai::initialize(config.config.clone(), provider_ports())
-        .await
-        .unwrap();
-    let provider = bundle.admin_provider();
-    let mut window = gateway_admin::model::provider_credentials::ProviderQuotaWindow {
-        key: "codex:604800s".to_owned(),
-        group: "shortTerm".to_owned(),
-        label: "周额度".to_owned(),
-        limit_id: Some("codex".to_owned()),
-        limit_name: None,
-        role: Some(ProviderQuotaWindowRole::Primary),
-        local_usage_attribution: QuotaLocalUsageAttribution::AccountWide,
-        window_seconds: Some(604_800),
-        used_percent: Some(50.0),
-        reset_at: None,
-        limit_reached: false,
-        local_usage: None,
-        provider_data: None,
+    let ports = provider_ports_with_policy(
+        Arc::new(MemoryAccountStore::default()),
+        Arc::new(TestOAuthPending::default()),
+        Arc::new(TestCatalogCache::default()),
+        Arc::new(TestWsPoolPolicy(Mutex::new(None))),
+    );
+    assert!(matches!(
+        provider_openai::initialize(config.config.clone(), ports).await,
+        Err(provider_openai::OpenAiInitializeError::RuntimePolicy)
+    ));
+}
+
+#[tokio::test]
+async fn ws_pool_worker_restores_saved_policy_and_keeps_it_when_store_is_unavailable() {
+    let account_id = "acct_ws_pool_policy";
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: account_id.to_owned(),
+            name: account_id.to_owned(),
+            secret: secret("ws-pool-test-token"),
+            verified_account: profile("ws-pool-test-account"),
+            next_refresh_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+            enabled: true,
+        })
+        .await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(COMPLETED_SESSION_SSE),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/codex/responses"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let policy = Arc::new(TestWsPoolPolicy(Mutex::new(Some(test_ws_pool_policy(
+        false,
+    )))));
+    let mut config = valid_config();
+    config.config.api.base_url = server.uri();
+    // YAML 开启、DB 关闭；第一个请求必须遵守 DB，不能等首轮 worker 才恢复。
+    config.config.ws_pool.enabled = true;
+    let mut bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with_policy(
+            store,
+            Arc::new(TestOAuthPending::default()),
+            Arc::new(TestCatalogCache::default()),
+            policy.clone(),
+        ),
+    )
+    .await
+    .expect("OpenAI bundle");
+    let registration = bundle
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|item| match item {
+            WorkerContribution::Registration(registration)
+                if registration.id.owner() == "openai-websocket-pool" =>
+            {
+                Some(registration)
+            }
+            _ => None,
+        })
+        .expect("pool worker");
+    let WorkerRunnable::Scheduled { task, .. } = registration.runnable else {
+        panic!("scheduled pool worker");
     };
-    let document = ProviderDocument::new(OpaqueProviderData::new(
-        json!({
-            "requestSummary": {"ignored": true},
-            "rateLimitHeaders": [
-                ["x-codex-primary-used-percent", "32.5"],
-                ["x-codex-primary-window-minutes", "10080"],
-                ["x-codex-primary-reset-at", "1789805447"],
-                ["x-codex-secondary-used-percent", "4"],
-                ["x-codex-secondary-window-minutes", "300"],
-                ["x-codex-secondary-reset-at", "1789218647"],
-                ["x-codex-plan-type", "pro"]
-            ]
-        })
-        .as_object()
-        .unwrap()
-        .clone(),
-    ));
-    let observed = provider
-        .quota_forecast_observation(&document, &window)
+    let provider = bundle.core_provider();
+    for (index, saved) in [Some(false), None, Some(true)].into_iter().enumerate() {
+        if index > 0 {
+            *policy.0.lock().unwrap() = saved.map(test_ws_pool_policy);
+            task.run_cycle(WorkerCycleContext::new(
+                registration.id.clone(),
+                None,
+                CancellationToken::new(),
+            ))
+            .await
+            .expect("policy sync");
+        }
+        let payload = ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("test")),
+                (
+                    "prompt_cache_key".to_owned(),
+                    json!(format!("ws-policy-{index}")),
+                ),
+            ]),
+        )
         .unwrap();
-    assert_eq!(observed.used_percent, 32.5);
-    assert_eq!(observed.plan_type.as_deref(), Some("pro"));
-    assert_eq!(observed.reset_at.timestamp(), 1_789_805_447);
-    window.role = Some(ProviderQuotaWindowRole::Secondary);
-    assert!(
-        provider
-            .quota_forecast_observation(&document, &window)
-            .is_none()
-    );
-    window.role = Some(ProviderQuotaWindowRole::Primary);
-    window.limit_id = Some("other_bucket".to_owned());
-    assert!(
-        provider
-            .quota_forecast_observation(&document, &window)
-            .is_none()
-    );
-    let malformed = ProviderDocument::new(OpaqueProviderData::new(
-        json!({
-            "rateLimitHeaders": "not-a-header-list"
-        })
-        .as_object()
-        .unwrap()
-        .clone(),
-    ));
-    assert!(
-        provider
-            .quota_forecast_observation(&malformed, &window)
-            .is_none()
-    );
+        let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
+        let mut stream = provider
+            .execute(
+                initialized_provider_request(operation, account_id),
+                initialized_attempt_context(&format!("req_ws_policy_{index}"), account_id),
+            )
+            .await
+            .expect("prepare provider stream");
+        if index == 2 {
+            // 恢复启用后应尝试 WS；明确的握手 503 交给 Core 决定重试，不在 Provider 重放。
+            let mut rejection = None;
+            while let Some(event) = stream.next().await {
+                if let Err(error) = event {
+                    rejection = Some(error);
+                    break;
+                }
+            }
+            let error = rejection.expect("upstream handshake 503 must yield a provider error");
+            assert_eq!(error.upstream_status(), Some(503));
+            assert_eq!(
+                error.send_state(),
+                gateway_core::upstream::UpstreamSendState::NotSent
+            );
+        } else {
+            while let Some(event) = stream.next().await {
+                event.expect("disabled pool should complete through HTTP SSE");
+            }
+        }
+        let requests = server.received_requests().await.unwrap();
+        let openings = requests
+            .iter()
+            .filter(|request| request.method == "GET" && request.url.path() == "/codex/responses")
+            .count();
+        assert_eq!(openings, usize::from(index == 2), "request {index}");
+    }
 }
 
 #[tokio::test]
@@ -1511,6 +1605,20 @@ fn provider_ports_with_catalog(
     pending: Arc<TestOAuthPending>,
     catalog_cache: Arc<TestCatalogCache>,
 ) -> ProviderStorePorts {
+    provider_ports_with_policy(
+        accounts,
+        pending,
+        catalog_cache,
+        Arc::new(TestWsPoolPolicy::default()),
+    )
+}
+
+fn provider_ports_with_policy(
+    accounts: Arc<MemoryAccountStore>,
+    pending: Arc<TestOAuthPending>,
+    catalog_cache: Arc<TestCatalogCache>,
+    ws_pool_policy: Arc<TestWsPoolPolicy>,
+) -> ProviderStorePorts {
     ProviderStorePorts::new(
         accounts,
         Arc::new(TestLeaseCoordinator::default()),
@@ -1521,6 +1629,7 @@ fn provider_ports_with_catalog(
         Arc::new(TestCredentialState),
         Arc::new(TestCooldown),
         Arc::new(TestRuntimePolicy),
+        ws_pool_policy,
         pending,
     )
 }
@@ -1787,6 +1896,41 @@ impl ProviderRuntimePolicyPort for TestRuntimePolicy {
                 Duration::from_secs(300),
                 NonZeroU32::new(4).expect("nonzero concurrency"),
             )
+        })
+    }
+}
+
+struct TestWsPoolPolicy(Mutex<Option<ProviderWebSocketPoolPolicy>>);
+
+impl Default for TestWsPoolPolicy {
+    fn default() -> Self {
+        Self(Mutex::new(Some(test_ws_pool_policy(true))))
+    }
+}
+
+fn test_ws_pool_policy(enabled: bool) -> ProviderWebSocketPoolPolicy {
+    ProviderWebSocketPoolPolicy::try_new(
+        enabled,
+        Duration::from_millis(3_300_000),
+        NonZeroU32::new(8).expect("nonzero max connecting"),
+        Duration::from_millis(300_000),
+        Duration::from_millis(800),
+    )
+    .unwrap()
+}
+
+impl ProviderWebSocketPoolPolicyPort for TestWsPoolPolicy {
+    fn load_websocket_pool_policy(
+        &self,
+    ) -> BoxFuture<'_, Result<ProviderWebSocketPoolPolicy, ProviderStoreError>> {
+        let policy = *self.0.lock().unwrap();
+        Box::pin(async move {
+            policy.ok_or_else(|| {
+                ProviderStoreError::new(
+                    ProviderStoreErrorKind::Unavailable,
+                    "load test websocket pool policy",
+                )
+            })
         })
     }
 }
