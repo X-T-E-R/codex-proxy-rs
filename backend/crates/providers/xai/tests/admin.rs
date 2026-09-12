@@ -66,6 +66,7 @@ async fn account_unavailable_clears_real_selector_cooldowns_only_for_deleted_acc
         Arc::new(TestCredentialState),
         cooldowns.clone(),
         Arc::new(TestRuntimePolicy),
+        Arc::new(TestWsPoolPolicy),
         Arc::new(TestOAuthPending::default()),
     );
     let repository = GrokCredentialRepository::new(store.clone());
@@ -1122,6 +1123,7 @@ mod errors {
             Arc::new(TestCredentialState),
             Arc::new(TestCooldown),
             Arc::new(TestRuntimePolicy),
+            Arc::new(TestWsPoolPolicy),
             Arc::new(TestOAuthPending::default()),
         );
         let bundle = provider_xai::initialize(xai_config(), ports).await.unwrap();
