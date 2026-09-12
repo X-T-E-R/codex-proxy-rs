@@ -26,6 +26,7 @@ ENV CPR_VERSION=${CPR_VERSION}
 ENV CPR_GIT_SHA=${CPR_GIT_SHA}
 ENV CPR_BUILD_TIME=${CPR_BUILD_TIME}
 ENV CPR_BUILD_TYPE=${CPR_BUILD_TYPE}
+ENV RUST_MIN_STACK=16777216
 COPY backend/Cargo.toml backend/Cargo.lock ./
 COPY backend/apps ./apps
 COPY backend/crates ./crates
