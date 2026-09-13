@@ -1022,6 +1022,12 @@ impl SettingsStore for StaticSettingsStore {
             ws_pool_max_connecting: 8,
             ws_pool_stream_idle_timeout_ms: 300_000,
             ws_pool_fast_path_budget_ms: 800,
+            overload_cooldown_enabled: false,
+            overload_cooldown_threshold: 2,
+            overload_cooldown_seconds: 120,
+            cyber_session_block_enabled: false,
+            cyber_session_block_ttl_seconds: 3600,
+            openai_user_agent: None,
             updated_at: Utc::now(),
         })
     }

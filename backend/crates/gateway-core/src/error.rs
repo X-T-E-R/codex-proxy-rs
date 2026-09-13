@@ -431,6 +431,7 @@ pub struct ProviderError {
     pre_delivery_retry: Option<Box<PreDeliveryRetry>>,
     credential_recovery_required: bool,
     retry_same_account: bool,
+    cyber_policy_refusal: bool,
     sensitive_context_redacted: bool,
     diagnostic: Option<Box<ProviderDiagnostic>>,
     raw_upstream_error: Option<Box<RawUpstreamError>>,
@@ -471,6 +472,7 @@ impl ProviderError {
             pre_delivery_retry: None,
             credential_recovery_required: false,
             retry_same_account: false,
+            cyber_policy_refusal: false,
             sensitive_context_redacted: false,
             diagnostic: None,
             raw_upstream_error: None,
@@ -646,6 +648,18 @@ impl ProviderError {
     pub const fn with_credential_recovery(mut self) -> Self {
         self.credential_recovery_required = true;
         self
+    }
+
+    /// 标记 Provider 已在原始结构化响应中精确识别到 cyber policy 拒绝。
+    #[must_use]
+    pub const fn with_cyber_policy_refusal(mut self) -> Self {
+        self.cyber_policy_refusal = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn is_cyber_policy_refusal(&self) -> bool {
+        self.cyber_policy_refusal
     }
 
     /// 附加只用于原客户端协议响应的结构化上游错误。
@@ -861,6 +875,7 @@ impl Clone for ProviderError {
             pre_delivery_retry: self.pre_delivery_retry.clone(),
             credential_recovery_required: self.credential_recovery_required,
             retry_same_account: self.retry_same_account,
+            cyber_policy_refusal: self.cyber_policy_refusal,
             sensitive_context_redacted: self.sensitive_context_redacted,
             diagnostic: self.diagnostic.clone(),
             raw_upstream_error: self.raw_upstream_error.clone(),
@@ -904,6 +919,7 @@ impl fmt::Debug for ProviderError {
                 &self.credential_recovery_required,
             )
             .field("retry_same_account", &self.retry_same_account)
+            .field("cyber_policy_refusal", &self.cyber_policy_refusal)
             .field(
                 "sensitive_context",
                 &self.sensitive_context_redacted.then_some("<redacted>"),

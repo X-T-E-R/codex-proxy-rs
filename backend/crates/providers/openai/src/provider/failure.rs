@@ -204,7 +204,8 @@ pub(super) struct OpenAiFailureContext<'a> {
     pub(super) response_origin: &'a Url,
     pub(super) cyber_policy_scope: Option<&'a CodexCyberPolicyScope>,
     pub(super) allows_account_state_mutation: bool,
-    pub(super) allows_capacity_feedback: bool,
+    pub(super) selection_policy: gateway_core::account::AccountSelectionPolicy,
+    pub(super) cyber_session_block_enabled: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -355,6 +356,27 @@ pub(super) async fn apply_failure(
 ) {
     if !context.allows_account_state_mutation {
         return;
+    }
+    if context.cyber_session_block_enabled && failure.error.is_cyber_policy_refusal() {
+        return;
+    }
+    match context
+        .selector
+        .observe_overload_failure(account, context.selection_policy, failure.overload_failure)
+        .await
+    {
+        Ok(true) => {
+            context
+                .client
+                .evict_websocket_account(account.id().as_str())
+                .await
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(
+            account_id = %account.id(),
+            error = %error,
+            "Failed to persist OpenAI overload cooldown"
+        ),
     }
     synchronize_passive_quota_headers(context.quota, account, &failure.rate_limit_headers).await;
     let needs_authoritative_quota_refresh = matches!(
@@ -1238,7 +1260,15 @@ pub(super) fn map_upstream_failure(
     replay_boundary: ReplayBoundary,
 ) -> MappedProviderFailure {
     let category = failure.category();
-    let capacity_unavailable = category == CodexFailureCategory::CapacityUnavailable;
+    let overload_failure = OVERLOAD_COOLDOWN_KEYWORDS.iter().any(|keyword| {
+        failure
+            .client_message
+            .as_deref()
+            .is_some_and(|message| message.contains(keyword))
+            || failure.raw_body.contains(keyword)
+    });
+    let cyber_session_refusal =
+        gateway_protocol::openai::is_cyber_policy_refusal_json(&failure.raw_body);
     let cyber_policy_failure = failure
         .status
         .is_some_and(|status| status.is_client_error())
@@ -1314,6 +1344,9 @@ pub(super) fn map_upstream_failure(
     }
     if let Some(request_id) = failure.request_id.as_deref() {
         error = error.with_upstream_request_id(OpaqueUpstreamValue::new(request_id.to_owned()));
+    }
+    if cyber_session_refusal {
+        error = error.with_cyber_policy_refusal();
     }
     let status = error
         .upstream_status()

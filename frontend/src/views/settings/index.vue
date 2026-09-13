@@ -11,7 +11,8 @@ import BaseSelect from '@/components/base/BaseSelect.vue'
 
 import AccountAutoFreezeCard from './components/AccountAutoFreezeCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
-import ClientProfileCard from './components/ClientProfileCard.vue'
+import ClientVersionSettings from './components/client-version/index.vue'
+import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import RequestLocationCard from './components/RequestLocationCard.vue'
 import RequestQueueCard from './components/RequestQueueCard.vue'
@@ -69,6 +70,12 @@ const {
   wsPoolStreamIdleTimeoutMsValue,
   wsPoolFastPathBudgetMsValue,
   wsPoolErrors,
+  overloadCooldownThresholdValue,
+  overloadCooldownSecondsValue,
+  overloadCooldownErrors,
+  cyberSessionBlockTtlSecondsValue,
+  cyberSessionBlockTtlError,
+  openaiUserAgentError,
   minCodexDesktopVersionError,
   minCodexCliVersionError,
   saveSettings,
@@ -144,6 +151,27 @@ watch(section, (value) => {
         v-model:ws-pool-fast-path-budget-ms="wsPoolFastPathBudgetMsValue"
         :disabled="loading || saving"
         :errors="wsPoolErrors"
+      />
+
+      <OverloadCooldownCard
+        v-model:enabled="form.overloadCooldownEnabled"
+        v-model:threshold="overloadCooldownThresholdValue"
+        v-model:seconds="overloadCooldownSecondsValue"
+        :disabled="loading || saving"
+        :errors="overloadCooldownErrors"
+      />
+
+      <UserAgentCard
+        v-model="form.openaiUserAgent"
+        :disabled="loading || saving"
+        :error="openaiUserAgentError"
+      />
+
+      <CyberSessionBlockCard
+        v-model:enabled="form.cyberSessionBlockEnabled"
+        v-model:seconds="cyberSessionBlockTtlSecondsValue"
+        :disabled="loading || saving"
+        :error="cyberSessionBlockTtlError"
       />
 
       <ClientVersionSettings

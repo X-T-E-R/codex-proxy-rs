@@ -5,6 +5,7 @@ mod coordination_buffer;
 mod credential_cooldown;
 mod credential_leases;
 mod credential_state;
+mod cyber_session;
 mod native_continuation;
 mod oauth_pending;
 mod provider_circuit;

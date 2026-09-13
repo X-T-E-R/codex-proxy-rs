@@ -27,16 +27,21 @@ use crate::engine::probe::{
 };
 use crate::engine::provider::ProviderRegistry;
 use crate::engine::{
-    AttemptCoordinator, AttemptRecord, CoordinatedEvent, EngineError, ExecutionStore,
-    GatewayEngine, IntermediateFailure, ModelRequestFinalization, ModelRequestId, NewModelRequest,
-    ProbeFailure, ProviderAccountId, ProviderAttemptOutcome, RecoveryReport, UpstreamSendState,
+    AttemptCoordinator, AttemptRecord, CoordinatedEvent, EngineError, ExecutionOutcome,
+    ExecutionStore, GatewayEngine, IntermediateFailure, ModelRequestFailureObservation,
+    ModelRequestFinalization, ModelRequestId, NewModelRequest, ProbeFailure, ProviderAccountId,
+    ProviderAttemptOutcome, RecoveryReport, UpstreamSendState,
 };
-use crate::error::{GatewayError, GatewayErrorKind, ProviderErrorKind, StoreError};
+use crate::error::{
+    ClientVisibleUpstreamError, GatewayError, GatewayErrorKind, ProviderErrorKind, StoreError,
+};
 use crate::event::{GatewayEvent, ProviderEvent, ProviderResponseHeader};
 use crate::identity::ProviderKind;
 use crate::lifecycle::CancellationToken;
 use crate::operation::{Operation, ProviderSessionState};
-use crate::policy::{ClientApiKeyId, ClientPolicy};
+use crate::policy::{
+    ClientApiKeyId, ClientPolicy, CyberSessionBlockPolicy, CyberSessionPort, CyberSessionRequest,
+};
 use crate::routing::{
     ProviderCatalogUnavailable, PublicModelDescriptor, PublicModelId, RoutingContext,
     RuntimeSnapshot, UpstreamModelId,
@@ -76,6 +81,7 @@ pub struct ExecutionRequestMetadata {
     pub client_ip: Option<IpAddr>,
     pub user_agent: Option<String>,
     pub previous_response_id: Option<PreviousResponseId>,
+    pub cyber_session: crate::policy::CyberSessionRequest,
 }
 
 #[derive(Clone)]
@@ -279,6 +285,7 @@ pub struct DefaultExecutionService {
     continuation: Arc<dyn NativeContinuationPort>,
     client_api_key_usage: Arc<dyn ClientApiKeyUsageSink>,
     budget: Option<Arc<dyn ClientBudgetPort>>,
+    cyber_sessions: Option<Arc<dyn CyberSessionPort>>,
 }
 
 impl DefaultExecutionService {
@@ -308,6 +315,7 @@ impl DefaultExecutionService {
             continuation,
             client_api_key_usage,
             budget: None,
+            cyber_sessions: None,
         }
     }
 
@@ -317,23 +325,10 @@ impl DefaultExecutionService {
         self
     }
 
-    fn authenticate_without_usage(
-        &self,
-        plaintext: &str,
-    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
-        let snapshot = self
-            .snapshots
-            .acquire()
-            .map_err(|_| ClientAuthenticationError::SnapshotUnavailable)?;
-        let policy = snapshot
-            .client_policies()
-            .filter(|policy| {
-                constant_time_equal(plaintext, policy.plaintext_key().expose_for_auth())
-            })
-            .find(|policy| policy.authorize().is_ok())
-            .cloned()
-            .ok_or(ClientAuthenticationError::InvalidKey)?;
-        Ok(AuthenticatedClient { snapshot, policy })
+    #[must_use]
+    pub fn with_cyber_sessions(mut self, port: Arc<dyn CyberSessionPort>) -> Self {
+        self.cyber_sessions = Some(port);
+        self
     }
 
     async fn start_inner(&self, request: StartExecution) -> Result<StartedExecution, GatewayError> {
@@ -575,6 +570,30 @@ impl DefaultExecutionService {
             started_at,
             deadline_at,
         };
+        let cyber_policy = plan.cyber_session_block_policy();
+        if cyber_policy.is_some()
+            && self
+                .cyber_session_is_blocked(client.policy.key_id(), &metadata.cyber_session)
+                .await
+        {
+            let error = cyber_session_blocked_error();
+            self.persist_local_cyber_block(new_request, error.clone())
+                .await;
+            if let Some(budget) = &self.budget {
+                settle_budget(
+                    budget.as_ref(),
+                    ClientBudgetCharge {
+                        key_id: client.policy.key_id().clone(),
+                        request_id: request_id.clone(),
+                        amount_usd: crate::metering::Decimal::ZERO,
+                        completed_at: SystemTime::now(),
+                    },
+                )
+                .await;
+            }
+            admission.release().await;
+            return Err(error);
+        }
         let core = match self
             .coordinator
             .start(
@@ -615,86 +634,95 @@ impl DefaultExecutionService {
                 Arc::clone(&self.circuits),
                 Arc::clone(&self.continuation),
                 self.budget.clone(),
+                CyberExecutionContext {
+                    port: self.cyber_sessions.clone(),
+                    policy: cyber_policy,
+                    client_key: client.policy.key_id().clone(),
+                    request: metadata.cyber_session,
+                },
             )),
         })
     }
 
-    async fn acquire_client_admission(
+    async fn cyber_session_is_blocked(
         &self,
-        client: &AuthenticatedClient,
-        request_id: &ModelRequestId,
-        deadline_at: SystemTime,
-        budget: &ConcurrencyWaitBudget,
-    ) -> Result<AdmissionLease, GatewayError> {
-        let policy = client.snapshot.client_queue_policy();
-        let limits = client.policy.limits();
-        let key = client.policy.key_id();
-        let mut waiting = CapacityWait::new(&self.admission_waiting, policy, deadline_at, budget);
-        let mut admission = AdmissionLease {
-            port: Arc::clone(&self.admissions),
-            client_api_key_id: key.clone(),
-            model_request_id: request_id.clone(),
-            armed: false,
+        client_api_key_id: &ClientApiKeyId,
+        request: &CyberSessionRequest,
+    ) -> bool {
+        let Some(port) = self.cyber_sessions.as_ref() else {
+            return false;
         };
-        loop {
-            let remaining = deadline_at
-                .duration_since(SystemTime::now())
-                .unwrap_or_default();
-            if remaining.is_zero() {
-                return Err(GatewayError::new(
-                    GatewayErrorKind::Timeout,
-                    "request deadline elapsed",
-                ));
-            }
-            // 在发送原子准入之前接管取消清理，覆盖 Redis 已取得租约但返回尚未被观察的窗口。
-            admission.armed = true;
-            let acquire = self
-                .admissions
-                .admit(ClientAdmissionRequest {
-                    model_request_id: request_id.clone(),
-                    client_api_key_id: key.clone(),
-                    lease_ttl: remaining,
-                    allow_concurrency_acquire: limits.max_concurrency == 0 || waiting.can_try(key),
-                    limits,
-                })
-                .fuse();
-            let timeout = Delay::new(remaining).fuse();
-            pin_mut!(acquire, timeout);
-            let decision = select_biased! {
-                result = acquire => result.map_err(|_| GatewayError::new(GatewayErrorKind::NoAvailableProvider, "request admission is temporarily unavailable"))?,
-                _ = timeout => return Err(GatewayError::new(GatewayErrorKind::Timeout, "request deadline elapsed")),
-            };
-            match decision {
-                ClientAdmissionDecision::Granted => {
-                    if !waiting.elapsed().is_zero() {
-                        tracing::info!(
-                            request_id = request_id.as_str(),
-                            queue_layer = "client_key",
-                            queue_wait_ms = duration_ms(waiting.elapsed()),
-                            "排队请求已取得 Key 并发槽位"
-                        );
-                    }
-                    return Ok(admission);
-                }
-                ClientAdmissionDecision::Rejected(reason) => {
-                    admission.armed = false;
-                    if reason == ClientAdmissionRejection::RateLimited || policy.max_waiting == 0 {
-                        return Err(GatewayError::new(
-                            GatewayErrorKind::RateLimited,
-                            "request exceeds client API key limits",
-                        ));
-                    }
-                    if waiting.elapsed().is_zero()
-                        && let Some(budget) = &self.budget
-                    {
-                        budget.admit(key.clone()).await?;
-                    }
-                    waiting.wait(std::slice::from_ref(key)).await.map_err(|error| {
-                        tracing::info!(request_id = request_id.as_str(), queue_layer = "client_key", queue_wait_ms = duration_ms(waiting.elapsed()), reason = %error, "Key 排队请求被拒绝");
-                        error.gateway_error()
-                    })?;
-                }
-            }
+        let keys = request.lookup_keys(client_api_key_id);
+        if keys.is_empty() {
+            return false;
+        }
+        let lookup = port.contains_any(&keys).fuse();
+        let timeout = Delay::new(COORDINATION_TIMEOUT).fuse();
+        pin_mut!(lookup, timeout);
+        select_biased! {
+            result = lookup => result.unwrap_or_else(|error| {
+                tracing::warn!(%error, "Cyber session 封禁读取失败，按可丢失状态 fail-open");
+                false
+            }),
+            _ = timeout => {
+                tracing::warn!("Cyber session 封禁读取超时，按可丢失状态 fail-open");
+                false
+            },
+        }
+    }
+
+    async fn persist_local_cyber_block(&self, request: NewModelRequest, error: GatewayError) {
+        let request_id = request.id.clone();
+        if self
+            .observations
+            .create_model_request(request)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                request_id = request_id.as_str(),
+                "本地 cyber 拒绝请求记录写入失败"
+            );
+            return;
+        }
+        let completed_at = SystemTime::now();
+        if self
+            .observations
+            .finalize_model_request(ModelRequestFinalization {
+                request_id: request_id.clone(),
+                outcome: ExecutionOutcome::Failed,
+                send_state: UpstreamSendState::NotSent,
+                attempt_count: 0,
+                downstream_committed_at: None,
+                client_status_code: Some(403),
+                client_response_id: None,
+                upstream_status_code: None,
+                upstream_request_id: None,
+                upstream_response_id: None,
+                upstream_transport: None,
+                http_version: None,
+                websocket_pool: None,
+                service_tier: None,
+                provider_metadata_json: None,
+                diagnostic_trace_json: None,
+                error: Some(error),
+                provider_error_code: None,
+                raw_upstream_error: None,
+                failure_observation: ModelRequestFailureObservation::default(),
+                retry_after_ms: None,
+                usage: Default::default(),
+                image_generation_succeeded: None,
+                cost: crate::metering::CostEstimate::unavailable(),
+                timings: Default::default(),
+                completed_at,
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                request_id = request_id.as_str(),
+                "本地 cyber 拒绝终态写入失败"
+            );
         }
     }
 
@@ -1162,6 +1190,19 @@ struct DefaultExecutionSession {
     observed_provider_outcomes: usize,
     continuation_recorded: bool,
     budget: Option<Arc<dyn ClientBudgetPort>>,
+    cyber_sessions: Option<Arc<dyn CyberSessionPort>>,
+    cyber_policy: Option<CyberSessionBlockPolicy>,
+    cyber_client_key: ClientApiKeyId,
+    cyber_request: CyberSessionRequest,
+    cyber_refusal_observed: bool,
+    cyber_record: Option<BoxFuture<'static, ()>>,
+}
+
+struct CyberExecutionContext {
+    port: Option<Arc<dyn CyberSessionPort>>,
+    policy: Option<CyberSessionBlockPolicy>,
+    client_key: ClientApiKeyId,
+    request: CyberSessionRequest,
 }
 
 impl DefaultExecutionSession {
@@ -1171,6 +1212,7 @@ impl DefaultExecutionSession {
         circuits: Arc<dyn ProviderCircuitPort>,
         continuation: Arc<dyn NativeContinuationPort>,
         budget: Option<Arc<dyn ClientBudgetPort>>,
+        cyber: CyberExecutionContext,
     ) -> Self {
         Self {
             core,
@@ -1181,7 +1223,49 @@ impl DefaultExecutionSession {
             observed_provider_outcomes: 0,
             continuation_recorded: false,
             budget,
+            cyber_sessions: cyber.port,
+            cyber_policy: cyber.policy,
+            cyber_client_key: cyber.client_key,
+            cyber_request: cyber.request,
+            cyber_refusal_observed: false,
+            cyber_record: None,
         }
+    }
+
+    async fn record_cyber_refusal(&mut self) {
+        if !self.cyber_refusal_observed
+            && self.cyber_policy.is_some()
+            && self
+                .core
+                .provider_attempt_outcomes()
+                .iter()
+                .any(ProviderAttemptOutcome::is_cyber_policy_refusal)
+        {
+            self.cyber_refusal_observed = true;
+            let (Some(port), Some(policy), Some(key)) = (
+                self.cyber_sessions.clone(),
+                self.cyber_policy,
+                self.cyber_request.refusal_key(&self.cyber_client_key),
+            ) else {
+                return;
+            };
+            self.cyber_record = Some(Box::pin(async move {
+                let record = port.record(&key, policy.ttl()).fuse();
+                let timeout = Delay::new(COORDINATION_TIMEOUT).fuse();
+                pin_mut!(record, timeout);
+                select_biased! {
+                    result = record => if let Err(error) = result {
+                        tracing::warn!(%error, "Cyber session 封禁写入失败，当前拒绝仍保持终止");
+                    },
+                    _ = timeout => tracing::warn!("Cyber session 封禁写入超时，当前拒绝仍保持终止"),
+                }
+            }));
+        }
+        let Some(record) = self.cyber_record.as_mut() else {
+            return;
+        };
+        record.await;
+        self.cyber_record = None;
     }
 
     async fn settle_if_finalized(&mut self) {
@@ -1207,11 +1291,14 @@ impl DefaultExecutionSession {
 
     async fn observe_provider_outcomes(&mut self) {
         let outcomes = self.core.provider_attempt_outcomes();
-        let new_outcomes = outcomes
+        let mut new_outcomes = outcomes
             .get(self.observed_provider_outcomes..)
             .unwrap_or_default()
             .to_vec();
         self.observed_provider_outcomes = outcomes.len();
+        if self.cyber_policy.is_some() && self.cyber_refusal_observed {
+            new_outcomes.retain(|outcome| !outcome.is_cyber_policy_refusal());
+        }
         publish_provider_attempt_outcomes(self.circuits.as_ref(), &new_outcomes).await;
     }
 
@@ -1233,6 +1320,7 @@ impl DefaultExecutionSession {
         if let Err(error) = self.core.cancel_and_finalize().await {
             tracing::warn!(%error, "Detached execution 终态收敛失败");
         }
+        self.record_cyber_refusal().await;
         self.observe_provider_outcomes().await;
         self.settle_if_finalized().await;
     }
@@ -1251,6 +1339,7 @@ impl ExecutionSession for DefaultExecutionSession {
     fn next_event(&mut self) -> BoxFuture<'_, Result<Option<CoordinatedEvent>, EngineError>> {
         Box::pin(async move {
             let result = self.core.next_event().await;
+            self.record_cyber_refusal().await;
             if let Ok(Some(event)) = result.as_ref() {
                 self.record_continuation(event.session_update()).await;
             }
@@ -1263,6 +1352,7 @@ impl ExecutionSession for DefaultExecutionSession {
     fn collect_uncommitted(&mut self) -> BoxFuture<'_, Result<Vec<ProviderEvent>, EngineError>> {
         Box::pin(async move {
             let result = self.core.collect_uncommitted().await;
+            self.record_cyber_refusal().await;
             if let Ok(events) = result.as_ref() {
                 let state = events.iter().find_map(ProviderEvent::session_update);
                 self.record_continuation(state).await;
@@ -1401,6 +1491,17 @@ fn duration_ms(duration: Duration) -> u64 {
 fn new_request_id() -> Result<ModelRequestId, GatewayError> {
     ModelRequestId::new(format!("req_{}", Uuid::now_v7().simple()))
         .map_err(|_| GatewayError::new(GatewayErrorKind::Internal, "failed to allocate request ID"))
+}
+
+fn cyber_session_blocked_error() -> GatewayError {
+    const MESSAGE: &str = "this session is blocked after an upstream cyber policy refusal";
+    GatewayError::new(GatewayErrorKind::PolicyDenied, MESSAGE).with_client_visible_upstream_error(
+        ClientVisibleUpstreamError::new(
+            MESSAGE,
+            Some("session_blocked_by_cyber_policy".to_owned()),
+            Some("permission_error".to_owned()),
+        ),
+    )
 }
 
 fn map_routing_error(error: crate::validation::RoutingError) -> GatewayError {

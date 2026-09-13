@@ -39,7 +39,98 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
         ws_pool_max_connecting: 8,
         ws_pool_stream_idle_timeout_ms: 300_000,
         ws_pool_fast_path_budget_ms: 800,
+        overload_cooldown_enabled: false,
+        overload_cooldown_threshold: 2,
+        overload_cooldown_seconds: 120,
+        cyber_session_block_enabled: Some(false),
+        cyber_session_block_ttl_seconds: Some(3600),
+        openai_user_agent: None,
     }
+}
+
+#[tokio::test]
+async fn runtime_policy_settings_round_trip_with_snapshot() {
+    use gateway_core::provider_ports::ProviderRuntimePolicyPort;
+    use gateway_store::postgres::{PgRuntimeSnapshotRepository, RuntimeSnapshotRepository};
+    let Some(database) = TestDatabase::create("overload_settings").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let defaults = repository.load_runtime_settings().await.expect("defaults");
+    assert!(!defaults.overload_cooldown_enabled);
+    assert_eq!(defaults.overload_cooldown_threshold, 2);
+    assert_eq!(defaults.overload_cooldown_seconds, 120);
+    assert!(!defaults.cyber_session_block_enabled);
+    assert_eq!(defaults.cyber_session_block_ttl_seconds, 3600);
+    assert_eq!(defaults.openai_user_agent, None);
+    let user_agent = "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)";
+    repository
+        .update_runtime_settings(RuntimeSettingsUpdate {
+            overload_cooldown_enabled: true,
+            overload_cooldown_threshold: 3,
+            overload_cooldown_seconds: 180,
+            cyber_session_block_enabled: Some(true),
+            cyber_session_block_ttl_seconds: Some(u32::MAX),
+            openai_user_agent: Some(user_agent.to_owned()),
+            ..settings_with_margin(3_600)
+        })
+        .await
+        .expect("save settings");
+    let settings = repository.load_runtime_settings().await.expect("reload");
+    assert!(settings.overload_cooldown_enabled);
+    assert_eq!(settings.overload_cooldown_threshold, 3);
+    assert_eq!(settings.overload_cooldown_seconds, 180);
+    assert!(settings.cyber_session_block_enabled);
+    assert_eq!(settings.cyber_session_block_ttl_seconds, u32::MAX);
+    assert_eq!(
+        repository.load_user_agent_override().await.expect("UA"),
+        Some(user_agent.to_owned())
+    );
+    let snapshot = PgRuntimeSnapshotRepository::new(database.pool.clone())
+        .load_runtime_snapshot()
+        .await
+        .expect("snapshot");
+    assert!(snapshot.settings.overload_cooldown_enabled);
+    assert_eq!(snapshot.settings.overload_cooldown_threshold, 3);
+    assert_eq!(snapshot.settings.overload_cooldown_seconds, 180);
+    assert!(snapshot.settings.cyber_session_block_enabled);
+    assert_eq!(snapshot.settings.cyber_session_block_ttl_seconds, u32::MAX);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn omitted_cyber_fields_merge_with_the_transaction_current_row() {
+    let Some(database) = TestDatabase::create("cyber_settings_atomic_merge").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let stale_old_client_update = RuntimeSettingsUpdate {
+        refresh_margin_seconds: 4_200,
+        cyber_session_block_enabled: None,
+        cyber_session_block_ttl_seconds: None,
+        ..settings_with_margin(3_600)
+    };
+    sqlx::query(
+        "update runtime_settings
+         set cyber_session_block_enabled = true,
+             cyber_session_block_ttl_seconds = 900
+         where id = 1",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("concurrent cyber settings update");
+
+    repository
+        .update_runtime_settings(stale_old_client_update)
+        .await
+        .expect("old client update");
+    let settings = repository
+        .load_runtime_settings()
+        .await
+        .expect("merged settings");
+    assert!(settings.cyber_session_block_enabled);
+    assert_eq!(settings.cyber_session_block_ttl_seconds, 900);
+    assert_eq!(settings.refresh_margin_seconds, 4_200);
 }
 
 #[test]
@@ -111,6 +202,15 @@ fn runtime_settings_reject_zero_ws_pool_numeric_fields() {
         mutate(&mut update);
         assert!(update.validate().is_err());
     }
+}
+
+#[test]
+fn runtime_settings_reject_zero_cyber_session_ttl_even_when_disabled() {
+    let settings = RuntimeSettingsUpdate {
+        cyber_session_block_ttl_seconds: Some(0),
+        ..settings_with_margin(3_600)
+    };
+    assert!(settings.validate().is_err());
 }
 
 #[tokio::test]

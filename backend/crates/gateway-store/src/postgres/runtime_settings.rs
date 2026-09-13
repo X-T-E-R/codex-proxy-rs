@@ -45,6 +45,12 @@ pub struct RuntimeSettings {
     pub ws_pool_max_connecting: u32,
     pub ws_pool_stream_idle_timeout_ms: u64,
     pub ws_pool_fast_path_budget_ms: u64,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u32,
+    pub overload_cooldown_seconds: u32,
+    pub cyber_session_block_enabled: bool,
+    pub cyber_session_block_ttl_seconds: u32,
+    pub openai_user_agent: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -85,6 +91,21 @@ impl fmt::Debug for RuntimeSettings {
                 &self.ws_pool_fast_path_budget_ms,
             )
             .field("updated_at", &self.updated_at)
+            .field("overload_cooldown_enabled", &self.overload_cooldown_enabled)
+            .field(
+                "overload_cooldown_threshold",
+                &self.overload_cooldown_threshold,
+            )
+            .field("overload_cooldown_seconds", &self.overload_cooldown_seconds)
+            .field(
+                "cyber_session_block_enabled",
+                &self.cyber_session_block_enabled,
+            )
+            .field(
+                "cyber_session_block_ttl_seconds",
+                &self.cyber_session_block_ttl_seconds,
+            )
+            .field("openai_user_agent", &self.openai_user_agent)
             .finish()
     }
 }
@@ -116,6 +137,12 @@ pub struct RuntimeSettingsUpdate {
     pub ws_pool_max_connecting: u32,
     pub ws_pool_stream_idle_timeout_ms: u64,
     pub ws_pool_fast_path_budget_ms: u64,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u32,
+    pub overload_cooldown_seconds: u32,
+    pub cyber_session_block_enabled: Option<bool>,
+    pub cyber_session_block_ttl_seconds: Option<u32>,
+    pub openai_user_agent: Option<String>,
 }
 
 impl fmt::Debug for RuntimeSettingsUpdate {
@@ -152,6 +179,14 @@ impl RuntimeSettingsUpdate {
             || self.ws_pool_max_connecting == 0
             || self.ws_pool_stream_idle_timeout_ms == 0
             || self.ws_pool_fast_path_budget_ms == 0
+            || self.overload_cooldown_threshold == 0
+            || self.overload_cooldown_seconds == 0
+            || self
+                .cyber_session_block_ttl_seconds
+                .is_some_and(|seconds| seconds == 0)
+            || !gateway_core::provider_ports::valid_user_agent_override(
+                self.openai_user_agent.as_deref(),
+            )
             || !valid_model_mappings(&self.model_mappings)
             || !valid_client_version(self.min_codex_desktop_version.as_deref())
             || !valid_client_version(self.min_codex_cli_version.as_deref())
@@ -219,7 +254,10 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     audit_retention_days, min_codex_desktop_version,
                     min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
                     ws_pool_max_connecting, ws_pool_stream_idle_timeout_ms,
-                    ws_pool_fast_path_budget_ms, updated_at
+                    ws_pool_fast_path_budget_ms, overload_cooldown_enabled,
+                    overload_cooldown_threshold, overload_cooldown_seconds,
+                    cyber_session_block_enabled, cyber_session_block_ttl_seconds,
+                    openai_user_agent, updated_at
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -325,7 +363,10 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 audit_retention_days, min_codex_desktop_version,
                 min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
                 ws_pool_max_connecting, ws_pool_stream_idle_timeout_ms,
-                ws_pool_fast_path_budget_ms, updated_at
+                ws_pool_fast_path_budget_ms, overload_cooldown_enabled,
+                overload_cooldown_threshold, overload_cooldown_seconds,
+                cyber_session_block_enabled, cyber_session_block_ttl_seconds,
+                openai_user_agent, updated_at
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -365,6 +406,12 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 ws_pool_max_connecting = $15,
 	                 ws_pool_stream_idle_timeout_ms = $16,
 	                 ws_pool_fast_path_budget_ms = $17,
+	                 overload_cooldown_enabled = $18,
+	                 overload_cooldown_threshold = $19,
+	                 overload_cooldown_seconds = $20,
+	                 cyber_session_block_enabled = coalesce($21, cyber_session_block_enabled),
+	                 cyber_session_block_ttl_seconds = coalesce($22, cyber_session_block_ttl_seconds),
+	                 openai_user_agent = $23,
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -386,6 +433,12 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(i64::from(update.ws_pool_max_connecting))
     .bind(i64::try_from(update.ws_pool_stream_idle_timeout_ms).map_err(|_| invalid_numeric())?)
     .bind(i64::try_from(update.ws_pool_fast_path_budget_ms).map_err(|_| invalid_numeric())?)
+    .bind(update.overload_cooldown_enabled)
+    .bind(i64::from(update.overload_cooldown_threshold))
+    .bind(i64::from(update.overload_cooldown_seconds))
+    .bind(update.cyber_session_block_enabled)
+    .bind(update.cyber_session_block_ttl_seconds.map(i64::from))
+    .bind(update.openai_user_agent.as_deref())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -454,6 +507,12 @@ struct RuntimeSettingsRow {
     ws_pool_max_connecting: i64,
     ws_pool_stream_idle_timeout_ms: i64,
     ws_pool_fast_path_budget_ms: i64,
+    overload_cooldown_enabled: bool,
+    overload_cooldown_threshold: i64,
+    overload_cooldown_seconds: i64,
+    cyber_session_block_enabled: bool,
+    cyber_session_block_ttl_seconds: i64,
+    openai_user_agent: Option<String>,
     updated_at: DateTime<Utc>,
 }
 
@@ -477,6 +536,12 @@ fn runtime_settings_from_row(mut row: RuntimeSettingsRow) -> StoreResult<Runtime
         ws_pool_max_connecting: to_u32(row.ws_pool_max_connecting)?,
         ws_pool_stream_idle_timeout_ms: to_u64(row.ws_pool_stream_idle_timeout_ms)?,
         ws_pool_fast_path_budget_ms: to_u64(row.ws_pool_fast_path_budget_ms)?,
+        overload_cooldown_enabled: row.overload_cooldown_enabled,
+        overload_cooldown_threshold: to_u32(row.overload_cooldown_threshold)?,
+        overload_cooldown_seconds: to_u32(row.overload_cooldown_seconds)?,
+        cyber_session_block_enabled: row.cyber_session_block_enabled,
+        cyber_session_block_ttl_seconds: to_u32(row.cyber_session_block_ttl_seconds)?,
+        openai_user_agent: row.openai_user_agent,
         updated_at: row.updated_at,
     })
 }

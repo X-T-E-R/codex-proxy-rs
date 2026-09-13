@@ -831,7 +831,8 @@ where
             self.cancellation.clone(),
         )
         .with_continuation_attempt(self.continuation_attempt)
-        .with_transport(attempt_transport);
+        .with_transport(attempt_transport)
+        .with_cyber_session_block_enabled(self.plan.cyber_session_block_policy().is_some());
         let trigger = if self.attempts == 0 {
             AttemptTrigger::Initial
         } else {
@@ -927,7 +928,11 @@ where
                             | ProviderErrorKind::ConcurrencyQueueTimeout
                     ) && error.send_state() == UpstreamSendState::NotSent)
                     {
-                        self.record_provider_failure(candidate.provider().clone(), error.kind());
+                        self.record_provider_failure(
+                            candidate.provider().clone(),
+                            error.kind(),
+                            error.is_cyber_policy_refusal(),
+                        );
                     }
                     self.finish_provider_error(&error).await?;
                     return Err(provider_engine_error(error));
@@ -936,7 +941,11 @@ where
         };
         if !stream.metadata().confirms(&candidate) {
             drop(stream);
-            self.record_provider_failure(candidate.provider().clone(), ProviderErrorKind::Protocol);
+            self.record_provider_failure(
+                candidate.provider().clone(),
+                ProviderErrorKind::Protocol,
+                false,
+            );
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
                 "provider metadata did not match the frozen candidate",
@@ -1177,7 +1186,11 @@ where
         record_trace_error(&self.trace.attempt(self.attempts), &error);
         let mut atomic_client_events = error.take_atomic_client_events();
         let current = self.current.take().ok_or(EngineError::NoActiveAttempt)?;
-        self.record_provider_failure(current.metadata.provider().clone(), error.kind());
+        self.record_provider_failure(
+            current.metadata.provider().clone(),
+            error.kind(),
+            error.is_cyber_policy_refusal(),
+        );
         // attempt_send_state 是本 attempt 自身的发送事实，驱动重试门；
         // 持久化与终态用请求级水位，二者不可混用（水位会把早先 attempt 的
         // sent 传染给本 attempt，从而错误放行/拦截重试）。
@@ -1270,11 +1283,13 @@ where
             && !self
                 .credential_recovery_attempted_accounts
                 .contains(current.metadata.provider_account_id());
-        let retryable = continuation_retry
-            || same_account_retry
-            || ordinary_retry
-            || account_rotation_retry
-            || transport_recovery.is_some();
+        let retryable = !(self.plan.cyber_session_block_policy().is_some()
+            && error.is_cyber_policy_refusal())
+            && (continuation_retry
+                || same_account_retry
+                || ordinary_retry
+                || account_rotation_retry
+                || transport_recovery.is_some());
 
         self.trace.attempt(current.index.get()).record("retry.decided", json!({
             "retryable": retryable, "continuationRetry": continuation_retry,
@@ -1843,11 +1858,13 @@ where
         &mut self,
         provider_kind: crate::identity::ProviderKind,
         error_kind: ProviderErrorKind,
+        cyber_policy_refusal: bool,
     ) {
         self.provider_attempt_outcomes
             .push(ProviderAttemptOutcome::Failed {
                 provider_kind,
                 error_kind,
+                cyber_policy_refusal,
             });
     }
 }

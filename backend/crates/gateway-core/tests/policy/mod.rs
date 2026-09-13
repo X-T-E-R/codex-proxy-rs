@@ -6,6 +6,8 @@ use gateway_core::policy::{
 };
 use gateway_core::routing::{ClientRoutingScope, FrozenAccountScope, RuntimeAccountDirectory};
 
+mod cyber_session;
+
 fn plaintext(value: &str) -> PlaintextClientApiKey {
     PlaintextClientApiKey::new(value).expect("valid plaintext client key")
 }

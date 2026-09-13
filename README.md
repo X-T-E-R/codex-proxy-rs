@@ -99,6 +99,11 @@ API Key 持有者可在同一登录页切换登录身份，进入 `/key-usage` �
 | Base URL | `http://127.0.0.1:8080/v1`；远程接入使用服务器的 HTTPS 地址 |
 | API Key | 管理端创建的客户端密钥 |
 
+管理端「设置」支持 **cyber 会话自动屏蔽**：上游以结构化 `cyber_policy` 拒绝某个
+Responses 会话后，同一 Client Key 的该语义会话在 TTL 内由本地拒绝，不再发送上游请求。
+策略覆盖 HTTP、SSE 和 WebSocket 中的每个 Responses turn，默认关闭，屏蔽时长默认 3600 秒。
+会话匹配优先使用经校验的显式会话 ID，缺失时才按精确历史前缀/续接匹配，不绑定账号、模型或通道。
+
 可用模型以该密钥查询到的模型列表为准：
 
 ```bash

@@ -46,9 +46,15 @@ export function useSettingsForm() {
     wsPoolMaxConnecting: null as number | null,
     wsPoolStreamIdleTimeoutMs: null as number | null,
     wsPoolFastPathBudgetMs: null as number | null,
+    overloadCooldownEnabled: false,
+    openaiUserAgent: '',
+    overloadCooldownThreshold: null as number | null,
+    overloadCooldownSeconds: null as number | null,
+    cyberSessionBlockEnabled: false,
+    cyberSessionBlockTtlSeconds: null as number | null,
   })
 
-  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs') {
+  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs' | 'overloadCooldownThreshold' | 'overloadCooldownSeconds' | 'cyberSessionBlockTtlSeconds') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -70,6 +76,14 @@ export function useSettingsForm() {
   const wsPoolMaxConnectingValue = numericModel('wsPoolMaxConnecting')
   const wsPoolStreamIdleTimeoutMsValue = numericModel('wsPoolStreamIdleTimeoutMs')
   const wsPoolFastPathBudgetMsValue = numericModel('wsPoolFastPathBudgetMs')
+  const overloadCooldownThresholdValue = numericModel('overloadCooldownThreshold')
+  const overloadCooldownSecondsValue = numericModel('overloadCooldownSeconds')
+  const cyberSessionBlockTtlSecondsValue = numericModel('cyberSessionBlockTtlSeconds')
+  const cyberSessionBlockTtlError = computed(() => positiveIntegerError(form.cyberSessionBlockTtlSeconds, 4_294_967_295))
+  const overloadCooldownErrors = computed(() => ({
+    threshold: positiveIntegerError(form.overloadCooldownThreshold, 4_294_967_295),
+    seconds: positiveIntegerError(form.overloadCooldownSeconds, 4_294_967_295),
+  }))
   const wsPoolErrors = computed(() => ({
     maxAge: positiveIntegerError(form.wsPoolMaxAgeMs),
     maxConnecting: positiveIntegerError(form.wsPoolMaxConnecting, 4_294_967_295),
@@ -118,6 +132,12 @@ export function useSettingsForm() {
     form.wsPoolMaxConnecting = data.wsPoolMaxConnecting
     form.wsPoolStreamIdleTimeoutMs = data.wsPoolStreamIdleTimeoutMs
     form.wsPoolFastPathBudgetMs = data.wsPoolFastPathBudgetMs
+    form.overloadCooldownEnabled = data.overloadCooldownEnabled
+    form.overloadCooldownThreshold = data.overloadCooldownThreshold
+    form.overloadCooldownSeconds = data.overloadCooldownSeconds
+    form.cyberSessionBlockEnabled = data.cyberSessionBlockEnabled
+    form.cyberSessionBlockTtlSeconds = data.cyberSessionBlockTtlSeconds
+    form.openaiUserAgent = data.openaiUserAgent ?? ''
     mappings.value = Object.entries(data.modelMappings || {}).map(([requestedModel, upstreamModel]) => ({
       requestedModel,
       upstreamModel: String(upstreamModel),
@@ -174,7 +194,7 @@ export function useSettingsForm() {
   async function saveSettings() {
     if (saving.value || loading.value || !savedRequestLocation.value || !form.openaiClientProfile || !form.xaiClientProfile)
       return
-    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs } = form
+    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs, overloadCooldownThreshold, overloadCooldownSeconds, cyberSessionBlockTtlSeconds } = form
     if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy) {
       toast.warning('请完整填写运行参数和调度策略')
       return
@@ -191,13 +211,12 @@ export function useSettingsForm() {
       toast.warning('请修正客户端最低版本格式')
       return
     }
-    // 关闭时保留已保存的自定义值，未完成的草稿不阻止停止覆盖。
-    const requestLocation = form.requestLocationEnabled
-      ? normalizeRequestLocation(form.requestLocation)
-      : savedRequestLocation.value
-    const locationError = requestLocationError(requestLocation)
-    if (locationError) {
-      toast.warning(locationError)
+    if (cyberSessionBlockTtlSeconds === null || cyberSessionBlockTtlError.value) {
+      toast.warning('请修正 cyber 会话屏蔽时长')
+      return
+    }
+    if (openaiUserAgentError.value) {
+      toast.warning('请修正上游 User-Agent')
       return
     }
     if (accountAutoFreezeThreshold === null || accountAutoFreezeWindowSeconds === null || accountAutoFreezeDurationSeconds === null) {
@@ -243,6 +262,12 @@ export function useSettingsForm() {
         wsPoolMaxConnecting,
         wsPoolStreamIdleTimeoutMs,
         wsPoolFastPathBudgetMs,
+        overloadCooldownEnabled: form.overloadCooldownEnabled,
+        overloadCooldownThreshold,
+        overloadCooldownSeconds,
+        cyberSessionBlockEnabled: form.cyberSessionBlockEnabled,
+        cyberSessionBlockTtlSeconds,
+        openaiUserAgent: form.openaiUserAgent.trim() || null,
       })
       applySettings(result)
       toast.success('设置已保存')
@@ -274,6 +299,12 @@ export function useSettingsForm() {
     wsPoolStreamIdleTimeoutMsValue,
     wsPoolFastPathBudgetMsValue,
     wsPoolErrors,
+    overloadCooldownThresholdValue,
+    overloadCooldownSecondsValue,
+    overloadCooldownErrors,
+    cyberSessionBlockTtlSecondsValue,
+    cyberSessionBlockTtlError,
+    openaiUserAgentError,
     minCodexDesktopVersionError,
     minCodexCliVersionError,
     saveSettings,

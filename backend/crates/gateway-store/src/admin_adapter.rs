@@ -112,6 +112,12 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                 ws_pool_max_connecting: command.ws_pool_max_connecting,
                 ws_pool_stream_idle_timeout_ms: command.ws_pool_stream_idle_timeout_ms,
                 ws_pool_fast_path_budget_ms: command.ws_pool_fast_path_budget_ms,
+                overload_cooldown_enabled: command.overload_cooldown_enabled,
+                overload_cooldown_threshold: command.overload_cooldown_threshold,
+                overload_cooldown_seconds: command.overload_cooldown_seconds,
+                cyber_session_block_enabled: command.cyber_session_block_enabled,
+                cyber_session_block_ttl_seconds: command.cyber_session_block_ttl_seconds,
+                openai_user_agent: command.openai_user_agent,
             },
             audit: mutation_audit(
                 context,
@@ -136,6 +142,9 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                     "min_codex_cli_version".to_owned(),
                     "retention".to_owned(),
                     "ws_pool".to_owned(),
+                    "overload_cooldown".to_owned(),
+                    "cyber_session_block".to_owned(),
+                    "openai_user_agent".to_owned(),
                 ],
             ),
         };
@@ -254,6 +263,12 @@ pub(crate) fn admin_runtime_settings(
         ws_pool_max_connecting: settings.ws_pool_max_connecting,
         ws_pool_stream_idle_timeout_ms: settings.ws_pool_stream_idle_timeout_ms,
         ws_pool_fast_path_budget_ms: settings.ws_pool_fast_path_budget_ms,
+        overload_cooldown_enabled: settings.overload_cooldown_enabled,
+        overload_cooldown_threshold: settings.overload_cooldown_threshold,
+        overload_cooldown_seconds: settings.overload_cooldown_seconds,
+        cyber_session_block_enabled: settings.cyber_session_block_enabled,
+        cyber_session_block_ttl_seconds: settings.cyber_session_block_ttl_seconds,
+        openai_user_agent: settings.openai_user_agent,
         updated_at: settings.updated_at,
     })
 }

@@ -37,6 +37,11 @@ pub struct SnapshotRuntimeSettings {
     pub model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
+    pub overload_cooldown_enabled: bool,
+    pub overload_cooldown_threshold: u32,
+    pub overload_cooldown_seconds: u32,
+    pub cyber_session_block_enabled: bool,
+    pub cyber_session_block_ttl_seconds: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,19 +164,14 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 data.settings.min_codex_desktop_version,
                 data.settings.min_codex_cli_version,
             )
-            .with_responses_max_decompressed_body_bytes(
-                data.settings.responses_max_decompressed_body_bytes,
+            .with_overload_cooldown(
+                data.settings.overload_cooldown_enabled,
+                data.settings.overload_cooldown_threshold,
+                data.settings.overload_cooldown_seconds,
             )
-            .with_request_profiles(data.settings.request_profiles)
-            .with_pricing(data.settings.pricing)
-            .with_request_location(
-                data.settings.request_location,
-                data.settings.request_location_enabled,
-            )
-            .with_concurrency_queues(
-                data.settings.max_waiting_per_key,
-                data.settings.max_waiting_per_account,
-                data.settings.concurrency_wait_timeout_seconds,
+            .with_cyber_session_block(
+                data.settings.cyber_session_block_enabled,
+                data.settings.cyber_session_block_ttl_seconds,
             );
             let client_policies = data
                 .client_api_keys
@@ -271,8 +271,32 @@ struct SnapshotSettingsRow {
 async fn load_settings(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<(Revision, SnapshotRuntimeSettings)> {
-    let row = sqlx::query_as::<_, SnapshotSettingsRow>(
-        "select config_revision, refresh_margin_seconds, refresh_concurrency, max_concurrent_per_account, request_interval_ms, rotation_strategy, model_mappings_json, min_codex_desktop_version, min_codex_cli_version, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds, request_location_json, request_location_enabled, responses_max_decompressed_body_bytes, provider_request_profiles_json, pricing_overrides_json, pricing_synced_json from runtime_settings where id = 1",
+    let row = sqlx::query_as::<
+        _,
+        (
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            String,
+            sqlx::types::Json<BTreeMap<String, String>>,
+            Option<String>,
+            Option<String>,
+            bool,
+            i64,
+            i64,
+            bool,
+            i64,
+        ),
+    >(
+        "select config_revision, refresh_margin_seconds, refresh_concurrency,
+                max_concurrent_per_account, request_interval_ms, rotation_strategy,
+                model_mappings_json, min_codex_desktop_version,
+                min_codex_cli_version, overload_cooldown_enabled,
+                overload_cooldown_threshold, overload_cooldown_seconds,
+                cyber_session_block_enabled, cyber_session_block_ttl_seconds
+         from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
     .await
@@ -284,31 +308,19 @@ async fn load_settings(
     Ok((
         revision_from_i64(row.config_revision)?,
         SnapshotRuntimeSettings {
-            pricing: {
-                super::pricing::validate_pricing(&row.pricing_synced_json.0)?;
-                super::pricing::validate_pricing(&row.pricing_overrides_json.0)?;
-                gateway_core::metering::merge_pricing(
-                    row.pricing_synced_json.0,
-                    &row.pricing_overrides_json.0,
-                )
-            },
-            request_profiles: decode_request_profiles(row.provider_request_profiles_json.0)?,
-            responses_max_decompressed_body_bytes: to_u64(
-                row.responses_max_decompressed_body_bytes,
-            )?,
-            request_location_enabled: row.request_location_enabled,
-            request_location: row.request_location_json.0,
-            refresh_margin_seconds: to_u64(row.refresh_margin_seconds)?,
-            refresh_concurrency: to_u32(row.refresh_concurrency)?,
-            max_concurrent_per_account: to_u32(row.max_concurrent_per_account)?,
-            request_interval_ms: to_u64(row.request_interval_ms)?,
-            rotation_strategy: row.rotation_strategy,
-            model_mappings: row.model_mappings_json.0,
-            min_codex_desktop_version: row.min_codex_desktop_version,
-            min_codex_cli_version: row.min_codex_cli_version,
-            max_waiting_per_key: to_u32(row.max_waiting_per_key)?,
-            max_waiting_per_account: to_u32(row.max_waiting_per_account)?,
-            concurrency_wait_timeout_seconds: to_u32(row.concurrency_wait_timeout_seconds)?,
+            refresh_margin_seconds: to_u64(row.1)?,
+            refresh_concurrency: to_u32(row.2)?,
+            max_concurrent_per_account: to_u32(row.3)?,
+            request_interval_ms: to_u64(row.4)?,
+            rotation_strategy: row.5,
+            model_mappings: row.6.0,
+            min_codex_desktop_version: row.7,
+            min_codex_cli_version: row.8,
+            overload_cooldown_enabled: row.9,
+            overload_cooldown_threshold: to_u32(row.10)?,
+            overload_cooldown_seconds: to_u32(row.11)?,
+            cyber_session_block_enabled: row.12,
+            cyber_session_block_ttl_seconds: to_u32(row.13)?,
         },
     ))
 }

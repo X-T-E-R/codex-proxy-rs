@@ -104,6 +104,7 @@ flowchart LR
 
 | 模块 | 唯一责任 |
 | --- | --- |
+| `policy` | Client Key 与客户端策略值对象，包括 cyber 会话屏蔽的匹配合同；不依赖 Provider、HTTP 或存储 |
 | `validation` | 纯值对象校验错误和文本约束，不依赖事件、执行错误或路由 |
 | `identity` | Provider 身份值 `ProviderKind`，只依赖纯校验 |
 | `account` | Provider 账号/credential/quota 值对象、持久化端口与请求级账号选择；`scope` 持有分组、账号目录和冻结账号范围 |
@@ -250,6 +251,20 @@ OpenAI / xAI 导入用例。并发槽位由单个 Worker 统一管理，条目�
 完成或跳过即释放原始输入，终态记录有时限和数量上限，不写 PostgreSQL 或 Redis。
 前端通过当前管理员的任务列表恢复视图，轮询与任务执行互不拥有生命周期。接口、限额与重启语义见
 [后台导入任务](api.md#后台导入任务)。
+
+### Cyber 会话屏蔽
+
+Core 的 `policy` 在 `RuntimeSnapshot` 和每个请求计划中冻结 cyber 屏蔽开关与 TTL，并按
+`Client Key + 语义会话`执行匹配。会话身份优先取经校验的显式 ID；缺失时才从完整历史计算精确
+前缀/续接。匹配键不包含账号、模型或通道；只读取用于匹配的结构化会话/历史字段，不保存请求正文。
+
+Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为空时，才回退读取 `response.error.code`。
+顶层值非空时不读取嵌套值；比较前去除首尾空白并按大小写不敏感匹配，规范化后精确等于
+`cyber_policy` 才把它作为拒绝事实交给 Core，不以 `message` 或正文文本扫描代替结构化判断。
+Core 决定本地 403 与后续调度；Store 的 Redis 适配器只保存可过期的 session marker，不新增永久屏蔽表
+或正文归档。首次写入确定 TTL，后续写入及本地重试不续期；配置编辑不改变已存条目的剩余 TTL。开关关闭时忽略
+现有条目，命中且启用时在上游之前拒绝；HTTP/SSE 以请求为单位，Responses WebSocket 以每个
+`response.create` turn 为单位。
 
 ### 账号出站代理
 

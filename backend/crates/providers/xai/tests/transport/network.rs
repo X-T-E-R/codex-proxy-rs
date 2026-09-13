@@ -994,6 +994,45 @@ async fn inference_transport_should_not_reject_sse_bytes_only_because_content_ty
 }
 
 #[tokio::test]
+async fn inference_transport_should_mark_success_json_cyber_policy_refusal() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let raw = r#"{"error":{"code":" cyber_policy ","type":"permission_error","message":"request refused"}}"#;
+    let first = &raw.as_bytes()[..31];
+    let second = &raw.as_bytes()[31..];
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n{:x}\r\n{}\r\n{:x}\r\n{}\r\n0\r\n\r\n",
+        first.len(),
+        std::str::from_utf8(first).unwrap(),
+        second.len(),
+        std::str::from_utf8(second).unwrap(),
+    );
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut request = vec![0_u8; 8192];
+        let _ = stream.read(&mut request).await.expect("read request");
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write chunked response");
+    });
+    let error = inference_transport(&origin)
+        .execute(inference_request(&origin))
+        .await
+        .expect_err("structured cyber refusal must leave the SSE success path");
+    server.await.expect("server task");
+
+    assert!(error.is_cyber_policy_refusal());
+    assert_eq!(error.status(), Some(200));
+    assert_eq!(
+        error.upstream_code().map(|code| code.as_str()),
+        Some("cyber_policy")
+    );
+}
+
+#[tokio::test]
 async fn billing_transport_should_get_exact_credits_resource_without_redirect() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

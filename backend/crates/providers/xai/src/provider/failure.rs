@@ -115,8 +115,12 @@ pub(super) async fn record_stream_failure(
     session: &SelectedGrokSession,
     error: ProviderError,
     upstream_model: &UpstreamModelId,
+    cyber_session_block_enabled: bool,
 ) -> ProviderError {
     if !session.allows_account_state_mutation() {
+        return error;
+    }
+    if cyber_session_block_enabled && error.is_cyber_policy_refusal() {
         return error;
     }
     if let Some(failure) = stream_credential_failure(&error, upstream_model) {
@@ -172,8 +176,12 @@ pub(super) async fn recover_or_record_failure(
     error: ProviderError,
     credential_failure: Option<GrokCredentialFailure>,
     recovery_attempted: bool,
+    cyber_session_block_enabled: bool,
 ) -> ProviderError {
     if !session.allows_account_state_mutation() {
+        return error;
+    }
+    if cyber_session_block_enabled && error.is_cyber_policy_refusal() {
         return error;
     }
     if error.requires_credential_recovery() && !recovery_attempted {
@@ -295,14 +303,27 @@ pub(super) async fn map_and_record_stream_transport_failure(
     session: &SelectedGrokSession,
     error: GrokInferenceTransportError,
     upstream_model: &UpstreamModelId,
+    cyber_session_block_enabled: bool,
 ) -> ProviderError {
     let request_scoped = error.kind() == GrokInferenceTransportErrorKind::SafetyRejected;
     let credential_failure = transport_credential_failure(&error, upstream_model);
-    let error = map_stream_error(error);
+    let error = map_stream_error(error, cyber_session_block_enabled);
+    if cyber_session_block_enabled && error.is_cyber_policy_refusal() {
+        return error;
+    }
     match credential_failure {
         Some(failure) => record_credential_failure(selector, session, error, failure).await,
         None if request_scoped => error,
-        None => record_stream_failure(selector, session, error, upstream_model).await,
+        None => {
+            record_stream_failure(
+                selector,
+                session,
+                error,
+                upstream_model,
+                cyber_session_block_enabled,
+            )
+            .await
+        }
     }
 }
 
@@ -455,19 +476,32 @@ pub(super) fn map_transport_error_for_context(
     error: GrokInferenceTransportError,
     context: &AttemptContext,
 ) -> ProviderError {
-    let allow_explicit_replay = context.continuation().is_none()
-        || error.kind() == GrokInferenceTransportErrorKind::Unauthorized;
-    map_transport_error_with_state(error, None, allow_explicit_replay)
+    let cyber_refusal = context.cyber_session_block_enabled() && error.is_cyber_policy_refusal();
+    let allow_explicit_replay = !cyber_refusal
+        && (context.continuation().is_none()
+            || error.kind() == GrokInferenceTransportErrorKind::Unauthorized);
+    map_transport_error_with_state(error, None, allow_explicit_replay, !cyber_refusal)
 }
 
-pub(super) fn map_stream_error(error: GrokInferenceTransportError) -> ProviderError {
-    map_transport_error_with_state(error, Some(UpstreamSendState::Sent), false)
+pub(super) fn map_stream_error(
+    error: GrokInferenceTransportError,
+    cyber_session_block_enabled: bool,
+) -> ProviderError {
+    let allow_credential_recovery_replay =
+        !(cyber_session_block_enabled && error.is_cyber_policy_refusal());
+    map_transport_error_with_state(
+        error,
+        Some(UpstreamSendState::Sent),
+        false,
+        allow_credential_recovery_replay,
+    )
 }
 
 pub(super) fn map_transport_error_with_state(
     error: GrokInferenceTransportError,
     forced_send_state: Option<UpstreamSendState>,
     allow_explicit_replay: bool,
+    allow_credential_recovery_replay: bool,
 ) -> ProviderError {
     let transport_kind = error.kind();
     let kind = match transport_kind {
@@ -524,11 +558,14 @@ pub(super) fn map_transport_error_with_state(
         .with_classification("upstream", "upstream_failure")
     });
     mapped = mapped.with_diagnostic(diagnostic);
-    if error.requires_credential_recovery() {
+    if error.requires_credential_recovery() && allow_credential_recovery_replay {
         mapped = mapped.with_credential_recovery().with_replay_safe();
     }
     if error.sensitive_context_was_redacted() {
         mapped = mapped.redact_sensitive_context("upstream transport context");
+    }
+    if error.is_cyber_policy_refusal() {
+        mapped = mapped.with_cyber_policy_refusal();
     }
     mapped
 }

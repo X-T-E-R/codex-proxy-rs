@@ -620,6 +620,8 @@ pub struct CodexBackendStreamingResponse {
     pub transport_metrics: CodexTransportMetrics,
     /// terminal completed 后是否由池中 WebSocket 保留 connection-local continuation。
     pub connection_local_continuation: bool,
+    /// 成功 HTTP JSON 正文中、在 SSE decoder 改写前观察到的精确 cyber 拒绝事实。
+    pub cyber_policy_refusal: bool,
 }
 
 /// Codex 上游非流式 JSON 响应。

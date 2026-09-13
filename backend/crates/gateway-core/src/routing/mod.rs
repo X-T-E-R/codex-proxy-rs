@@ -544,6 +544,7 @@ pub struct RoutingPlan {
     max_attempts: NonZeroU32,
     account_scope: Arc<FrozenAccountScope>,
     candidates: Arc<[ProviderCandidate]>,
+    cyber_session_block_policy: Option<crate::policy::CyberSessionBlockPolicy>,
 }
 
 impl RoutingPlan {
@@ -591,5 +592,12 @@ impl RoutingPlan {
     #[must_use]
     pub fn candidates(&self) -> &[ProviderCandidate] {
         &self.candidates
+    }
+
+    #[must_use]
+    pub const fn cyber_session_block_policy(
+        &self,
+    ) -> Option<crate::policy::CyberSessionBlockPolicy> {
+        self.cyber_session_block_policy
     }
 }

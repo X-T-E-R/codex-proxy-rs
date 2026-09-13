@@ -329,6 +329,7 @@ pub struct GrokInferenceTransportError {
     transport_metrics: GrokInferenceTransportMetrics,
     credential_recovery_required: bool,
     sensitive_context_redacted: bool,
+    cyber_policy_refusal: bool,
 }
 
 impl GrokInferenceTransportError {
@@ -352,6 +353,7 @@ impl GrokInferenceTransportError {
             },
             credential_recovery_required: false,
             sensitive_context_redacted: false,
+            cyber_policy_refusal: false,
         }
     }
 
@@ -421,6 +423,17 @@ impl GrokInferenceTransportError {
     pub const fn with_credential_recovery(mut self) -> Self {
         self.credential_recovery_required = true;
         self
+    }
+
+    #[must_use]
+    pub const fn with_cyber_policy_refusal(mut self) -> Self {
+        self.cyber_policy_refusal = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn is_cyber_policy_refusal(&self) -> bool {
+        self.cyber_policy_refusal
     }
 
     /// 丢弃可能敏感的上游响应体，仅保留「已丢弃」这一事实。
@@ -519,6 +532,7 @@ impl fmt::Debug for GrokInferenceTransportError {
                 "sensitive_context",
                 &self.sensitive_context_redacted.then_some("[REDACTED]"),
             )
+            .field("cyber_policy_refusal", &self.cyber_policy_refusal)
             .finish()
     }
 }

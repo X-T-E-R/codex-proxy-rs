@@ -407,7 +407,8 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             response_origin: &request.response_origin,
             cyber_policy_scope: None,
             allows_account_state_mutation,
-            allows_capacity_feedback: !request.context.is_diagnostic_required_account(),
+            selection_policy: request.context.account_selection_policy(),
+            cyber_session_block_enabled: request.context.cyber_session_block_enabled(),
         };
         let active_account = request.lease.account().clone();
         let cookie_header = build_cookie_header(request.lease.cookies())?;
@@ -583,7 +584,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             response_origin: &response_origin,
             cyber_policy_scope: cyber_policy_scope.as_ref(),
             allows_account_state_mutation,
-            allows_capacity_feedback: !context.is_diagnostic_required_account(),
+            selection_policy: context.account_selection_policy(),
+            cyber_session_block_enabled: context.cyber_session_block_enabled(),
         };
         let mut active_account = lease.account().clone();
         let cookie_header = build_cookie_header(lease.cookies())?;
@@ -723,6 +725,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             active_account = current;
         }
         let response_transport = response.transport;
+        let response_cyber_policy_refusal = response.cyber_policy_refusal;
         let websocket_connection_id = response.websocket_connection_id;
         let mut body = response.body;
         let mut failure_diagnostics = response.diagnostics.clone();
@@ -903,8 +906,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     &error,
                 );
                 let atomic_upstream_failure = matches!(&error, CodexCanonicalError::Upstream(_));
-                (
-                    map_canonical_error(
+                let mut failure = map_canonical_error(
                         error,
                         &failure_diagnostics,
                         &failure_set_cookie_headers,
@@ -912,9 +914,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         ReplayBoundary::from_semantic_output(
                             semantic_output_seen || pre_commit_events.is_committed(),
                         ),
-                    ),
-                    atomic_upstream_failure,
-                )
+                    );
+                if response_cyber_policy_refusal {
+                    failure.error = failure.error.with_cyber_policy_refusal();
+                }
+                (failure, atomic_upstream_failure)
             });
             let timing_signals = decoder.take_timing_signals();
             let timing_changed = first_event_changed
@@ -1017,8 +1021,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &error,
             );
             let atomic_upstream_failure = matches!(&error, CodexCanonicalError::Upstream(_));
-            (
-                map_canonical_error(
+            let mut failure = map_canonical_error(
                     error,
                     &failure_diagnostics,
                     &failure_set_cookie_headers,
@@ -1026,9 +1029,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     ReplayBoundary::from_semantic_output(
                         semantic_output_seen || pre_commit_events.is_committed(),
                     ),
-                ),
-                atomic_upstream_failure,
-            )
+                );
+            if response_cyber_policy_refusal {
+                failure.error = failure.error.with_cyber_policy_refusal();
+            }
+            (failure, atomic_upstream_failure)
         });
         let timing_signals = decoder.take_timing_signals();
         let response_model_changed = observation_state

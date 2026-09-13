@@ -392,6 +392,14 @@ fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError>
         && command.ws_pool_max_connecting > 0
         && command.ws_pool_stream_idle_timeout_ms > 0
         && command.ws_pool_fast_path_budget_ms > 0
+        && command.overload_cooldown_threshold > 0
+        && command.overload_cooldown_seconds > 0
+        && command
+            .cyber_session_block_ttl_seconds
+            .is_none_or(|seconds| seconds > 0)
+        && gateway_core::provider_ports::valid_user_agent_override(
+            command.openai_user_agent.as_deref(),
+        )
         && valid_client_version(command.min_codex_desktop_version.as_deref())
         && valid_client_version(command.min_codex_cli_version.as_deref())
         && i64::try_from(command.request_interval_ms).is_ok()

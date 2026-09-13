@@ -54,6 +54,7 @@ pub struct CoreStorePorts {
     snapshots: Arc<dyn SnapshotStorePort>,
     snapshot_subscriptions: Arc<dyn SnapshotSubscriptionPort>,
     client_api_key_usage: Arc<dyn ClientApiKeyUsageSink>,
+    cyber_sessions: Option<Arc<dyn policy::CyberSessionPort>>,
     budget: Option<Arc<dyn engine::budget::ClientBudgetPort>>,
 }
 
@@ -82,6 +83,7 @@ impl CoreStorePorts {
             snapshots,
             snapshot_subscriptions,
             client_api_key_usage,
+            cyber_sessions: None,
             budget: None,
         }
     }
@@ -89,6 +91,12 @@ impl CoreStorePorts {
     #[must_use]
     pub fn with_budget(mut self, budget: Arc<dyn engine::budget::ClientBudgetPort>) -> Self {
         self.budget = Some(budget);
+        self
+    }
+
+    #[must_use]
+    pub fn with_cyber_sessions(mut self, port: Arc<dyn policy::CyberSessionPort>) -> Self {
+        self.cyber_sessions = Some(port);
         self
     }
 }
@@ -172,6 +180,9 @@ pub async fn initialize(
     );
     if let Some(budget) = ports.budget {
         service = service.with_budget(budget);
+    }
+    if let Some(cyber_sessions) = ports.cyber_sessions {
+        service = service.with_cyber_sessions(cyber_sessions);
     }
     let service = Arc::new(service);
     let execution: Arc<dyn ExecutionService> = service.clone();

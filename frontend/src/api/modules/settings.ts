@@ -31,6 +31,12 @@ export interface RuntimeSettings {
   wsPoolMaxConnecting: number
   wsPoolStreamIdleTimeoutMs: number
   wsPoolFastPathBudgetMs: number
+  overloadCooldownEnabled: boolean
+  overloadCooldownThreshold: number
+  overloadCooldownSeconds: number
+  cyberSessionBlockEnabled: boolean
+  cyberSessionBlockTtlSeconds: number
+  openaiUserAgent: string | null
   updatedAt: string
 }
 

@@ -273,67 +273,23 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 上游结构化错误的 message/code/type 按上述边界交付客户端，其中内嵌的账号指纹 UUID 已脱敏。模型映射是
 全局精确映射，未命中时模型名原样交给候选 Provider；分组只限定账号集合，不参与模型改名。
 
-OpenAI 明确返回 `server_is_overloaded`、`slow_down` 或模型容量不足错误时，代理在允许安全重放且
-尚未交付输出的前提下，先做最多 3 次同账号指数退避，再通过现有调度换号。默认间隔从 500ms 开始，
-上游 `Retry-After` 参与退避计算，单次等待不超过 8 秒；重试同时受请求总尝试次数和截止时间约束。
-`server_is_overloaded`、`slow_down` 等可计分的结构化错误按已发送的失败尝试计入 Smart 账号
-健康分。已确认容量拒绝的平滑权重为 0.4，其他可计分失败与成功样本保持 0.2。
-失败率使用账号级平滑与时间衰减，影响后续普通选路，已有可用账号的
-会话亲和仍优先。容量不足不触发 Provider 全局熔断，也不作为账号额度耗尽；启用账号自动冻结时，
-达到容量失败阈值会另外写入临时冷却。
-客户端错误兼容由 API 编码出口统一处理：最终交付的 `server_is_overloaded`、`slow_down` 错误码
-投影为 `server_error`，HTTP 错误状态及 WS 包装错误的数字状态投影为 `503`，让客户端执行自己的
-有界重试。Provider 已确认容量不足的初始失败，即使没有这两个错误码，也返回 `503`。
-SSE/WS 的 `response.failed` 保留原消息、响应 ID 与其他业务字段；客户端无法消费的裸 `error`
-继续按现有规则投影为 `response.failed`。`Retry-After` 等允许下发的响应头保留，
-其他错误码不受影响。内部上游状态、错误码、原始事件及计量事实保持不变；已开始输出的请求由
-客户端决定如何恢复，代理不因此重放已提交的请求。
-明确额度耗尽触发账号隔离与安全换号，
-包括 WebSocket 握手返回的 429；不会因其长 `Retry-After` 而转入同账号传输恢复等待。
-OpenAI 选号阶段确认本次可选账号全部额度耗尽时，HTTP 返回 `429`，WebSocket 错误帧返回
-`status: 429`，两者的 `error.type` 与 `error.code` 均为 `usage_limit_reached`，提示客户端停止
-本轮自动重试，等待额度恢复或补充可用账号。空账号池、认证失效和临时容量不足不按额度耗尽处理；
-仍有其他可用 Provider 或可安全恢复的续写时，网关先按现有路由规则尝试恢复。
+### Cyber 会话自动屏蔽
 
-带 `previous_response_id` 的 OpenAI 原生续写仍绑定原账号。若该账号明确拒绝请求且额度已耗尽，
-并且请求可安全重放、尚无语义输出且未提交下游，网关隔离该账号，对客户端返回 HTTP `400`
-（WebSocket 为 `status: 400`）及 `previous_response_not_found`，不附带额度窗口的 `Retry-After`。
-支持该恢复协议的客户端应去掉 `previous_response_id`、携带完整历史重试，由正常调度选择可用账号；
-官方 Codex 的 WebSocket 客户端支持这一流程。其他客户端需要自行处理，网关不会跨账号发送原增量输入。
-普通限流、容量不足、发送结果不明以及已经交付输出的失败不触发此转换。
+启用 cyber 会话自动屏蔽后，Responses 请求按 `Client Key + 语义会话`查询 Redis 屏蔽状态。
+会话匹配优先使用请求中经校验的显式会话 ID；缺失时才使用完整历史的精确前缀/续接。会话键不包含
+账号、模型或通道，也不保存请求正文。
 
-### API Key 额度查询
+Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为空时，才回退读取 `response.error.code`。
+顶层值非空时不读取嵌套值；比较前去除首尾空白并按大小写不敏感匹配，规范化后精确等于
+`cyber_policy` 才记录拒绝事实，不扫描 `message` 或正文文本。命中未过期的本地条目时，HTTP JSON 与 HTTP SSE 请求在访问上游前
+返回 `403`，错误字段为 `error.type = "permission_error"`、
+`error.code = "session_blocked_by_cyber_policy"`；已建立的 Responses WebSocket 则在对应的每个
+`response.create` turn 返回 `status: 403` 的错误事件，并使用相同字段。此类本地重试仍不访问上游。
 
-`GET /v1/usage` 使用 `Authorization: Bearer <Client Key>`，不接受会话 Cookie、管理 API Key 或查询参数。
-只返回该 Key 的日与周额度，不包含明文 Key、账号资料或其他 Key 的数据。查询不会调用上游、扣费、占用推理并发/RPM，
-也不会更新最近使用时间或开启预算窗口；额度耗尽后仍可查询。
+屏蔽条目只存在于 Redis 的可过期 session marker 中：首次写入确定 TTL，后续写入或本地重试都不会
+续期；设置编辑也不改变已存条目的剩余 TTL。关闭开关时忽略现有条目，新请求使用新发布的运行策略。
 
-成功响应直接返回以下 JSON，不使用管理接口信封，所有响应带 `Cache-Control: no-store`：
-
-```json
-{
-  "unit": "USD",
-  "daily": { "total": "1", "used": "0.640001", "remaining": "0.359999", "resetsAt": "2026-09-21T16:00:00Z" },
-  "weekly": { "total": "5", "used": "2.35", "remaining": "2.65", "resetsAt": "2026-09-27T16:00:00Z" }
-}
-```
-
-金额使用十进制字符串，`total` 为当前周期限额，`used` 为该周期已结算金额，`remaining` 为限额减已用且最低为零。
-不限额时 `total`、`remaining` 均为 `null`，仍返回已用金额。`resetsAt` 为 RFC3339 时间，尚未开启或已到期的窗口返回 `null`，
-已到期窗口的 `used` 为 `"0"`。日窗口按北京时间零点划分，周窗口沿用首次使用起的七天周期，不固定为周一。
-修改限额、管理员重置和费用结算均复用现有 Key 账本，不从请求日志重算余额。
-
-缺失、非法、已禁用或已删除的 Key 返回 OpenAI 风格 `401` 错误；未知查询参数返回 `400 invalid_usage_query`，
-读取账本失败返回 `503 usage_unavailable`，不会用零余额掩盖故障。
-
-## 4. 浏览器认证
-
-### 统一登录与会话
-
-管理员和密钥登录共用 `/api/auth/*`。登录模式 `mode` 只用于选择凭据验证方式，不直接授予权限；
-验证成功后，由后端写入身份和绑定 ID。一个浏览器只持有一份 `cpr_session` HttpOnly Cookie，
-原始 Key 不进入 URL、Pinia 或浏览器存储。登录页的切换只改变本地表单，不改变 URL。
-管理员进入管理端；Key 登录后进入 `/key-usage`，只读取当前会话绑定 Key 的数据。
+## 4. 管理员认证
 
 | 方法 | 路由 | 请求 | 说明 |
 | --- | --- | --- | --- |
@@ -1055,6 +1011,12 @@ wsPoolMaxAgeMs
 wsPoolMaxConnecting
 wsPoolStreamIdleTimeoutMs
 wsPoolFastPathBudgetMs
+overloadCooldownEnabled
+overloadCooldownThreshold
+overloadCooldownSeconds
+cyberSessionBlockEnabled
+cyberSessionBlockTtlSeconds
+openaiUserAgent
 ```
 
 `requestLocationEnabled` 是必填布尔值，默认 `false`：关闭时不覆盖客户端原有位置和时区；开启时使用已保存的
@@ -1114,10 +1076,23 @@ wsPoolFastPathBudgetMs
 | `POST` | `/api/admin/settings/pricing/sync/preview` | 无 body；返回 `{ prices, skipped }`，不写入配置 |
 | `POST` | `/api/admin/settings/pricing/sync` | `{ preview: { prices, skipped }, models: { openai: ["gpt-5.4"] } }`；成功返回 `{ saved: true }` |
 
-价目使用 `Provider → 精确上游模型 ID → { multiplierBps, bands }` 的映射。优先级为人工覆盖、已同步价目、
-内置价目；按档位合并，不从客户端模型别名或响应模型猜测价格。`syncedAt` 为 ISO 时间或 `null`。
-每个档位包含四个非负十进制字符串：`input`、`output`、`cacheRead`、`cacheWrite`，单位 USD / 百万
-Token，范围 0～1000000、最多四位小数。`"0"` 表示免费，缺少整个档位表示继承；不能只缺少部分单价。
+Cyber 会话自动屏蔽由以下两个字段控制：
+
+| 字段 | 类型 | 默认值 | 含义 |
+| --- | --- | ---: | --- |
+| `cyberSessionBlockEnabled` | `boolean` | `false` | 是否启用 Responses 会话屏蔽 |
+| `cyberSessionBlockTtlSeconds` | `u32` 整数 | `3600` | 屏蔽条目的 Redis TTL（秒），范围 `1`–`4294967295` |
+
+`GET /api/admin/settings` 及成功的设置更新响应都会返回这两个字段。
+`POST /api/admin/settings/update` 仍以原子方式替换完整运行设置；新增 cyber 字段可省略以兼容旧客户端，
+省略时沿用当前已保存值，提供时按上述类型和范围校验。保存会在同一事务中推进 `config_revision` 并发布
+新的 runtime snapshot，后续请求使用新策略，已开始的请求继续使用开始时快照。已有 Redis 条目的
+剩余 TTL 不因设置编辑而变化，新写入使用新快照的 TTL；关闭开关只忽略现有条目，不会把它们用于
+本地拒绝。
+
+`openaiUserAgent` 为 `string | null`，默认 `null`，此时使用启动配置的平台和自动更新的版本。
+自定义模板支持 `{originator}`、`{codex_version}`、`{desktop_version}`；版本变量使用当前已核验的
+Core/Desktop 版本，无需每次发版修改模板。例如保持 Windows 平台并自动跟随版本：
 
 `bands` 可用键为 `standard`、`fast`、`flex`、`long_standard`、`long_fast`、`long_flex`、`image`。
 OpenAI 长上下文为输入超过 272000 Token，xAI 为输入达到 200000 Token；仍按 Provider 支持的
