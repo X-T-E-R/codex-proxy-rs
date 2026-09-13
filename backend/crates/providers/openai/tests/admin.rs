@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bytes::Bytes;
 use chrono::{DateTime, TimeZone as _, Utc};
 use futures::{StreamExt, future::BoxFuture};
 use gateway_admin::model::accounts::AccountRecord;
@@ -28,16 +29,19 @@ use gateway_core::engine::{
     AccountAttemptContext, AttemptContext, ModelRequestId, RequestAttemptContext,
 };
 use gateway_core::lifecycle::CancellationToken;
-use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload};
+use gateway_core::operation::{
+    GenerateRequest, Operation, ProtocolPayload, RawJsonPayload, StandaloneSearchRequest,
+};
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::{
     NewOAuthPendingFlow, OAuthPendingClaimOutcome, OAuthPendingConsumeOutcome,
     OAuthPendingFlowPort, OAuthPendingPutOutcome, OAuthPendingReleaseOutcome,
-    ProviderArtifactProfile, ProviderArtifactProfileCachePort, ProviderCatalogCacheKey,
-    ProviderCatalogCachePort, ProviderCooldown, ProviderCooldownPort, ProviderCooldownScope,
-    ProviderCredentialState, ProviderCredentialStatePort, ProviderRefreshPolicy,
-    ProviderRuntimePolicyPort, ProviderScopedCooldown, ProviderStoreError, ProviderStoreErrorKind,
-    ProviderStorePorts, ProviderWebSocketPoolPolicy, ProviderWebSocketPoolPolicyPort,
+    OpenAiRequestBodyOverride, ProviderArtifactProfile, ProviderArtifactProfileCachePort,
+    ProviderCatalogCacheKey, ProviderCatalogCachePort, ProviderCooldown, ProviderCooldownPort,
+    ProviderCooldownScope, ProviderCredentialState, ProviderCredentialStatePort,
+    ProviderRefreshPolicy, ProviderRuntimePolicyPort, ProviderScopedCooldown, ProviderStoreError,
+    ProviderStoreErrorKind, ProviderStorePorts, ProviderWebSocketPoolPolicy,
+    ProviderWebSocketPoolPolicyPort,
 };
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ProviderKind,
@@ -301,6 +305,180 @@ async fn ws_pool_worker_restores_saved_policy_and_keeps_it_when_store_is_unavail
             .count();
         assert_eq!(openings, usize::from(index == 2), "request {index}");
     }
+}
+
+#[tokio::test]
+async fn runtime_policy_worker_hot_updates_the_initialized_provider_request_body() {
+    let account_id = "acct_request_locale_policy";
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: account_id.to_owned(),
+            name: account_id.to_owned(),
+            secret: secret("request-locale-test-token"),
+            verified_account: profile("request-locale-test-account"),
+            next_refresh_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+            enabled: true,
+        })
+        .await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(COMPLETED_SESSION_SSE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/codex/alpha/search"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_json(json!({"output": "search result"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let runtime_policy = Arc::new(MutableRequestBodyRuntimePolicy(Mutex::new(
+        OpenAiRequestBodyOverride::try_new(true, "America/Los_Angeles", "US")
+            .expect("initial request locale"),
+    )));
+    let mut config = valid_config();
+    config.config.api.base_url = server.uri();
+    let mut bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with_runtime_policy(
+            store,
+            Arc::new(TestOAuthPending::default()),
+            Arc::new(TestCatalogCache::default()),
+            Arc::new(TestWsPoolPolicy::default()),
+            runtime_policy.clone(),
+        ),
+    )
+    .await
+    .expect("OpenAI bundle");
+    let registration = bundle
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|item| match item {
+            WorkerContribution::Registration(registration)
+                if registration.id.owner() == "openai-websocket-pool" =>
+            {
+                Some(registration)
+            }
+            _ => None,
+        })
+        .expect("runtime policy worker");
+    let WorkerRunnable::Scheduled { task, .. } = registration.runnable else {
+        panic!("scheduled runtime policy worker");
+    };
+    *runtime_policy.0.lock().expect("runtime policy") =
+        OpenAiRequestBodyOverride::try_new(true, "Asia/Tokyo", "JP")
+            .expect("updated request locale");
+    task.run_cycle(WorkerCycleContext::new(
+        registration.id,
+        None,
+        CancellationToken::new(),
+    ))
+    .await
+    .expect("request locale sync");
+
+    let payload = ProtocolPayload::json_object(
+        "openai",
+        Map::from_iter([
+            ("model".to_owned(), json!("gpt-5.4")),
+            (
+                "input".to_owned(),
+                json!([{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "<environment_context>\n  <cwd>C:/workspace</cwd>\n  <current_date>2000-01-01</current_date>\n  <timezone>Etc/UTC</timezone>\n</environment_context>"
+                    }]
+                }]),
+            ),
+            ("tools".to_owned(), json!([{"type": "web_search"}])),
+            ("future".to_owned(), json!({"preserved": true})),
+        ]),
+    )
+    .expect("OpenAI payload")
+    .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))]));
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
+    let before = Utc::now();
+    let mut stream = bundle
+        .core_provider()
+        .execute(
+            initialized_provider_request(operation, account_id),
+            initialized_attempt_context("req_request_locale_policy", account_id),
+        )
+        .await
+        .expect("prepare provider stream");
+    while let Some(event) = stream.next().await {
+        event.expect("provider response");
+    }
+    let after = Utc::now();
+    let requests = server.received_requests().await.expect("received requests");
+    let request = requests
+        .iter()
+        .find(|request| request.method == "POST" && request.url.path() == "/codex/responses")
+        .expect("Responses request");
+    let decompressed = zstd::stream::decode_all(std::io::Cursor::<&[u8]>::new(&request.body))
+        .expect("decode request body");
+    let body: Value = serde_json::from_slice(&decompressed).expect("request JSON");
+    let text = body["input"][0]["content"][0]["text"]
+        .as_str()
+        .expect("environment text");
+    let expected_dates = [before, after].map(|captured_at| {
+        captured_at
+            .with_timezone(&chrono_tz::Asia::Tokyo)
+            .format("%Y-%m-%d")
+            .to_string()
+    });
+    assert!(
+        expected_dates
+            .iter()
+            .any(|date| { text.contains(&format!("<current_date>{date}</current_date>")) })
+    );
+    assert!(text.contains("<timezone>Asia/Tokyo</timezone>"));
+    assert_eq!(body["tools"][0]["user_location"]["country"], "JP");
+    assert_eq!(body["tools"][0]["user_location"]["timezone"], "Asia/Tokyo");
+    assert_eq!(body["future"], json!({"preserved": true}));
+
+    let search = Operation::Search(StandaloneSearchRequest::from_raw_json(
+        RawJsonPayload::new(
+            "openai",
+            Bytes::from_static(
+                br#"{"id":"search-locale","settings":{"search_context_size":"high"},"future":{"preserved":true}}"#,
+            ),
+        )
+        .expect("search payload"),
+    ));
+    let mut stream = bundle
+        .core_provider()
+        .execute(
+            initialized_provider_endpoint_request(search, account_id),
+            initialized_attempt_context("req_search_locale_policy", account_id),
+        )
+        .await
+        .expect("prepare Search provider stream");
+    while let Some(event) = stream.next().await {
+        event.expect("Search provider response");
+    }
+    let requests = server.received_requests().await.expect("received requests");
+    let search_request = requests
+        .iter()
+        .find(|request| request.method == "POST" && request.url.path() == "/codex/alpha/search")
+        .expect("Search request");
+    let body: Value = serde_json::from_slice(&search_request.body).expect("Search request JSON");
+    assert_eq!(body["settings"]["user_location"]["type"], "approximate");
+    assert_eq!(body["settings"]["user_location"]["country"], "JP");
+    assert_eq!(body["settings"]["user_location"]["timezone"], "Asia/Tokyo");
+    assert_eq!(body["settings"]["search_context_size"], "high");
+    assert_eq!(body["future"], json!({"preserved": true}));
 }
 
 #[tokio::test]
@@ -1334,6 +1512,30 @@ fn initialized_provider_request(operation: Operation, account_id: &str) -> Provi
     ProviderRequest::new(operation, plan.candidates()[0].clone())
 }
 
+fn initialized_provider_endpoint_request(
+    operation: Operation,
+    account_id: &str,
+) -> ProviderRequest {
+    let provider = ProviderKind::new("openai").expect("provider");
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        account_policy(),
+        vec![provider.clone()],
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("runtime snapshot");
+    let plan = snapshot
+        .plan_provider_endpoint(
+            &provider,
+            &operation,
+            initialized_account_scope(account_id),
+            &RoutingContext::default(),
+        )
+        .expect("provider endpoint routing plan");
+    ProviderRequest::new(operation, plan.candidates()[0].clone())
+}
+
 fn initialized_attempt_context(request_id: &str, account_id: &str) -> AttemptContext {
     AttemptContext::new(
         RequestAttemptContext::new(
@@ -1394,6 +1596,22 @@ fn provider_ports_with_policy(
     catalog_cache: Arc<TestCatalogCache>,
     ws_pool_policy: Arc<TestWsPoolPolicy>,
 ) -> ProviderStorePorts {
+    provider_ports_with_runtime_policy(
+        accounts,
+        pending,
+        catalog_cache,
+        ws_pool_policy,
+        Arc::new(TestRuntimePolicy),
+    )
+}
+
+fn provider_ports_with_runtime_policy(
+    accounts: Arc<MemoryAccountStore>,
+    pending: Arc<TestOAuthPending>,
+    catalog_cache: Arc<TestCatalogCache>,
+    ws_pool_policy: Arc<TestWsPoolPolicy>,
+    runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
+) -> ProviderStorePorts {
     ProviderStorePorts::new(
         accounts,
         Arc::new(TestLeaseCoordinator::default()),
@@ -1403,7 +1621,7 @@ fn provider_ports_with_policy(
         Arc::new(TestArtifactProfiles),
         Arc::new(TestCredentialState),
         Arc::new(TestCooldown),
-        Arc::new(TestRuntimePolicy),
+        runtime_policy,
         ws_pool_policy,
         pending,
     )
@@ -1660,6 +1878,27 @@ impl ProviderRuntimePolicyPort for TestRuntimePolicy {
                 NonZeroU32::new(4).expect("nonzero concurrency"),
             )
         })
+    }
+}
+
+struct MutableRequestBodyRuntimePolicy(Mutex<OpenAiRequestBodyOverride>);
+
+impl ProviderRuntimePolicyPort for MutableRequestBodyRuntimePolicy {
+    fn load_refresh_policy(
+        &self,
+    ) -> BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>> {
+        Box::pin(async {
+            ProviderRefreshPolicy::try_new(
+                Duration::from_secs(300),
+                NonZeroU32::new(4).expect("nonzero concurrency"),
+            )
+        })
+    }
+
+    fn load_openai_request_body_override(
+        &self,
+    ) -> BoxFuture<'_, Result<OpenAiRequestBodyOverride, ProviderStoreError>> {
+        Box::pin(async move { Ok(self.0.lock().expect("runtime policy").clone()) })
     }
 }
 

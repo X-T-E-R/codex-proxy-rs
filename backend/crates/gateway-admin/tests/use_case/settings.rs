@@ -71,6 +71,9 @@ fn valid_replace_command() -> ReplaceRuntimeSettings {
         cyber_session_block_enabled: Some(false),
         cyber_session_block_ttl_seconds: Some(3600),
         openai_user_agent: None,
+        openai_request_body_override_enabled: Some(true),
+        openai_request_timezone: Some("America/Los_Angeles".to_owned()),
+        openai_search_country: Some("US".to_owned()),
     }
 }
 
@@ -150,6 +153,20 @@ async fn overload_cooldown_settings_reject_zero_even_when_disabled() {
 async fn cyber_session_ttl_rejects_zero_even_when_disabled() {
     replace_and_expect_invalid(ReplaceRuntimeSettings {
         cyber_session_block_ttl_seconds: Some(0),
+        ..valid_replace_command()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn openai_request_locale_rejects_invalid_values_before_store_call() {
+    replace_and_expect_invalid(ReplaceRuntimeSettings {
+        openai_request_timezone: Some("Pacific".to_owned()),
+        ..valid_replace_command()
+    })
+    .await;
+    replace_and_expect_invalid(ReplaceRuntimeSettings {
+        openai_search_country: Some("USA".to_owned()),
         ..valid_replace_command()
     })
     .await;

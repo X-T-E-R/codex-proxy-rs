@@ -378,6 +378,15 @@ impl SettingsStore for MemorySettingsStore {
                 .cyber_session_block_ttl_seconds
                 .unwrap_or(settings.cyber_session_block_ttl_seconds),
             openai_user_agent: command.openai_user_agent,
+            openai_request_body_override_enabled: command
+                .openai_request_body_override_enabled
+                .unwrap_or(settings.openai_request_body_override_enabled),
+            openai_request_timezone: command
+                .openai_request_timezone
+                .unwrap_or_else(|| settings.openai_request_timezone.clone()),
+            openai_search_country: command
+                .openai_search_country
+                .unwrap_or_else(|| settings.openai_search_country.clone()),
             updated_at: Utc::now(),
         };
         *settings = updated.clone();
@@ -1155,6 +1164,9 @@ fn test_runtime_settings() -> RuntimeSettings {
         cyber_session_block_enabled: false,
         cyber_session_block_ttl_seconds: 3600,
         openai_user_agent: None,
+        openai_request_body_override_enabled: true,
+        openai_request_timezone: "America/Los_Angeles".to_owned(),
+        openai_search_country: "US".to_owned(),
         updated_at: Utc::now(),
     }
 }

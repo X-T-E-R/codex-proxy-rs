@@ -54,6 +54,9 @@ pub struct RuntimeSettingsView {
     pub cyber_session_block_enabled: bool,
     pub cyber_session_block_ttl_seconds: u64,
     pub openai_user_agent: Option<String>,
+    pub openai_request_body_override_enabled: bool,
+    pub openai_request_timezone: String,
+    pub openai_search_country: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -85,6 +88,12 @@ pub struct UpdateRuntimeSettingsRequest {
     #[serde(default)]
     pub cyber_session_block_ttl_seconds: Option<u64>,
     pub openai_user_agent: Option<String>,
+    #[serde(default)]
+    pub openai_request_body_override_enabled: Option<bool>,
+    #[serde(default)]
+    pub openai_request_timezone: Option<String>,
+    #[serde(default)]
+    pub openai_search_country: Option<String>,
 }
 
 impl UpdateRuntimeSettingsRequest {
@@ -95,6 +104,20 @@ impl UpdateRuntimeSettingsRequest {
             self.openai_user_agent.as_deref(),
         ) {
             return Err(WireValidationError::new("openaiUserAgent"));
+        }
+        if self
+            .openai_request_timezone
+            .as_deref()
+            .is_some_and(|value| {
+                gateway_core::provider_ports::canonical_openai_request_timezone(value).is_none()
+            })
+        {
+            return Err(WireValidationError::new("openaiRequestTimezone"));
+        }
+        if self.openai_search_country.as_deref().is_some_and(|value| {
+            gateway_core::provider_ports::canonical_openai_search_country(value).is_none()
+        }) {
+            return Err(WireValidationError::new("openaiSearchCountry"));
         }
         for (value, field) in [
             (self.refresh_margin_seconds, "refreshMarginSeconds"),
@@ -178,6 +201,21 @@ impl UpdateRuntimeSettingsRequest {
                 .transpose()
                 .map_err(|_| WireValidationError::new("cyberSessionBlockTtlSeconds"))?,
             openai_user_agent: self.openai_user_agent,
+            openai_request_body_override_enabled: self.openai_request_body_override_enabled,
+            openai_request_timezone: self
+                .openai_request_timezone
+                .map(|value| {
+                    gateway_core::provider_ports::canonical_openai_request_timezone(&value)
+                        .ok_or_else(|| WireValidationError::new("openaiRequestTimezone"))
+                })
+                .transpose()?,
+            openai_search_country: self
+                .openai_search_country
+                .map(|value| {
+                    gateway_core::provider_ports::canonical_openai_search_country(&value)
+                        .ok_or_else(|| WireValidationError::new("openaiSearchCountry"))
+                })
+                .transpose()?,
         })
     }
 }
@@ -207,6 +245,9 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
             cyber_session_block_enabled: settings.cyber_session_block_enabled,
             cyber_session_block_ttl_seconds: u64::from(settings.cyber_session_block_ttl_seconds),
             openai_user_agent: settings.openai_user_agent,
+            openai_request_body_override_enabled: settings.openai_request_body_override_enabled,
+            openai_request_timezone: settings.openai_request_timezone,
+            openai_search_country: settings.openai_search_country,
             updated_at: settings.updated_at,
         }
     }

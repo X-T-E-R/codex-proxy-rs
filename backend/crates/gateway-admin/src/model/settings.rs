@@ -40,6 +40,9 @@ pub struct RuntimeSettings {
     pub cyber_session_block_enabled: bool,
     pub cyber_session_block_ttl_seconds: u32,
     pub openai_user_agent: Option<String>,
+    pub openai_request_body_override_enabled: bool,
+    pub openai_request_timezone: String,
+    pub openai_search_country: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -68,6 +71,9 @@ pub struct ReplaceRuntimeSettings {
     pub cyber_session_block_enabled: Option<bool>,
     pub cyber_session_block_ttl_seconds: Option<u32>,
     pub openai_user_agent: Option<String>,
+    pub openai_request_body_override_enabled: Option<bool>,
+    pub openai_request_timezone: Option<String>,
+    pub openai_search_country: Option<String>,
 }
 
 /// 明文管理员 API Key；按产品约束明文落库，但禁止 Debug 泄漏。

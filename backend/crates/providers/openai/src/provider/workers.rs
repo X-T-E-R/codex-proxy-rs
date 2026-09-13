@@ -2,6 +2,8 @@
 
 use gateway_core::provider_ports::{ProviderRuntimePolicyPort, ProviderWebSocketPoolPolicyPort};
 
+use crate::transport::request_override::CodexRequestBodyOverrideState;
+
 use super::*;
 
 pub(super) const WORKER_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
@@ -30,6 +32,7 @@ pub(crate) fn worker_contributions(
     ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
     runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
     profile: CodexWireProfileState,
+    request_body_override: CodexRequestBodyOverrideState,
 ) -> Result<Vec<WorkerContribution>, WorkerDefinitionError> {
     let refresh_id = WorkerId::try_new(WorkerKind::OAuthRefresh, PROVIDER_NAME)?;
     let quota_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, PROVIDER_NAME)?;
@@ -67,6 +70,7 @@ pub(crate) fn worker_contributions(
                     policy: ws_pool_policy,
                     runtime_policy,
                     profile,
+                    request_body_override,
                 }),
             },
         )?,
@@ -222,6 +226,7 @@ pub(super) struct OpenAiWebSocketPoolPolicyTask {
     policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
     runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
     profile: CodexWireProfileState,
+    request_body_override: CodexRequestBodyOverrideState,
 }
 
 impl ScheduledTask for OpenAiWebSocketPoolPolicyTask {
@@ -248,6 +253,17 @@ impl ScheduledTask for OpenAiWebSocketPoolPolicyTask {
                 Err(error) => tracing::warn!(
                     error = %error,
                     "OpenAI User-Agent synchronization failed"
+                ),
+            }
+            match self
+                .runtime_policy
+                .load_openai_request_body_override()
+                .await
+            {
+                Ok(policy) => self.request_body_override.update(policy),
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "OpenAI request body override synchronization failed"
                 ),
             }
             Ok(())

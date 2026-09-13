@@ -13,6 +13,7 @@ pub mod profile_avatar;
 pub mod profile_statistics;
 pub mod protocol;
 pub mod request;
+pub mod request_override;
 pub mod reset_credits;
 mod response_meta;
 pub(crate) mod session;

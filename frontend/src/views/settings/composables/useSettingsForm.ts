@@ -30,6 +30,9 @@ export function useSettingsForm() {
     wsPoolFastPathBudgetMs: null as number | null,
     overloadCooldownEnabled: false,
     openaiUserAgent: '',
+    openaiRequestBodyOverrideEnabled: true,
+    openaiRequestTimezone: 'America/Los_Angeles',
+    openaiSearchCountry: 'US',
     overloadCooldownThreshold: null as number | null,
     overloadCooldownSeconds: null as number | null,
     cyberSessionBlockEnabled: false,
@@ -80,6 +83,25 @@ export function useSettingsForm() {
       ? '请输入最多 512 个可打印 ASCII 字符，不含换行'
       : ''
   })
+  const requestLocaleErrors = computed(() => ({
+    timezone: loading.value ? '' : timezoneError(form.openaiRequestTimezone),
+    country: loading.value || /^[a-z]{2}$/i.test(form.openaiSearchCountry.trim())
+      ? ''
+      : '请输入两位字母国家代码，例如 US',
+  }))
+
+  function timezoneError(value: string): string {
+    const normalized = value.trim()
+    if (!normalized || normalized.length > 128)
+      return '请输入 IANA 时区，例如 America/Los_Angeles'
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: normalized }).format()
+      return ''
+    }
+    catch {
+      return '请输入有效的 IANA 时区，例如 America/Los_Angeles'
+    }
+  }
 
   function positiveIntegerError(value: number | null, max = Number.MAX_SAFE_INTEGER): string {
     if (loading.value)
@@ -116,6 +138,9 @@ export function useSettingsForm() {
     form.cyberSessionBlockEnabled = data.cyberSessionBlockEnabled
     form.cyberSessionBlockTtlSeconds = data.cyberSessionBlockTtlSeconds
     form.openaiUserAgent = data.openaiUserAgent ?? ''
+    form.openaiRequestBodyOverrideEnabled = data.openaiRequestBodyOverrideEnabled
+    form.openaiRequestTimezone = data.openaiRequestTimezone
+    form.openaiSearchCountry = data.openaiSearchCountry
     mappings.value = Object.entries(data.modelMappings || {}).map(([requestedModel, upstreamModel]) => ({
       requestedModel,
       upstreamModel: String(upstreamModel),
@@ -201,6 +226,10 @@ export function useSettingsForm() {
       toast.warning('请修正上游 User-Agent')
       return
     }
+    if (Object.values(requestLocaleErrors.value).some(Boolean)) {
+      toast.warning('请修正请求正文的时区与国家代码')
+      return
+    }
     try {
       saving.value = true
       const result = await updateSettings({
@@ -226,6 +255,9 @@ export function useSettingsForm() {
         cyberSessionBlockEnabled: form.cyberSessionBlockEnabled,
         cyberSessionBlockTtlSeconds,
         openaiUserAgent: form.openaiUserAgent.trim() || null,
+        openaiRequestBodyOverrideEnabled: form.openaiRequestBodyOverrideEnabled,
+        openaiRequestTimezone: form.openaiRequestTimezone.trim(),
+        openaiSearchCountry: form.openaiSearchCountry.trim().toUpperCase(),
       })
       applySettings(result)
       toast.success('设置已保存')
@@ -264,6 +296,7 @@ export function useSettingsForm() {
     cyberSessionBlockTtlSecondsValue,
     cyberSessionBlockTtlError,
     openaiUserAgentError,
+    requestLocaleErrors,
     minCodexDesktopVersionError,
     minCodexCliVersionError,
     saveSettings,

@@ -154,6 +154,11 @@ sequenceDiagram
 候选顺序和调度策略。
 运行中的请求不再拼接新旧配置，也不在热路径查询分组关系。
 
+OpenAI 请求正文地域覆盖由 OpenAI Provider 持有的 `RuntimeSettings` 运行策略负责，不改变 Core 的
+请求历史或路由事实。每个上游 attempt 在账号选择和发送前一次性冻结正文覆盖策略与该次 UTC 时间；
+该 attempt 的 HTTP、WebSocket 及 Provider 内部重试复用同一份已编码正文。Core 新建下一次 attempt
+时可以读取已经发布的新策略。
+
 Client Key 鉴权完成后，API adapter 从有界请求头识别 Codex Desktop/CLI，Core 使用同一请求冻结的
 `RuntimeSnapshot` 比较对应最低版本。Desktop 优先于其 User-Agent 内嵌的 CLI/Core 标记；未知客户端不
 应用门禁。低版本或已识别但版本不可用时，在进入 Provider 前返回稳定的 `426` 合同。
@@ -170,18 +175,30 @@ Client Key 鉴权完成后，API adapter 从有界请求头识别 Codex Desktop/
 Responses 按模型目录编译候选；全局模型映射是精确映射，未命中时模型名原样交给候选 Provider。
 Images 与 standalone Search 是 OpenAI Provider 自有端点：两者都不参与文本模型映射，只在 Client Key
 的账号范围确实包含 OpenAI 账号时生成单一 OpenAI 候选。Images 不要求模型字段；Search body 中的模型
-及其他字段保持原始 bytes 并由上游解释。
+及其他未涉及字段和顺序保持不变并由上游解释；启用正文地域覆盖时，只有下述位置字段例外更新。
 
 ## 5. Provider 与协议边界
 
 Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 canonical event，不读取 Provider SDK
 类型。Provider 独占 credential schema、OAuth、账号选择、模型目录、额度投影和上游 transport。
 
-- OpenAI 是透明边界。Responses 请求保留未知字段和字段顺序；SSE、WebSocket、Images 与 standalone
-  Search 的业务正文按原始字节转发。canonical facts 从同一数据旁路提取，只用于路由、观测和计费。
+- OpenAI 在正文地域覆盖关闭时保持透明边界。Responses 在解析后的请求结构中保留未知字段、字段值和顺序，
+  但不承诺输入 JSON 的空白与转义字节；standalone Search 请求按原始字节转发。Images 始终按原始字节转发。
+  HTTP SSE 与 WebSocket 的上游业务事件也按原始字节转发。canonical facts 仍从同一数据旁路提取，只用于
+  路由、观测和计费。
 - Responses 的业务扩展头保留原始多值字节；传输与反代请求头分类由 `gateway-protocol` 统一定义，
   API 入站与 OpenAI Provider 编码共同使用。下游链路元数据和压缩协商不跨越该边界，
   上游认证、请求画像与传输字段仍由 Provider 生成；响应方向的诊断头不受请求过滤规则影响。
+- 正文地域覆盖启用后，Responses HTTP 与 WebSocket 只更新最新的专用 Codex `input_text` 环境块（整个
+  XML 根为 `environment_context`，且直接存在时区和日期字段）。日期使用该上游 attempt 单次捕获的 UTC
+  时间，按配置的 IANA 时区（含夏令时）换算；引用文本、工具输出、其他历史消息及其他环境块不改写；没有
+  符合条件的环境块时不注入，也不通过 `previous_response_id` 补写历史。standalone Search 的
+  `settings.user_location` 与 Responses 中已声明且受支持的 `web_search` location 对象使用
+  `type: "approximate"`、配置的国家和时区，删除冲突的 `city` / `region` 并保留其他字段；不会添加
+  搜索工具。standalone Search 缺失或为 `null` 的 `settings`、`user_location` 会创建所需对象，已有
+  字段不是对象时保持不变。正文覆盖只改变请求 body，不伪造国家请求头、数据驻留、出口 IP 或操作系统
+  设置。覆盖关闭或目标字段没有变化时，standalone Search 整份正文保持原始 bytes；Responses 保留解析后的
+  请求结构，但不承诺输入 JSON 的空白与转义字节。覆盖生效并产生变化时，其他字段及顺序保持不变。
 - xAI 是翻译边界。Provider 把 Grok wire 转换为 Responses wire；上游结构化错误的 message/code/type
   可以透出，但账号指纹会先脱敏。
 - response ID 是不透明 UTF-8 bytes，不假设 UUID、固定长度或跨 Provider 可复用。
@@ -339,6 +356,10 @@ HTTP validation
 会改变路由快照或安全配置的 mutation 在同一 PostgreSQL 事务中提交业务事实、推进内部
 `config_revision` 并写入脱敏审计。Admin mutation 不要求客户端提交 revision；少数账号/分组响应
 返回已提交的 `configRevision`，不将它当作乐观并发前置条件。
+
+OpenAI 正文地域覆盖字段属于 `RuntimeSettings`。三个字段的更新与其余运行设置原子提交；省略或传
+`null` 时保留当前值。Provider 运行时加载已提交策略，后续上游 attempt 使用新值，已经开始的 attempt
+继续使用其已冻结的策略。
 
 额度、cooldown、目录 generation、请求统计和自动 credential refresh 属于运行时观测，不推进全局
 revision；credential 轮换只推进账号自己的 `credential_revision`。Redis 通知用于缩短收敛延迟，

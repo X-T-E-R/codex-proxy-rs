@@ -11,8 +11,9 @@ use sqlx::{PgPool, Postgres, Transaction};
 use gateway_core::account::RotationStrategy;
 use gateway_core::policy::CodexClientVersion;
 use gateway_core::provider_ports::{
-    ProviderRefreshPolicy, ProviderRuntimePolicyPort, ProviderStoreError, ProviderStoreErrorKind,
-    ProviderWebSocketPoolPolicy, ProviderWebSocketPoolPolicyPort,
+    OpenAiRequestBodyOverride, ProviderRefreshPolicy, ProviderRuntimePolicyPort,
+    ProviderStoreError, ProviderStoreErrorKind, ProviderWebSocketPoolPolicy,
+    ProviderWebSocketPoolPolicyPort,
 };
 
 use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
@@ -43,6 +44,9 @@ pub struct RuntimeSettings {
     pub cyber_session_block_enabled: bool,
     pub cyber_session_block_ttl_seconds: u32,
     pub openai_user_agent: Option<String>,
+    pub openai_request_body_override_enabled: bool,
+    pub openai_request_timezone: String,
+    pub openai_search_country: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -96,6 +100,12 @@ impl fmt::Debug for RuntimeSettings {
                 &self.cyber_session_block_ttl_seconds,
             )
             .field("openai_user_agent", &self.openai_user_agent)
+            .field(
+                "openai_request_body_override_enabled",
+                &self.openai_request_body_override_enabled,
+            )
+            .field("openai_request_timezone", &self.openai_request_timezone)
+            .field("openai_search_country", &self.openai_search_country)
             .finish()
     }
 }
@@ -125,6 +135,9 @@ pub struct RuntimeSettingsUpdate {
     pub cyber_session_block_enabled: Option<bool>,
     pub cyber_session_block_ttl_seconds: Option<u32>,
     pub openai_user_agent: Option<String>,
+    pub openai_request_body_override_enabled: Option<bool>,
+    pub openai_request_timezone: Option<String>,
+    pub openai_search_country: Option<String>,
 }
 
 impl fmt::Debug for RuntimeSettingsUpdate {
@@ -161,6 +174,15 @@ impl RuntimeSettingsUpdate {
             || !gateway_core::provider_ports::valid_user_agent_override(
                 self.openai_user_agent.as_deref(),
             )
+            || self
+                .openai_request_timezone
+                .as_deref()
+                .is_some_and(|value| {
+                    gateway_core::provider_ports::canonical_openai_request_timezone(value).is_none()
+                })
+            || self.openai_search_country.as_deref().is_some_and(|value| {
+                gateway_core::provider_ports::canonical_openai_search_country(value).is_none()
+            })
             || !valid_model_mappings(&self.model_mappings)
             || !valid_client_version(self.min_codex_desktop_version.as_deref())
             || !valid_client_version(self.min_codex_cli_version.as_deref())
@@ -230,7 +252,8 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     ws_pool_fast_path_budget_ms, overload_cooldown_enabled,
                     overload_cooldown_threshold, overload_cooldown_seconds,
                     cyber_session_block_enabled, cyber_session_block_ttl_seconds,
-                    openai_user_agent, updated_at
+                    openai_user_agent, openai_request_body_override_enabled,
+                    openai_request_timezone, openai_search_country, updated_at
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -275,6 +298,21 @@ impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
             )
         })
     }
+
+    fn load_openai_request_body_override(
+        &self,
+    ) -> futures::future::BoxFuture<'_, Result<OpenAiRequestBodyOverride, ProviderStoreError>> {
+        Box::pin(async move {
+            let settings = RuntimeSettingsRepository::load_runtime_settings(self)
+                .await
+                .map_err(|_| provider_unavailable("load OpenAI request body override"))?;
+            OpenAiRequestBodyOverride::try_new(
+                settings.openai_request_body_override_enabled,
+                settings.openai_request_timezone,
+                settings.openai_search_country,
+            )
+        })
+    }
 }
 
 impl ProviderWebSocketPoolPolicyPort for PgRuntimeSettingsRepository {
@@ -312,7 +350,8 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 ws_pool_fast_path_budget_ms, overload_cooldown_enabled,
                 overload_cooldown_threshold, overload_cooldown_seconds,
                 cyber_session_block_enabled, cyber_session_block_ttl_seconds,
-                openai_user_agent, updated_at
+                openai_user_agent, openai_request_body_override_enabled,
+                openai_request_timezone, openai_search_country, updated_at
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -332,6 +371,20 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     update.validate()?;
     let refresh_margin_seconds =
         i64::try_from(update.refresh_margin_seconds).map_err(|_| invalid_numeric())?;
+    let openai_request_timezone = update
+        .openai_request_timezone
+        .as_deref()
+        .map(|value| {
+            gateway_core::provider_ports::canonical_openai_request_timezone(value).ok_or(())
+        })
+        .transpose()
+        .map_err(|()| invalid_openai_request_locale())?;
+    let openai_search_country = update
+        .openai_search_country
+        .as_deref()
+        .map(|value| gateway_core::provider_ports::canonical_openai_search_country(value).ok_or(()))
+        .transpose()
+        .map_err(|()| invalid_openai_request_locale())?;
     let next = sqlx::query_scalar::<_, i64>(
         "update runtime_settings
              set config_revision = config_revision + 1,
@@ -358,6 +411,9 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 cyber_session_block_enabled = coalesce($21, cyber_session_block_enabled),
 	                 cyber_session_block_ttl_seconds = coalesce($22, cyber_session_block_ttl_seconds),
 	                 openai_user_agent = $23,
+	                 openai_request_body_override_enabled = coalesce($24, openai_request_body_override_enabled),
+	                 openai_request_timezone = coalesce($25, openai_request_timezone),
+	                 openai_search_country = coalesce($26, openai_search_country),
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -385,6 +441,9 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(update.cyber_session_block_enabled)
     .bind(update.cyber_session_block_ttl_seconds.map(i64::from))
     .bind(update.openai_user_agent.as_deref())
+    .bind(update.openai_request_body_override_enabled)
+    .bind(openai_request_timezone.as_deref())
+    .bind(openai_search_country.as_deref())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -459,6 +518,9 @@ struct RuntimeSettingsRow {
     cyber_session_block_enabled: bool,
     cyber_session_block_ttl_seconds: i64,
     openai_user_agent: Option<String>,
+    openai_request_body_override_enabled: bool,
+    openai_request_timezone: String,
+    openai_search_country: String,
     updated_at: DateTime<Utc>,
 }
 
@@ -488,6 +550,9 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
         cyber_session_block_enabled: row.cyber_session_block_enabled,
         cyber_session_block_ttl_seconds: to_u32(row.cyber_session_block_ttl_seconds)?,
         openai_user_agent: row.openai_user_agent,
+        openai_request_body_override_enabled: row.openai_request_body_override_enabled,
+        openai_request_timezone: row.openai_request_timezone,
+        openai_search_country: row.openai_search_country,
         updated_at: row.updated_at,
     })
 }
@@ -504,6 +569,13 @@ fn invalid_numeric() -> StoreError {
     StoreError::InvalidData {
         entity: "runtime settings",
         message: "numeric field is outside its supported range".to_owned(),
+    }
+}
+
+fn invalid_openai_request_locale() -> StoreError {
+    StoreError::InvalidData {
+        entity: "runtime settings",
+        message: "OpenAI request locale is invalid".to_owned(),
     }
 }
 

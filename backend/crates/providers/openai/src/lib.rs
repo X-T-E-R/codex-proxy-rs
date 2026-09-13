@@ -25,6 +25,7 @@ use crate::credential::{
 use crate::transport::profile::{
     CodexArtifactProfileCache, CodexDesktopReleaseService, OfficialCodexDesktopReleaseTransport,
 };
+use crate::transport::request_override::CodexRequestBodyOverrideState;
 use crate::transport::{CodexWebSocketPool, build_reqwest_client};
 
 pub use config::{CodexWireProfileConfig, OpenAiConfig, OpenAiConfigError};
@@ -68,6 +69,12 @@ pub async fn initialize(
     profile.update_user_agent_override(
         runtime_policy
             .load_user_agent_override()
+            .await
+            .map_err(|_| OpenAiInitializeError::RuntimePolicy)?,
+    );
+    let request_body_override = CodexRequestBodyOverrideState::new(
+        runtime_policy
+            .load_openai_request_body_override()
             .await
             .map_err(|_| OpenAiInitializeError::RuntimePolicy)?,
     );
@@ -156,7 +163,8 @@ pub async fn initialize(
             config.stream_max_retries(),
         )
         .map_err(OpenAiInitializeError::Provider)?
-        .with_session_identity(session_identity),
+        .with_session_identity(session_identity)
+        .with_request_body_override(request_body_override.clone()),
     );
     let token_client = Arc::new(
         credential::token_client::openai_token_client(
@@ -221,6 +229,7 @@ pub async fn initialize(
         ws_pool_policy,
         runtime_policy,
         profile,
+        request_body_override,
     )
     .map_err(|_| OpenAiInitializeError::Worker)?;
 

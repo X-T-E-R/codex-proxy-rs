@@ -25,6 +25,9 @@ export interface RuntimeSettings {
   cyberSessionBlockEnabled: boolean
   cyberSessionBlockTtlSeconds: number
   openaiUserAgent: string | null
+  openaiRequestBodyOverrideEnabled: boolean
+  openaiRequestTimezone: string
+  openaiSearchCountry: string
   updatedAt: string
 }
 

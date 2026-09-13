@@ -6,8 +6,10 @@ use gateway_core::account::{
     AccountRuntimeSignals, CredentialRevision, OpaqueProviderData, ProviderAccountId,
 };
 use gateway_core::provider_ports::{
-    NewOAuthPendingFlow, OAuthPendingBinding, ProviderRefreshPolicy, ProviderSchedulingState,
-    ProviderSessionAffinityKey, ProviderStoreErrorKind, ProviderWebSocketPoolPolicy,
+    NewOAuthPendingFlow, OAuthPendingBinding, OpenAiRequestBodyOverride, ProviderRefreshPolicy,
+    ProviderSchedulingState, ProviderSessionAffinityKey, ProviderStoreErrorKind,
+    ProviderWebSocketPoolPolicy, canonical_openai_request_timezone,
+    canonical_openai_search_country,
 };
 use gateway_core::routing::ProviderKind;
 
@@ -126,6 +128,34 @@ fn websocket_pool_policy_round_trips_stable_values() {
     assert_eq!(policy.max_connecting().get(), 4);
     assert_eq!(policy.stream_idle_timeout(), Duration::from_millis(120_000));
     assert_eq!(policy.fast_path_budget(), Duration::from_millis(3_000));
+}
+
+#[test]
+fn openai_request_body_override_canonicalizes_timezone_and_country() {
+    let policy = OpenAiRequestBodyOverride::try_new(true, " US/Pacific ", " us ")
+        .expect("valid request body override");
+
+    assert!(policy.enabled());
+    assert_eq!(policy.timezone(), "US/Pacific");
+    assert_eq!(policy.search_country(), "US");
+    assert_eq!(
+        canonical_openai_request_timezone("America/Los_Angeles").as_deref(),
+        Some("America/Los_Angeles")
+    );
+    assert_eq!(canonical_openai_search_country("cN").as_deref(), Some("CN"));
+}
+
+#[test]
+fn openai_request_body_override_rejects_non_iana_timezone_and_country() {
+    for (timezone, country) in [
+        ("Pacific", "US"),
+        ("America/Los_Angeles", "USA"),
+        ("America/Los_Angeles", "中"),
+    ] {
+        let error = OpenAiRequestBodyOverride::try_new(true, timezone, country)
+            .expect_err("invalid request body override must fail");
+        assert_eq!(error.kind(), ProviderStoreErrorKind::InvalidData);
+    }
 }
 
 #[test]

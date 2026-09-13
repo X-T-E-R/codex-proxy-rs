@@ -37,6 +37,9 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
         cyber_session_block_enabled: Some(false),
         cyber_session_block_ttl_seconds: Some(3600),
         openai_user_agent: None,
+        openai_request_body_override_enabled: Some(true),
+        openai_request_timezone: Some("America/Los_Angeles".to_owned()),
+        openai_search_country: Some("US".to_owned()),
     }
 }
 
@@ -55,6 +58,9 @@ async fn runtime_policy_settings_round_trip_with_snapshot() {
     assert!(!defaults.cyber_session_block_enabled);
     assert_eq!(defaults.cyber_session_block_ttl_seconds, 3600);
     assert_eq!(defaults.openai_user_agent, None);
+    assert!(defaults.openai_request_body_override_enabled);
+    assert_eq!(defaults.openai_request_timezone, "America/Los_Angeles");
+    assert_eq!(defaults.openai_search_country, "US");
     let user_agent = "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)";
     repository
         .update_runtime_settings(RuntimeSettingsUpdate {
@@ -64,6 +70,9 @@ async fn runtime_policy_settings_round_trip_with_snapshot() {
             cyber_session_block_enabled: Some(true),
             cyber_session_block_ttl_seconds: Some(u32::MAX),
             openai_user_agent: Some(user_agent.to_owned()),
+            openai_request_body_override_enabled: Some(false),
+            openai_request_timezone: Some(" Europe/Berlin ".to_owned()),
+            openai_search_country: Some(" de ".to_owned()),
             ..settings_with_margin(3_600)
         })
         .await
@@ -74,10 +83,20 @@ async fn runtime_policy_settings_round_trip_with_snapshot() {
     assert_eq!(settings.overload_cooldown_seconds, 180);
     assert!(settings.cyber_session_block_enabled);
     assert_eq!(settings.cyber_session_block_ttl_seconds, u32::MAX);
+    assert!(!settings.openai_request_body_override_enabled);
+    assert_eq!(settings.openai_request_timezone, "Europe/Berlin");
+    assert_eq!(settings.openai_search_country, "DE");
     assert_eq!(
         repository.load_user_agent_override().await.expect("UA"),
         Some(user_agent.to_owned())
     );
+    let request_body_override = repository
+        .load_openai_request_body_override()
+        .await
+        .expect("request body override");
+    assert!(!request_body_override.enabled());
+    assert_eq!(request_body_override.timezone(), "Europe/Berlin");
+    assert_eq!(request_body_override.search_country(), "DE");
     let snapshot = PgRuntimeSnapshotRepository::new(database.pool.clone())
         .load_runtime_snapshot()
         .await
@@ -123,6 +142,45 @@ async fn omitted_cyber_fields_merge_with_the_transaction_current_row() {
     assert!(settings.cyber_session_block_enabled);
     assert_eq!(settings.cyber_session_block_ttl_seconds, 900);
     assert_eq!(settings.refresh_margin_seconds, 4_200);
+}
+
+#[tokio::test]
+async fn omitted_openai_request_locale_merges_with_the_transaction_current_row() {
+    let Some(database) = TestDatabase::create("openai_locale_atomic_merge").await else {
+        return;
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let stale_old_client_update = RuntimeSettingsUpdate {
+        refresh_margin_seconds: 4_200,
+        openai_request_body_override_enabled: None,
+        openai_request_timezone: None,
+        openai_search_country: None,
+        ..settings_with_margin(3_600)
+    };
+    sqlx::query(
+        "update runtime_settings
+         set openai_request_body_override_enabled = false,
+             openai_request_timezone = 'Europe/Berlin',
+             openai_search_country = 'DE'
+         where id = 1",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("concurrent request locale update");
+
+    repository
+        .update_runtime_settings(stale_old_client_update)
+        .await
+        .expect("old client update");
+    let settings = repository
+        .load_runtime_settings()
+        .await
+        .expect("merged settings");
+    assert!(!settings.openai_request_body_override_enabled);
+    assert_eq!(settings.openai_request_timezone, "Europe/Berlin");
+    assert_eq!(settings.openai_search_country, "DE");
+    assert_eq!(settings.refresh_margin_seconds, 4_200);
+    database.close().await;
 }
 
 #[test]
@@ -179,6 +237,22 @@ fn runtime_settings_reject_zero_cyber_session_ttl_even_when_disabled() {
         ..settings_with_margin(3_600)
     };
     assert!(settings.validate().is_err());
+}
+
+#[test]
+fn runtime_settings_reject_invalid_openai_request_locale() {
+    for update in [
+        RuntimeSettingsUpdate {
+            openai_request_timezone: Some("Pacific".to_owned()),
+            ..settings_with_margin(3_600)
+        },
+        RuntimeSettingsUpdate {
+            openai_search_country: Some("USA".to_owned()),
+            ..settings_with_margin(3_600)
+        },
+    ] {
+        assert!(update.validate().is_err());
+    }
 }
 
 #[tokio::test]

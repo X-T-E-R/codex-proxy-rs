@@ -61,6 +61,9 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                 cyber_session_block_enabled: command.cyber_session_block_enabled,
                 cyber_session_block_ttl_seconds: command.cyber_session_block_ttl_seconds,
                 openai_user_agent: command.openai_user_agent,
+                openai_request_body_override_enabled: command.openai_request_body_override_enabled,
+                openai_request_timezone: command.openai_request_timezone,
+                openai_search_country: command.openai_search_country,
             },
             audit: mutation_audit(
                 context,
@@ -81,6 +84,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                     "overload_cooldown".to_owned(),
                     "cyber_session_block".to_owned(),
                     "openai_user_agent".to_owned(),
+                    "openai_request_body_override".to_owned(),
                 ],
             ),
         };
@@ -197,6 +201,9 @@ pub(crate) fn admin_runtime_settings(
         cyber_session_block_enabled: settings.cyber_session_block_enabled,
         cyber_session_block_ttl_seconds: settings.cyber_session_block_ttl_seconds,
         openai_user_agent: settings.openai_user_agent,
+        openai_request_body_override_enabled: settings.openai_request_body_override_enabled,
+        openai_request_timezone: settings.openai_request_timezone,
+        openai_search_country: settings.openai_search_country,
         updated_at: settings.updated_at,
     })
 }

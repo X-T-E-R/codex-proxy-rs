@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 use futures::{StreamExt, future::BoxFuture};
 use gateway_core::account::{AccountFeedbackStats, ProviderAccount};
 use gateway_core::engine::continuation::{ContinuationBinding, NativeContinuationScope};
@@ -82,6 +83,10 @@ use crate::transport::protocol::websocket::WEBSOCKET_CONNECTION_LIMIT_REACHED_CO
 use crate::transport::request::{
     CodexRequestEncodeError, RequestAccountScope, encode_generate_request, scope_request_to_account,
 };
+use crate::transport::request_override::{
+    CodexRequestBodyOverrideState, apply_responses_request_override,
+    apply_standalone_search_override,
+};
 use crate::transport::session::CodexSessionIdentity;
 use crate::transport::usage::normalize_service_tier;
 use crate::transport::websocket::{CodexWebSocketExchangeError, PreviousResponseUnavailableReason};
@@ -147,6 +152,7 @@ pub struct CodexProvider {
     search_url: Url,
     session_identity: Option<CodexSessionIdentity>,
     session_transport_recovery: CodexSessionTransportRecovery,
+    request_body_override: CodexRequestBodyOverrideState,
     stream_max_retries: u32,
 }
 
@@ -187,12 +193,23 @@ impl CodexProvider {
             search_url,
             session_identity: None,
             session_transport_recovery: CodexSessionTransportRecovery::default(),
+            request_body_override: CodexRequestBodyOverrideState::new(
+                gateway_core::provider_ports::OpenAiRequestBodyOverride::disabled(),
+            ),
             stream_max_retries,
         })
     }
 
     pub(crate) fn with_session_identity(mut self, identity: CodexSessionIdentity) -> Self {
         self.session_identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn with_request_body_override(
+        mut self,
+        request_body_override: CodexRequestBodyOverrideState,
+    ) -> Self {
+        self.request_body_override = request_body_override;
         self
     }
 }
@@ -337,6 +354,8 @@ impl Provider for CodexProvider {
         let continuation_requested = generate.native_continuation_requested();
         let mut upstream_request = encode_generate_request(generate, upstream_model.as_str())
             .map_err(map_request_error)?;
+        let request_body_override = self.request_body_override.snapshot();
+        apply_responses_request_override(&mut upstream_request, &request_body_override, Utc::now());
         if let Some(conversation_id) = previous_session
             .as_ref()
             .and_then(|state| state.conversation_id.as_ref())

@@ -868,6 +868,9 @@ impl SettingsStore for StaticSettingsStore {
             cyber_session_block_enabled: false,
             cyber_session_block_ttl_seconds: 3600,
             openai_user_agent: None,
+            openai_request_body_override_enabled: true,
+            openai_request_timezone: "America/Los_Angeles".to_owned(),
+            openai_search_country: "US".to_owned(),
             updated_at: Utc::now(),
         })
     }

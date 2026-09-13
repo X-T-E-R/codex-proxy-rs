@@ -875,6 +875,81 @@ pub trait ProviderRuntimePolicyPort: Send + Sync {
     ) -> BoxFuture<'_, Result<Option<String>, ProviderStoreError>> {
         Box::pin(async { Ok(None) })
     }
+
+    /// OpenAI 请求正文的地理画像；未实现该扩展的 Store 保持正文不变。
+    fn load_openai_request_body_override(
+        &self,
+    ) -> BoxFuture<'_, Result<OpenAiRequestBodyOverride, ProviderStoreError>> {
+        Box::pin(async { Ok(OpenAiRequestBodyOverride::disabled()) })
+    }
+}
+
+/// 一次 OpenAI 请求使用的正文地理画像。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiRequestBodyOverride {
+    enabled: bool,
+    timezone: String,
+    search_country: String,
+}
+
+impl OpenAiRequestBodyOverride {
+    pub fn try_new(
+        enabled: bool,
+        timezone: impl Into<String>,
+        search_country: impl Into<String>,
+    ) -> Result<Self, ProviderStoreError> {
+        let timezone = canonical_openai_request_timezone(&timezone.into())
+            .ok_or_else(|| invalid_refresh_policy("decode OpenAI request timezone"))?;
+        let search_country = canonical_openai_search_country(&search_country.into())
+            .ok_or_else(|| invalid_refresh_policy("decode OpenAI search country"))?;
+        Ok(Self {
+            enabled,
+            timezone,
+            search_country,
+        })
+    }
+
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            timezone: "America/Los_Angeles".to_owned(),
+            search_country: "US".to_owned(),
+        }
+    }
+
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    #[must_use]
+    pub fn timezone(&self) -> &str {
+        &self.timezone
+    }
+
+    #[must_use]
+    pub fn search_country(&self) -> &str {
+        &self.search_country
+    }
+}
+
+/// 返回 chrono-tz 接受的规范 IANA 时区名。
+#[must_use]
+pub fn canonical_openai_request_timezone(value: &str) -> Option<String> {
+    value
+        .trim()
+        .parse::<chrono_tz::Tz>()
+        .ok()
+        .map(|timezone| timezone.name().to_owned())
+}
+
+/// 管理 API 接受大小写输入，持久化与上游 wire 统一使用两位大写 ASCII 国家码。
+#[must_use]
+pub fn canonical_openai_search_country(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 2 && value.bytes().all(|byte| byte.is_ascii_alphabetic()))
+        .then(|| value.to_ascii_uppercase())
 }
 
 /// 单行可打印 ASCII 请求头；拒绝空值、控制符与过长内容。

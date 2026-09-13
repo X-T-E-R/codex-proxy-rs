@@ -14,6 +14,7 @@ import ClientVersionSettings from './components/client-version/index.vue'
 import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import OverloadCooldownCard from './components/OverloadCooldownCard.vue'
+import RequestLocaleCard from './components/RequestLocaleCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
 import UserAgentCard from './components/UserAgentCard.vue'
@@ -64,6 +65,7 @@ const {
   cyberSessionBlockTtlSecondsValue,
   cyberSessionBlockTtlError,
   openaiUserAgentError,
+  requestLocaleErrors,
   minCodexDesktopVersionError,
   minCodexCliVersionError,
   saveSettings,
@@ -173,6 +175,14 @@ watch(
         v-model:seconds="cyberSessionBlockTtlSecondsValue"
         :disabled="loading || saving"
         :error="cyberSessionBlockTtlError"
+      />
+
+      <RequestLocaleCard
+        v-model:enabled="form.openaiRequestBodyOverrideEnabled"
+        v-model:timezone="form.openaiRequestTimezone"
+        v-model:country="form.openaiSearchCountry"
+        :disabled="loading || saving"
+        :errors="requestLocaleErrors"
       />
 
       <ClientVersionSettings

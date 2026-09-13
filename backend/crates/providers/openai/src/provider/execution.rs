@@ -72,12 +72,16 @@ impl CodexProvider {
             context.client_api_key_ref(),
             "id",
         );
+        let body = apply_standalone_search_override(
+            search.payload().body(),
+            &self.request_body_override.snapshot(),
+        );
         self.execute_raw_json_endpoint(
             context,
             RawJsonEndpointRequest {
                 response_origin: self.search_url.clone(),
                 endpoint_path: CODEX_ALPHA_SEARCH_PATH,
-                body: search.payload().body().clone(),
+                body,
                 image_turn_id: None,
                 turn_metadata,
                 session_affinity,

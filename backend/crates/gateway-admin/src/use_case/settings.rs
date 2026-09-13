@@ -132,6 +132,18 @@ fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError>
         && gateway_core::provider_ports::valid_user_agent_override(
             command.openai_user_agent.as_deref(),
         )
+        && command
+            .openai_request_timezone
+            .as_deref()
+            .is_none_or(|value| {
+                gateway_core::provider_ports::canonical_openai_request_timezone(value).is_some()
+            })
+        && command
+            .openai_search_country
+            .as_deref()
+            .is_none_or(|value| {
+                gateway_core::provider_ports::canonical_openai_search_country(value).is_some()
+            })
         && valid_client_version(command.min_codex_desktop_version.as_deref())
         && valid_client_version(command.min_codex_cli_version.as_deref())
         && i64::try_from(command.request_interval_ms).is_ok()

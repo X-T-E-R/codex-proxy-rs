@@ -129,13 +129,15 @@ Codex PAT 验证服务不可用和身份响应无效分别通过 `50301`、`5020
 ## 3. OpenAI 数据面与模型目录
 
 除下述 Responses 入站解压保护外，Responses、Images 和 standalone Search HTTP body、
-WebSocket message 和 frame 不设置网关私有长度上限；协议可接受性由上游决定。
+WebSocket message 和 frame 不设置网关私有长度上限；协议可接受性由上游决定。OpenAI Responses
+和 standalone Search 的请求正文在启用正文地域覆盖时，按下文只修改指定的环境与位置字段；其他字段
+仍按原协议处理。
 
 | 方法 | 路由 | 说明 |
 | --- | --- | --- |
 | `POST` | `/v1/responses` | OpenAI Responses JSON；`stream=true` 返回 SSE，否则返回完整 JSON |
 | `GET` | `/v1/responses` | 通过 HTTP Upgrade 建立 Responses WebSocket |
-| `POST` | `/v1/alpha/search` | Codex standalone web search；JSON 请求与响应正文原样转发 |
+| `POST` | `/v1/alpha/search` | Codex standalone web search；正文覆盖关闭或无目标变化时原样转发，启用时只修改指定位置字段 |
 | `POST` | `/v1/images/generations` | 通过 OpenAI Provider 发起图像生成；JSON 请求与响应正文原样转发 |
 | `POST` | `/v1/images/edits` | 通过 OpenAI Provider 发起图像编辑；JSON 请求与响应正文原样转发 |
 | `GET` | `/v1/models` | 返回当前 Client Key 账号范围内各 Provider 的可用公开模型并集；有两种响应形态，见下 |
@@ -188,15 +190,22 @@ Codex 专用目录中的 `context_window` 与 `max_context_window` 分别表示�
 覆盖这些值。Codex 客户端配置 `model_context_window` 后，按该值与非空 `max_context_window` 的较小值
 使用窗口；上限为空时保留客户端本地值。xAI 目录只声明一个窗口，其 Provider 继续以该值作为客户端覆盖上限。
 
-OpenAI 路径保留客户端 Responses wire 语义：请求 body 的未知字段和字段顺序保持不变（受控模型
+正文地域覆盖关闭时，OpenAI 路径保留客户端 Responses wire 语义：解析后的请求结构中未知字段、字段值和顺序保持不变（受控模型
 映射除外），HTTP SSE 与 WebSocket 的上游业务事件字节原样转发，response ID 按 opaque 值处理而不
 假设 UUID 或固定长度；OpenAI 上游错误 envelope 和允许下发的 opaque header 值也不由 canonical
-观测结果重写。Images 请求不读取或重建 JSON，也不要求或映射模型字段；它固定使用 OpenAI Provider，
+观测结果重写。
+
+启用正文地域覆盖时，正文只在下文列出的目标字段上例外更新；覆盖关闭或目标字段没有变化时，
+Responses 保留解析后的请求结构，但不保证输入 JSON 的空白与转义字节；standalone Search 保留原始正文 bytes。
+
+Images 请求不读取或重建 JSON，也不要求或映射模型字段；它固定使用 OpenAI Provider，
 只在原始字节之外完成账号选择、鉴权头替换和端点路由，成功与失败响应正文同样保持原始字节。
-`/v1/alpha/search` 使用相同的 OpenAI Provider 原生端点边界：body（包括 `model`）不解析、不映射，
-`x-codex-turn-metadata` 在移除客户端账号身份并按当前 lease 重写 installation ID 后转发；上游账号
-Authorization、Cookie、account ID、originator 和 User-Agent 均由代理安全重建。xAI 是 Grok wire 与
-Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
+`/v1/alpha/search` 使用相同的 OpenAI Provider 原生端点边界：body 中的 `model` 不映射；正文覆盖
+关闭时不解析。启用时，standalone Search 只处理 `settings.user_location`；Responses 只处理已声明且受支持的
+`web_search` location 对象，字段规则见 [运行设置](#8-运行设置)。`x-codex-turn-metadata` 在移除客户端账号身份并按
+当前 lease 重写 installation ID 后转发；上游账号 Authorization、Cookie、account ID、originator 和
+User-Agent 均由代理安全重建。
+xAI 是 Grok wire 与 Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 上游结构化错误的 message/code/type 会透传给客户端，其中内嵌的账号指纹 UUID 已脱敏。模型映射是
 全局精确映射，未命中时模型名原样交给候选 Provider；分组只限定账号集合，不参与模型改名。
 
@@ -627,6 +636,9 @@ overloadCooldownSeconds
 cyberSessionBlockEnabled
 cyberSessionBlockTtlSeconds
 openaiUserAgent
+openaiRequestBodyOverrideEnabled
+openaiRequestTimezone
+openaiSearchCountry
 ```
 
 `rotationStrategy` 可取 `smart`、`quota_reset_priority`、`round_robin`、`sticky`。
@@ -693,6 +705,28 @@ Core/Desktop 版本，无需每次发版修改模板。例如保持 Windows 平�
 模板最多 512 个可打印 ASCII 字符，不接受空白字符串或控制符；填写固定版本号则保持原文。
 设置持久化后约 5 秒内用于新 HTTP 请求和 WebSocket 握手，重启后也会在对外服务前恢复。
 已开始的请求继续完成；依赖旧 WebSocket 连接的续接可能因画像变化而失效。
+
+OpenAI 请求正文地域覆盖由以下字段控制，管理端运行设置页提供相同的编辑项：
+
+| 字段 | 类型 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| `openaiRequestBodyOverrideEnabled` | `boolean` | `true` | 是否按配置更新 OpenAI Responses 与 standalone Search 正文中的地域字段 |
+| `openaiRequestTimezone` | `string` | `America/Los_Angeles` | 有效的 IANA 时区；用于环境日期和搜索位置时区，支持夏令时 |
+| `openaiSearchCountry` | `string` | `US` | 两位 ASCII 字母国家代码；保存和发送时统一为大写 |
+
+`POST /api/admin/settings/update` 中这三个字段可分别省略或传 `null`，表示保留当前已保存值；提供值时
+按上述类型和格式校验，并与其余运行设置原子保存。启用后，OpenAI Responses 的 HTTP 与 WebSocket
+请求只更新最新的专用 Codex `input_text` 环境块（整个 XML 根为 `environment_context`，且直接存在
+时区和日期字段）；日期由该次上游 attempt 单次捕获的 UTC 时间按配置时区（含夏令时）换算。引用文本、
+工具输出、其他历史消息和其他环境块不改写；没有符合条件的环境块时不注入，也不通过
+`previous_response_id` 补写历史。不添加搜索工具。
+
+启用正文地域覆盖时，standalone Search 的 `settings.user_location` 与 Responses 中已声明且受支持的
+`web_search` 工具的 `user_location` 都设置为近似位置对象：`type` 为 `"approximate"`，并写入配置的
+`country` 与 `timezone`。覆盖会删除冲突的 `city` / `region`，保留其他无关字段，不添加搜索工具。
+standalone Search 的 `settings` 或 `user_location` 缺失、为 `null` 时创建所需对象；已有字段不是对象时
+保持不变。关闭覆盖或目标值没有变化时，standalone Search 整份正文保持原始 bytes；Responses 保留解析后的
+请求结构，但不保证输入 JSON 的空白与转义字节。
 
 Windows 离线包接口固定解析 Microsoft Store Product ID `9PLM9XGG6VKS` 的 Retail 包，不接受调用方提供
 产品 ID、上游地址、ring 或文件名。后端只返回通过包名、架构、Microsoft CDN host/path、scheme 和失效

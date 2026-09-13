@@ -61,7 +61,10 @@ fn update_body() -> Value {
         "overloadCooldownSeconds": 120,
         "cyberSessionBlockEnabled": true,
         "cyberSessionBlockTtlSeconds": 600,
-        "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)"
+        "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)",
+        "openaiRequestBodyOverrideEnabled": true,
+        "openaiRequestTimezone": "America/Los_Angeles",
+        "openaiSearchCountry": "US"
     })
 }
 
@@ -273,6 +276,9 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         cyber_session_block_enabled: true,
         cyber_session_block_ttl_seconds: 600,
         openai_user_agent: Some("Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)".to_owned()),
+        openai_request_body_override_enabled: true,
+        openai_request_timezone: "America/Los_Angeles".to_owned(),
+        openai_search_country: "US".to_owned(),
         updated_at: Utc
             .with_ymd_and_hms(2026, 8, 2, 10, 30, 0)
             .single()
@@ -308,6 +314,9 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "cyberSessionBlockEnabled": true,
             "cyberSessionBlockTtlSeconds": 600,
             "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)",
+            "openaiRequestBodyOverrideEnabled": true,
+            "openaiRequestTimezone": "America/Los_Angeles",
+            "openaiSearchCountry": "US",
             "updatedAt": "2026-08-02T10:30:00Z"
         })
     );
@@ -372,6 +381,11 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         )
         .expect("u32"),
         openai_user_agent: request.openai_user_agent,
+        openai_request_body_override_enabled: request
+            .openai_request_body_override_enabled
+            .expect("request body override enabled"),
+        openai_request_timezone: request.openai_request_timezone.expect("request timezone"),
+        openai_search_country: request.openai_search_country.expect("search country"),
         updated_at: chrono::Utc::now(),
     };
 
@@ -451,6 +465,80 @@ async fn settings_post_should_replace_global_model_mappings() {
     assert_eq!(data["cyberSessionBlockEnabled"], true);
     assert_eq!(data["cyberSessionBlockTtlSeconds"], 600);
     assert_eq!(data["openaiUserAgent"], update_body()["openaiUserAgent"]);
+    assert_eq!(data["openaiRequestBodyOverrideEnabled"], true);
+    assert_eq!(data["openaiRequestTimezone"], "America/Los_Angeles");
+    assert_eq!(data["openaiSearchCountry"], "US");
+}
+
+#[tokio::test]
+async fn request_locale_update_canonicalizes_country_and_preserves_omitted_or_null_fields() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let router = app(fixture.state());
+    let mut body = update_body();
+    body["openaiRequestBodyOverrideEnabled"] = json!(false);
+    body["openaiRequestTimezone"] = json!(" Europe/Berlin ");
+    body["openaiSearchCountry"] = json!(" de ");
+    let first = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .expect("first locale update");
+    assert_eq!(first.status(), StatusCode::OK);
+    let data = response_json(first).await["data"].clone();
+    assert_eq!(data["openaiRequestBodyOverrideEnabled"], false);
+    assert_eq!(data["openaiRequestTimezone"], "Europe/Berlin");
+    assert_eq!(data["openaiSearchCountry"], "DE");
+
+    let mut omitted = update_body();
+    for field in [
+        "openaiRequestBodyOverrideEnabled",
+        "openaiRequestTimezone",
+        "openaiSearchCountry",
+    ] {
+        omitted
+            .as_object_mut()
+            .expect("settings object")
+            .remove(field);
+    }
+    let omitted = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(omitted),
+        ))
+        .await
+        .expect("omitted locale update");
+    let data = response_json(omitted).await["data"].clone();
+    assert_eq!(data["openaiRequestBodyOverrideEnabled"], false);
+    assert_eq!(data["openaiRequestTimezone"], "Europe/Berlin");
+    assert_eq!(data["openaiSearchCountry"], "DE");
+
+    let mut null = update_body();
+    for field in [
+        "openaiRequestBodyOverrideEnabled",
+        "openaiRequestTimezone",
+        "openaiSearchCountry",
+    ] {
+        null[field] = Value::Null;
+    }
+    let null = router
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(null),
+        ))
+        .await
+        .expect("null locale update");
+    let data = response_json(null).await["data"].clone();
+    assert_eq!(data["openaiRequestBodyOverrideEnabled"], false);
+    assert_eq!(data["openaiRequestTimezone"], "Europe/Berlin");
+    assert_eq!(data["openaiSearchCountry"], "DE");
 }
 
 #[tokio::test]
@@ -470,6 +558,10 @@ async fn runtime_settings_reject_invalid_values() {
         ("openaiUserAgent", json!("agent\r\nAuthorization: injected")),
         ("openaiUserAgent", json!(" ")),
         ("openaiUserAgent", json!("a".repeat(513))),
+        ("openaiRequestTimezone", json!("Pacific")),
+        ("openaiRequestTimezone", json!("Not/A_Real_Zone")),
+        ("openaiSearchCountry", json!("USA")),
+        ("openaiSearchCountry", json!("中")),
     ] {
         let mut body = update_body();
         body[field] = value;
