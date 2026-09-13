@@ -946,6 +946,9 @@ fn upstream_event_error(value: &Value) -> ProviderError {
             error_type.map(str::to_owned),
         ));
     }
+    if gateway_protocol::openai::is_cyber_policy_refusal_json(&value.to_string()) {
+        error = error.with_cyber_policy_refusal();
+    }
     error
 }
 

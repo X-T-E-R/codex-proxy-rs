@@ -123,6 +123,7 @@ pub enum ProviderAttemptOutcome {
     Failed {
         provider_kind: ProviderKind,
         error_kind: ProviderErrorKind,
+        cyber_policy_refusal: bool,
     },
 }
 
@@ -142,6 +143,18 @@ impl ProviderAttemptOutcome {
             Self::Succeeded { .. } => None,
             Self::Failed { error_kind, .. } => Some(*error_kind),
         }
+    }
+
+    /// 返回失败是否来自上游明确的 cyber policy 拒绝事实。
+    #[must_use]
+    pub const fn is_cyber_policy_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed {
+                cyber_policy_refusal: true,
+                ..
+            }
+        )
     }
 }
 
@@ -373,6 +386,7 @@ pub struct AttemptContext {
     continuation_attempt: ContinuationAttempt,
     transport: AttemptTransport,
     cancellation: CancellationToken,
+    cyber_session_block_enabled: bool,
 }
 
 impl AttemptContext {
@@ -407,7 +421,19 @@ impl AttemptContext {
             continuation_attempt,
             transport: AttemptTransport::Default,
             cancellation,
+            cyber_session_block_enabled: false,
         }
+    }
+
+    #[must_use]
+    pub const fn with_cyber_session_block_enabled(mut self, enabled: bool) -> Self {
+        self.cyber_session_block_enabled = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn cyber_session_block_enabled(&self) -> bool {
+        self.cyber_session_block_enabled
     }
 
     /// 覆盖本次 attempt 的 continuation 恢复方式。

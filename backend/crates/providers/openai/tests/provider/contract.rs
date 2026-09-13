@@ -6011,6 +6011,81 @@ async fn response_failed_after_semantic_output_is_exposed_and_not_replay_safe() 
 }
 
 #[tokio::test]
+async fn disabled_cyber_setting_keeps_statusless_response_failed_replay_behavior() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(concat!(
+                    "event: response.failed\n",
+                    "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_statusless_cyber\",\"status\":\"failed\",\"error\":{\"code\":\"cyber_policy\",\"message\":\"refused\"}}}\n\n"
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut stream = provider_with_base_url(&store, server.uri())
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_statusless_cyber", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare provider stream");
+    let failure = loop {
+        match stream.next().await {
+            Some(Err(error)) => break error,
+            Some(Ok(_)) => {}
+            None => panic!("response.failed must produce a typed failure"),
+        }
+    };
+
+    assert!(failure.is_cyber_policy_refusal());
+    assert!(!failure.replay_is_safe());
+}
+
+#[tokio::test]
+async fn success_json_cyber_refusal_reaches_provider_with_exact_client_wire() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let raw = r#"{"error":{"code":"cyber_policy","type":"permission_error","message":"refused"}}"#;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(raw, "application/json"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut stream = provider_with_base_url(&store, server.uri())
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_success_json_cyber", CancellationToken::new())
+                .with_cyber_session_block_enabled(true),
+        )
+        .await
+        .expect("prepare provider stream");
+    let mut failure = loop {
+        match stream.next().await {
+            Some(Err(error)) => break error,
+            Some(Ok(_)) => {}
+            None => panic!("JSON cyber refusal must produce a typed failure"),
+        }
+    };
+
+    assert!(failure.is_cyber_policy_refusal());
+    let events = failure.take_atomic_client_events();
+    assert!(events.iter().any(|event| {
+        event
+            .wire_event()
+            .and_then(|wire| wire.raw_sse_frame())
+            .is_some_and(|frame| frame.as_ref() == raw.as_bytes())
+    }));
+}
+
+#[tokio::test]
 async fn disabled_account_diagnostic_uses_upstream_without_persisting_account_state() {
     let store = Arc::new(MemoryAccountStore::default());
     let account_id = "acct_disabled_diagnostic";

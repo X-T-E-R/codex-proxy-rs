@@ -123,7 +123,349 @@ fn request(service: &DefaultExecutionService, transport: ClientTransport) -> Sta
             client_ip: None,
             user_agent: None,
             previous_response_id: None,
+            cyber_session: Default::default(),
         },
+    }
+}
+
+#[derive(Default)]
+struct BlockedCyberSessions {
+    lookups: AtomicUsize,
+}
+
+impl CyberSessionPort for BlockedCyberSessions {
+    fn contains_any<'a>(
+        &'a self,
+        _: &'a [CyberSessionKey],
+    ) -> BoxFuture<'a, Result<bool, CyberSessionStoreError>> {
+        Box::pin(async move {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        })
+    }
+
+    fn record<'a>(
+        &'a self,
+        _: &'a CyberSessionKey,
+        _: Duration,
+    ) -> BoxFuture<'a, Result<(), CyberSessionStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[test]
+fn enabled_cyber_block_is_recorded_before_any_provider_attempt() {
+    let store = Arc::new(TrackingExecutionStore::default());
+    let admissions = Arc::new(Admissions::default());
+    let cyber = Arc::new(BlockedCyberSessions::default());
+    let snapshot = start_snapshot().with_cyber_session_block_policy(Some(
+        CyberSessionBlockPolicy::new(std::num::NonZeroU32::new(3600).expect("TTL")),
+    ));
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(snapshot),
+        store.clone(),
+        ProviderRegistry::default(),
+        admissions.clone(),
+        Arc::new(UnusedCircuits),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    )
+    .with_cyber_sessions(cyber.clone());
+    let mut next = request(&service, ClientTransport::HttpJson);
+    let body = serde_json::json!({"client_metadata":{"session_id":"session-a"},"input":"hello"});
+    let serde_json::Value::Object(body) = body else {
+        unreachable!()
+    };
+    next.metadata.cyber_session =
+        CyberSessionRequest::from_responses(&body, None, std::iter::empty());
+
+    let result = block_on(service.start(next));
+    let Err(error) = result else {
+        panic!("blocked session must fail before returning an execution");
+    };
+    assert_eq!(error.kind(), GatewayErrorKind::PolicyDenied);
+    assert_eq!(error.client_error_type(), Some("permission_error"));
+    assert_eq!(
+        error.client_error_code(),
+        Some("session_blocked_by_cyber_policy")
+    );
+    assert_eq!(cyber.lookups.load(Ordering::SeqCst), 1);
+    assert_eq!(store.creates.load(Ordering::SeqCst), 1);
+    assert_eq!(store.finalizes.load(Ordering::SeqCst), 1);
+    assert!(store.attempts.lock().unwrap().is_empty());
+    assert_eq!(
+        store.finalizations.lock().unwrap()[0].client_status_code,
+        Some(403)
+    );
+    assert!(!admissions.active.load(Ordering::SeqCst));
+}
+
+#[test]
+fn disabled_cyber_setting_does_not_query_block_state() {
+    let admissions = Arc::new(Admissions::default());
+    let cyber = Arc::new(BlockedCyberSessions::default());
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(start_snapshot()),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        admissions,
+        Arc::new(UnusedCircuits),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    )
+    .with_cyber_sessions(cyber.clone());
+    let mut next = request(&service, ClientTransport::HttpJson);
+    let serde_json::Value::Object(body) =
+        serde_json::json!({"client_metadata":{"session_id":"session-a"},"input":"hello"})
+    else {
+        unreachable!()
+    };
+    next.metadata.cyber_session =
+        CyberSessionRequest::from_responses(&body, None, std::iter::empty());
+
+    let started = block_on(service.start(next)).expect("disabled setting keeps baseline");
+    assert_eq!(cyber.lookups.load(Ordering::SeqCst), 0);
+    block_on(started.session.detach_finalize());
+}
+
+struct CyberFailingProvider {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl Provider for CyberFailingProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        let metadata = ProviderCallMetadata::new(
+            request.candidate().provider().clone(),
+            request
+                .candidate()
+                .upstream_model()
+                .expect("text model")
+                .clone(),
+            ProviderAccountId::new("acct_start").expect("account"),
+            UpstreamTransport::new("http_sse").expect("transport"),
+        );
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::once(async {
+                Err(
+                    ProviderError::new(ProviderErrorKind::InvalidRequest, UpstreamSendState::Sent)
+                        .with_replay_safe()
+                        .with_cyber_policy_refusal(),
+                )
+            }),
+            (),
+        ))
+    }
+}
+
+struct AtomicCyberFailingProvider;
+
+#[async_trait]
+impl Provider for AtomicCyberFailingProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let metadata = ProviderCallMetadata::new(
+            request.candidate().provider().clone(),
+            request
+                .candidate()
+                .upstream_model()
+                .expect("text model")
+                .clone(),
+            ProviderAccountId::new("acct_start").expect("account"),
+            UpstreamTransport::new("http_sse").expect("transport"),
+        );
+        let failed = ProviderEvent::canonical(GatewayEvent::Started(ResponseMeta::new(
+            "resp-cyber",
+            "gpt-start",
+        )));
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::once(async move {
+                Err(
+                    ProviderError::new(ProviderErrorKind::InvalidRequest, UpstreamSendState::Sent)
+                        .with_cyber_policy_refusal()
+                        .with_atomic_client_events(vec![failed]),
+                )
+            }),
+            (),
+        ))
+    }
+}
+
+#[derive(Default)]
+struct RecordingCyberSessions {
+    records: AtomicUsize,
+    record_gate: Mutex<Option<oneshot::Receiver<()>>>,
+}
+
+impl CyberSessionPort for RecordingCyberSessions {
+    fn contains_any<'a>(
+        &'a self,
+        _: &'a [CyberSessionKey],
+    ) -> BoxFuture<'a, Result<bool, CyberSessionStoreError>> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn record<'a>(
+        &'a self,
+        _: &'a CyberSessionKey,
+        _: Duration,
+    ) -> BoxFuture<'a, Result<(), CyberSessionStoreError>> {
+        Box::pin(async {
+            self.records.fetch_add(1, Ordering::SeqCst);
+            let gate = self.record_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.await.expect("cyber record gate");
+            }
+            Ok(())
+        })
+    }
+}
+
+fn atomic_cyber_service(cyber: Arc<RecordingCyberSessions>) -> DefaultExecutionService {
+    let snapshot = start_snapshot().with_cyber_session_block_policy(Some(
+        CyberSessionBlockPolicy::new(std::num::NonZeroU32::new(3600).expect("TTL")),
+    ));
+    DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(snapshot),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::new([Arc::new(AtomicCyberFailingProvider) as Arc<dyn Provider>])
+            .expect("registry"),
+        Arc::new(Admissions::default()),
+        Arc::new(UnusedCircuits),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    )
+    .with_cyber_sessions(cyber)
+}
+
+fn with_explicit_cyber_session(
+    service: &DefaultExecutionService,
+    transport: ClientTransport,
+) -> StartExecution {
+    let mut next = request(service, transport);
+    let serde_json::Value::Object(body) =
+        serde_json::json!({"client_metadata":{"session_id":"session-a"},"input":"hello"})
+    else {
+        unreachable!()
+    };
+    next.metadata.cyber_session =
+        CyberSessionRequest::from_responses(&body, None, std::iter::empty());
+    next
+}
+
+#[test]
+fn atomic_cyber_refusal_is_recorded_when_downstream_disconnects_before_second_poll() {
+    block_on(async {
+        let cyber = Arc::new(RecordingCyberSessions::default());
+        let service = atomic_cyber_service(cyber.clone());
+        let mut started = service
+            .start(with_explicit_cyber_session(
+                &service,
+                ClientTransport::HttpSse,
+            ))
+            .await
+            .expect("execution starts");
+        assert!(started.session.next_event().await.unwrap().is_some());
+        started.session.detach_finalize().await;
+        assert_eq!(cyber.records.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn cancelled_cyber_record_future_resumes_during_detached_finalization() {
+    block_on(async {
+        let (complete_record, record_gate) = oneshot::channel();
+        let cyber = Arc::new(RecordingCyberSessions {
+            record_gate: Mutex::new(Some(record_gate)),
+            ..Default::default()
+        });
+        let service = atomic_cyber_service(cyber.clone());
+        let mut started = service
+            .start(with_explicit_cyber_session(
+                &service,
+                ClientTransport::HttpSse,
+            ))
+            .await
+            .expect("execution starts");
+        let mut next = started.session.next_event();
+        assert!(futures::poll!(next.as_mut()).is_pending());
+        drop(next);
+        assert_eq!(cyber.records.load(Ordering::SeqCst), 1);
+
+        let mut detached = started.session.detach_finalize();
+        assert!(futures::poll!(detached.as_mut()).is_pending());
+        complete_record
+            .send(())
+            .expect("resume original record future");
+        detached.await;
+        assert_eq!(cyber.records.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn enabled_cyber_refusal_stops_current_retry_even_without_a_cache_port() {
+    for (enabled, expected_attempts) in [(true, 1), (false, 32)] {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(CyberFailingProvider {
+            attempts: attempts.clone(),
+        });
+        let mut snapshot = start_snapshot();
+        if enabled {
+            snapshot = snapshot.with_cyber_session_block_policy(Some(
+                CyberSessionBlockPolicy::new(std::num::NonZeroU32::new(3600).expect("TTL")),
+            ));
+        }
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(snapshot),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::new([provider as Arc<dyn Provider>]).expect("registry"),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedCircuits),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let mut started = block_on(service.start(request(&service, ClientTransport::HttpJson)))
+            .expect("execution starts");
+        assert!(block_on(started.session.collect_uncommitted()).is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), expected_attempts);
     }
 }
 
@@ -838,7 +1180,10 @@ use gateway_core::operation::{
     GenerateRequest, ImageRequest, ImageRequestKind, Operation, OperationKind, ProtocolPayload,
     RawJsonPayload,
 };
-use gateway_core::policy::{ClientApiKeyId, ClientPolicy, PlaintextClientApiKey, RateLimits};
+use gateway_core::policy::{
+    ClientApiKeyId, ClientPolicy, CyberSessionBlockPolicy, CyberSessionKey, CyberSessionPort,
+    CyberSessionRequest, CyberSessionStoreError, PlaintextClientApiKey, RateLimits,
+};
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities,
     ProviderCatalogGeneration, ProviderKind, ProviderModel, ProviderModelCapabilities,
@@ -1172,6 +1517,7 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
             client_ip: None,
             user_agent: None,
             previous_response_id: None,
+            cyber_session: Default::default(),
         },
     }))
     .expect("provider endpoint request should start without a text catalog entry");
@@ -1216,6 +1562,7 @@ fn circuit_store_failure_should_fail_open_during_request_start() {
             client_ip: None,
             user_agent: None,
             previous_response_id: None,
+            cyber_session: Default::default(),
         },
     }))
     .expect("recoverable circuit state must not reject the request");
@@ -1251,6 +1598,7 @@ fn slow_circuit_store_should_time_out_and_fail_open_during_request_start() {
             client_ip: None,
             user_agent: None,
             previous_response_id: None,
+            cyber_session: Default::default(),
         },
     }))
     .expect("slow recoverable circuit state must not reject the request");
@@ -1287,6 +1635,7 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
             client_ip: None,
             user_agent: None,
             previous_response_id: None,
+            cyber_session: Default::default(),
         },
     }));
     let Err(error) = result else {
@@ -1367,6 +1716,7 @@ fn execution_metadata_with_continuation() -> ExecutionRequestMetadata {
         client_ip: None,
         user_agent: None,
         previous_response_id: Some(PreviousResponseId::new("response-private")),
+        cyber_session: Default::default(),
     }
 }
 

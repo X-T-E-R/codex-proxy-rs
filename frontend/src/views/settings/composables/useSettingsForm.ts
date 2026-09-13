@@ -32,9 +32,11 @@ export function useSettingsForm() {
     openaiUserAgent: '',
     overloadCooldownThreshold: null as number | null,
     overloadCooldownSeconds: null as number | null,
+    cyberSessionBlockEnabled: false,
+    cyberSessionBlockTtlSeconds: null as number | null,
   })
 
-  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs' | 'overloadCooldownThreshold' | 'overloadCooldownSeconds') {
+  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs' | 'overloadCooldownThreshold' | 'overloadCooldownSeconds' | 'cyberSessionBlockTtlSeconds') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -58,6 +60,8 @@ export function useSettingsForm() {
   const wsPoolFastPathBudgetMsValue = numericModel('wsPoolFastPathBudgetMs')
   const overloadCooldownThresholdValue = numericModel('overloadCooldownThreshold')
   const overloadCooldownSecondsValue = numericModel('overloadCooldownSeconds')
+  const cyberSessionBlockTtlSecondsValue = numericModel('cyberSessionBlockTtlSeconds')
+  const cyberSessionBlockTtlError = computed(() => positiveIntegerError(form.cyberSessionBlockTtlSeconds, 4_294_967_295))
   const overloadCooldownErrors = computed(() => ({
     threshold: positiveIntegerError(form.overloadCooldownThreshold, 4_294_967_295),
     seconds: positiveIntegerError(form.overloadCooldownSeconds, 4_294_967_295),
@@ -109,6 +113,8 @@ export function useSettingsForm() {
     form.overloadCooldownEnabled = data.overloadCooldownEnabled
     form.overloadCooldownThreshold = data.overloadCooldownThreshold
     form.overloadCooldownSeconds = data.overloadCooldownSeconds
+    form.cyberSessionBlockEnabled = data.cyberSessionBlockEnabled
+    form.cyberSessionBlockTtlSeconds = data.cyberSessionBlockTtlSeconds
     form.openaiUserAgent = data.openaiUserAgent ?? ''
     mappings.value = Object.entries(data.modelMappings || {}).map(([requestedModel, upstreamModel]) => ({
       requestedModel,
@@ -166,7 +172,7 @@ export function useSettingsForm() {
   async function saveSettings() {
     if (saving.value || loading.value)
       return
-    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs, overloadCooldownThreshold, overloadCooldownSeconds } = form
+    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs, overloadCooldownThreshold, overloadCooldownSeconds, cyberSessionBlockTtlSeconds } = form
     if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy) {
       toast.warning('请完整填写运行参数和调度策略')
       return
@@ -185,6 +191,10 @@ export function useSettingsForm() {
     }
     if (minCodexDesktopVersionError.value || minCodexCliVersionError.value) {
       toast.warning('请修正客户端最低版本格式')
+      return
+    }
+    if (cyberSessionBlockTtlSeconds === null || cyberSessionBlockTtlError.value) {
+      toast.warning('请修正 cyber 会话屏蔽时长')
       return
     }
     if (openaiUserAgentError.value) {
@@ -213,6 +223,8 @@ export function useSettingsForm() {
         overloadCooldownEnabled: form.overloadCooldownEnabled,
         overloadCooldownThreshold,
         overloadCooldownSeconds,
+        cyberSessionBlockEnabled: form.cyberSessionBlockEnabled,
+        cyberSessionBlockTtlSeconds,
         openaiUserAgent: form.openaiUserAgent.trim() || null,
       })
       applySettings(result)
@@ -249,6 +261,8 @@ export function useSettingsForm() {
     overloadCooldownThresholdValue,
     overloadCooldownSecondsValue,
     overloadCooldownErrors,
+    cyberSessionBlockTtlSecondsValue,
+    cyberSessionBlockTtlError,
     openaiUserAgentError,
     minCodexDesktopVersionError,
     minCodexCliVersionError,

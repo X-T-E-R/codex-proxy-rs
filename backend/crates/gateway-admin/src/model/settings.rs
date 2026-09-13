@@ -37,6 +37,8 @@ pub struct RuntimeSettings {
     pub overload_cooldown_enabled: bool,
     pub overload_cooldown_threshold: u32,
     pub overload_cooldown_seconds: u32,
+    pub cyber_session_block_enabled: bool,
+    pub cyber_session_block_ttl_seconds: u32,
     pub openai_user_agent: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
@@ -63,6 +65,8 @@ pub struct ReplaceRuntimeSettings {
     pub overload_cooldown_enabled: bool,
     pub overload_cooldown_threshold: u32,
     pub overload_cooldown_seconds: u32,
+    pub cyber_session_block_enabled: Option<bool>,
+    pub cyber_session_block_ttl_seconds: Option<u32>,
     pub openai_user_agent: Option<String>,
 }
 

@@ -702,28 +702,7 @@ async fn invalid_encrypted_reasoning_retries_once_on_the_same_account_without_ci
         InferenceMode::Success,
     ]);
     let provider = provider(StubSelector::success(), transport.clone()).await;
-    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
-        ProtocolPayload::json_object(
-            "openai",
-            Map::from_iter([
-                ("model".to_owned(), json!("client-model")),
-                (
-                    "input".to_owned(),
-                    json!([
-                        {
-                            "type": "reasoning",
-                            "id": "reason_stale",
-                            "summary": [{"type": "summary_text", "text": "keep summary"}],
-                            "content": null,
-                            "encrypted_content": "stale-ciphertext"
-                        },
-                        {"type": "message", "role": "user", "content": "continue"}
-                    ]),
-                ),
-            ]),
-        )
-        .expect("OpenAI payload"),
-    ));
+    let operation = invalid_encrypted_reasoning_operation();
     let mut stream = provider
         .execute(
             provider_request_with_operation("xai", operation),
@@ -750,6 +729,75 @@ async fn invalid_encrypted_reasoning_retries_once_on_the_same_account_without_ci
         Some(&json!("keep summary"))
     );
     assert_eq!(requests[0].binding(), requests[1].binding());
+}
+
+#[tokio::test]
+async fn enabled_cyber_refusal_prevents_invalid_encrypted_reasoning_internal_replay() {
+    for enabled in [false, true] {
+        let transport = StubInferenceTransport::sequence([
+            InferenceMode::Error(
+                GrokInferenceTransportError::new(
+                    GrokInferenceTransportErrorKind::InvalidRequest,
+                    UpstreamSendState::Sent,
+                )
+                .with_status(400)
+                .with_upstream_code(OpaqueUpstreamValue::new("reasoning_decode_failed"))
+                .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                    "could not decode the compaction blob",
+                    Some("cyber_policy".to_owned()),
+                    Some("permission_error".to_owned()),
+                ))
+                .with_cyber_policy_refusal(),
+            ),
+            InferenceMode::Success,
+        ]);
+        let provider = provider(StubSelector::success(), transport.clone()).await;
+        let mut stream = provider
+            .execute(
+                provider_request_with_operation("xai", invalid_encrypted_reasoning_operation()),
+                context(CancellationToken::new(), None).with_cyber_session_block_enabled(enabled),
+            )
+            .await
+            .expect("provider stream");
+        if enabled {
+            let error = next_provider_error(&mut stream).await;
+            assert!(error.is_cyber_policy_refusal());
+            assert!(!error.replay_is_safe());
+        } else {
+            while let Some(event) = stream.next().await {
+                event.expect("legacy internal recovery succeeds");
+            }
+        }
+        assert_eq!(
+            transport.calls.load(Ordering::SeqCst),
+            if enabled { 1 } else { 2 }
+        );
+    }
+}
+
+fn invalid_encrypted_reasoning_operation() -> Operation {
+    Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("client-model")),
+                (
+                    "input".to_owned(),
+                    json!([
+                        {
+                            "type": "reasoning",
+                            "id": "reason_stale",
+                            "summary": [{"type": "summary_text", "text": "keep summary"}],
+                            "content": null,
+                            "encrypted_content": "stale-ciphertext"
+                        },
+                        {"type": "message", "role": "user", "content": "continue"}
+                    ]),
+                ),
+            ]),
+        )
+        .expect("OpenAI payload"),
+    ))
 }
 
 async fn next_provider_error(
@@ -1835,6 +1883,67 @@ async fn first_unauthorized_should_refresh_and_request_one_same_account_retry() 
     assert!(error.retries_same_account());
     assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
     assert!(selector.feedback.lock().expect("feedback").is_empty());
+}
+
+#[tokio::test]
+async fn enabled_cyber_http_failure_skips_credential_recovery_and_account_feedback() {
+    for enabled in [false, true] {
+        let selector = StubSelector::success();
+        let recovery = StubRecovery::new(GrokCredentialRecoveryOutcome::Recovered);
+        let transport = StubInferenceTransport::error(
+            GrokInferenceTransportError::new(
+                GrokInferenceTransportErrorKind::Unauthorized,
+                UpstreamSendState::Sent,
+            )
+            .with_status(401)
+            .with_credential_recovery()
+            .with_cyber_policy_refusal(),
+        );
+        let provider = provider_with_recovery(selector.clone(), transport, recovery.clone()).await;
+        let mut stream = provider
+            .execute(
+                provider_request("xai"),
+                context(CancellationToken::new(), None).with_cyber_session_block_enabled(enabled),
+            )
+            .await
+            .expect("stream");
+        let error = next_provider_error(&mut stream).await;
+
+        assert!(error.is_cyber_policy_refusal());
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), usize::from(!enabled));
+        assert_eq!(error.retries_same_account(), !enabled);
+        assert!(selector.feedback.lock().expect("feedback").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn enabled_cyber_stream_failure_skips_unavailable_account_feedback() {
+    for enabled in [false, true] {
+        let selector = StubSelector::success();
+        let transport = StubInferenceTransport::stream_error(
+            GrokInferenceTransportError::new(
+                GrokInferenceTransportErrorKind::Unavailable,
+                UpstreamSendState::Sent,
+            )
+            .with_status(500)
+            .with_cyber_policy_refusal(),
+        );
+        let provider = provider(selector.clone(), transport).await;
+        let mut stream = provider
+            .execute(
+                provider_request("xai"),
+                context(CancellationToken::new(), None).with_cyber_session_block_enabled(enabled),
+            )
+            .await
+            .expect("stream");
+        let error = next_provider_error(&mut stream).await;
+
+        assert!(error.is_cyber_policy_refusal());
+        assert_eq!(
+            selector.feedback.lock().expect("feedback").len(),
+            usize::from(!enabled)
+        );
+    }
 }
 
 #[tokio::test]

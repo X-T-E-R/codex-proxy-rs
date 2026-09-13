@@ -361,8 +361,14 @@ impl Provider for CodexProvider {
         }
         let session_affinity =
             derive_codex_session_affinity(&upstream_request, context.client_api_key_ref());
-        let cyber_policy_session_key =
-            derive_codex_cyber_policy_session_key(&upstream_request, context.client_api_key_ref());
+        let cyber_policy_session_key = (!context.cyber_session_block_enabled())
+            .then(|| {
+                derive_codex_cyber_policy_session_key(
+                    &upstream_request,
+                    context.client_api_key_ref(),
+                )
+            })
+            .flatten();
 
         let selection_started_at = Instant::now();
         let lease = self

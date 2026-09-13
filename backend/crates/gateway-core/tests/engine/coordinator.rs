@@ -2063,6 +2063,7 @@ fn required_account_disables_account_retry_after_stream_creation() {
         &[ProviderAttemptOutcome::Failed {
             provider_kind: ProviderKind::new("openai").expect("provider"),
             error_kind: ProviderErrorKind::Unavailable,
+            cyber_policy_refusal: false,
         }]
     );
     assert_eq!(provider.contexts.lock().expect("contexts lock").len(), 1);
@@ -3539,6 +3540,7 @@ fn structural_event_before_replay_safe_failure_should_switch_account_before_comm
         &[ProviderAttemptOutcome::Failed {
             provider_kind: ProviderKind::new("openai").expect("provider"),
             error_kind: ProviderErrorKind::Transport,
+            cyber_policy_refusal: false,
         }]
     );
     assert_eq!(provider.contexts.lock().expect("contexts lock").len(), 1);

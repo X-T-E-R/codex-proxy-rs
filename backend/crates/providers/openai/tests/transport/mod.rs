@@ -251,6 +251,7 @@ async fn collect_backend_response(
         response_metadata,
         mut transport_metrics,
         connection_local_continuation,
+        cyber_policy_refusal: _,
     } = response;
     let mut body_bytes = Vec::new();
     while let Some(chunk) = body.next().await {

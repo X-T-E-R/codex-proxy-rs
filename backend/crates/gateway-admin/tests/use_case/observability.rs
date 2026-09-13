@@ -773,6 +773,8 @@ impl SettingsStore for FixtureSettingsStore {
             overload_cooldown_enabled: false,
             overload_cooldown_threshold: 2,
             overload_cooldown_seconds: 120,
+            cyber_session_block_enabled: false,
+            cyber_session_block_ttl_seconds: 3600,
             openai_user_agent: None,
             updated_at: Utc::now(),
         })

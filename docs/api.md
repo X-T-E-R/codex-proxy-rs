@@ -200,6 +200,22 @@ Responses wire 之间的协议转换层，转换只在 xAI Provider 内完成。
 上游结构化错误的 message/code/type 会透传给客户端，其中内嵌的账号指纹 UUID 已脱敏。模型映射是
 全局精确映射，未命中时模型名原样交给候选 Provider；分组只限定账号集合，不参与模型改名。
 
+### Cyber 会话自动屏蔽
+
+启用 cyber 会话自动屏蔽后，Responses 请求按 `Client Key + 语义会话`查询 Redis 屏蔽状态。
+会话匹配优先使用请求中经校验的显式会话 ID；缺失时才使用完整历史的精确前缀/续接。会话键不包含
+账号、模型或通道，也不保存请求正文。
+
+Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为空时，才回退读取 `response.error.code`。
+顶层值非空时不读取嵌套值；比较前去除首尾空白并按大小写不敏感匹配，规范化后精确等于
+`cyber_policy` 才记录拒绝事实，不扫描 `message` 或正文文本。命中未过期的本地条目时，HTTP JSON 与 HTTP SSE 请求在访问上游前
+返回 `403`，错误字段为 `error.type = "permission_error"`、
+`error.code = "session_blocked_by_cyber_policy"`；已建立的 Responses WebSocket 则在对应的每个
+`response.create` turn 返回 `status: 403` 的错误事件，并使用相同字段。此类本地重试仍不访问上游。
+
+屏蔽条目只存在于 Redis 的可过期 session marker 中：首次写入确定 TTL，后续写入或本地重试都不会
+续期；设置编辑也不改变已存条目的剩余 TTL。关闭开关时忽略现有条目，新请求使用新发布的运行策略。
+
 ## 4. 管理员认证
 
 | 方法 | 路由 | 请求 | 说明 |
@@ -608,6 +624,8 @@ wsPoolFastPathBudgetMs
 overloadCooldownEnabled
 overloadCooldownThreshold
 overloadCooldownSeconds
+cyberSessionBlockEnabled
+cyberSessionBlockTtlSeconds
 openaiUserAgent
 ```
 
@@ -649,6 +667,20 @@ openaiUserAgent
 两个关键词共享同一账号的计数，成功响应或其他错误清零。计数在各进程内独立维护，重启后重新计数；
 冷却到期时间保存在共享 Redis。冷号期间拒绝该账号的新推理、指定账号请求和连接测试，已有请求可继续完成，
 其成功不会提前解冻。关闭开关停止新触发，已有冷却按原期限结束。账号列表通过 `rate_limited` 展示冷却状态。
+
+Cyber 会话自动屏蔽由以下两个字段控制：
+
+| 字段 | 类型 | 默认值 | 含义 |
+| --- | --- | ---: | --- |
+| `cyberSessionBlockEnabled` | `boolean` | `false` | 是否启用 Responses 会话屏蔽 |
+| `cyberSessionBlockTtlSeconds` | `u32` 整数 | `3600` | 屏蔽条目的 Redis TTL（秒），范围 `1`–`4294967295` |
+
+`GET /api/admin/settings` 及成功的设置更新响应都会返回这两个字段。
+`POST /api/admin/settings/update` 仍以原子方式替换完整运行设置；新增 cyber 字段可省略以兼容旧客户端，
+省略时沿用当前已保存值，提供时按上述类型和范围校验。保存会在同一事务中推进 `config_revision` 并发布
+新的 runtime snapshot，后续请求使用新策略，已开始的请求继续使用开始时快照。已有 Redis 条目的
+剩余 TTL 不因设置编辑而变化，新写入使用新快照的 TTL；关闭开关只忽略现有条目，不会把它们用于
+本地拒绝。
 
 `openaiUserAgent` 为 `string | null`，默认 `null`，此时使用启动配置的平台和自动更新的版本。
 自定义模板支持 `{originator}`、`{codex_version}`、`{desktop_version}`；版本变量使用当前已核验的

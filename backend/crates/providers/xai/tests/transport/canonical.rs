@@ -1342,6 +1342,27 @@ fn decoder_should_classify_failed_event_without_retaining_body() {
 }
 
 #[test]
+fn decoder_should_mark_exact_cyber_policy_refusal() {
+    let body = concat!(
+        "event: response.failed\n",
+        "data: {\"type\":\"response.failed\",\"error\":{\"code\":\" CYBER_POLICY \",\"message\":\"blocked\"}}\n\n",
+    );
+    let error = GrokCanonicalDecoder::new("fallback")
+        .push(body.as_bytes())
+        .expect_err("cyber refusal must surface");
+    assert!(error.is_cyber_policy_refusal());
+
+    let suppressed = concat!(
+        "event: response.failed\n",
+        "data: {\"type\":\"response.failed\",\"error\":{\"code\":\"other\"},\"response\":{\"error\":{\"code\":\"cyber_policy\"}}}\n\n",
+    );
+    let error = GrokCanonicalDecoder::new("fallback")
+        .push(suppressed.as_bytes())
+        .expect_err("structured failure must surface");
+    assert!(!error.is_cyber_policy_refusal());
+}
+
+#[test]
 fn decoder_should_classify_free_quota_failed_event() {
     let body = concat!(
         "event: response.created\n",

@@ -306,6 +306,7 @@ impl GrokBuildProvider {
         let selected = Arc::new(selected);
         let allows_account_state_mutation = selected.allows_account_state_mutation();
         let metadata = provider_call_metadata(candidate, &selected, account_selection_wait_ms)?;
+        let cyber_session_block_enabled = context.cyber_session_block_enabled();
         let events = cold_http_sse_stream(
             Arc::clone(&self.selector),
             Arc::clone(&self.transport),
@@ -324,11 +325,18 @@ impl GrokBuildProvider {
             },
         );
         let stream = ProviderStream::new(metadata, events, selected);
-        Ok(if allows_account_state_mutation {
-            stream.with_account_feedback(Arc::clone(&self.account_feedback))
-        } else {
-            stream
-        })
+        Ok(
+            if allows_account_state_mutation && cyber_session_block_enabled {
+                stream.with_filtered_account_feedback(
+                    Arc::clone(&self.account_feedback),
+                    xai_failure_affects_account_score,
+                )
+            } else if allows_account_state_mutation {
+                stream.with_account_feedback(Arc::clone(&self.account_feedback))
+            } else {
+                stream
+            },
+        )
     }
 
     async fn execute_compaction(
@@ -400,6 +408,7 @@ impl GrokBuildProvider {
             });
         let allows_account_state_mutation = selected.allows_account_state_mutation();
         let metadata = provider_call_metadata(candidate, &selected, account_selection_wait_ms)?;
+        let cyber_session_block_enabled = context.cyber_session_block_enabled();
         let events = cold_compaction_http_sse_stream(
             Arc::clone(&self.selector),
             Arc::clone(&self.transport),
@@ -418,12 +427,23 @@ impl GrokBuildProvider {
             },
         );
         let stream = ProviderStream::new(metadata, events, selected);
-        Ok(if allows_account_state_mutation {
-            stream.with_account_feedback(Arc::clone(&self.account_feedback))
-        } else {
-            stream
-        })
+        Ok(
+            if allows_account_state_mutation && cyber_session_block_enabled {
+                stream.with_filtered_account_feedback(
+                    Arc::clone(&self.account_feedback),
+                    xai_failure_affects_account_score,
+                )
+            } else if allows_account_state_mutation {
+                stream.with_account_feedback(Arc::clone(&self.account_feedback))
+            } else {
+                stream
+            },
+        )
     }
+}
+
+fn xai_failure_affects_account_score(error: &ProviderError) -> bool {
+    !error.is_cyber_policy_refusal()
 }
 
 async fn select_grok_session(

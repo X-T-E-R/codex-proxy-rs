@@ -66,6 +66,7 @@ pub(super) async fn next_grok_chunk(
                 session,
                 error,
                 upstream_model,
+                context.cyber_session_block_enabled(),
             ).await),
             None => Ok(None),
         },
@@ -154,7 +155,9 @@ pub(super) fn cold_compaction_http_sse_stream(
                     };
                 }
                 InferenceBoundary::Response(Err(error)) => {
-                    if !invalid_encrypted_content_retried
+                    if !(context.cyber_session_block_enabled()
+                        && error.is_cyber_policy_refusal())
+                        && !invalid_encrypted_content_retried
                         && is_invalid_encrypted_content_failure(&error)
                         && request.strip_invalid_encrypted_reasoning()
                     {
@@ -175,12 +178,13 @@ pub(super) fn cold_compaction_http_sse_stream(
                         error,
                         credential_failure,
                         context.credential_recovery_attempted(),
+                        context.cyber_session_block_enabled(),
                     )
                     .await;
                     if let Some(observation) = observation {
                         yield ProviderEvent::observation(observation);
                     }
-                    Err(mark_transient_compaction_failure(error))?;
+                    Err(mark_transient_compaction_failure_for_context(error, &context))?;
                     return;
                 }
             }
@@ -201,7 +205,7 @@ pub(super) fn cold_compaction_http_sse_stream(
             &context,
         )
         .await
-        .map_err(mark_transient_compaction_failure)?
+        .map_err(|error| mark_transient_compaction_failure_for_context(error, &context))?
         {
             let events = match canonical.push(&chunk) {
                 Ok(events) => events,
@@ -212,9 +216,10 @@ pub(super) fn cold_compaction_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        context.cyber_session_block_enabled(),
                     )
                     .await;
-                    Err(mark_transient_compaction_failure(error))?;
+                    Err(mark_transient_compaction_failure_for_context(error, &context))?;
                     return;
                 }
             };
@@ -237,9 +242,10 @@ pub(super) fn cold_compaction_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        context.cyber_session_block_enabled(),
                     )
                     .await;
-                    Err(mark_transient_compaction_failure(error))?;
+                    Err(mark_transient_compaction_failure_for_context(error, &context))?;
                     return;
                 }
             };
@@ -365,6 +371,17 @@ pub(super) fn mark_transient_compaction_failure(error: ProviderError) -> Provide
     }
 }
 
+fn mark_transient_compaction_failure_for_context(
+    error: ProviderError,
+    context: &AttemptContext,
+) -> ProviderError {
+    if context.cyber_session_block_enabled() && error.is_cyber_policy_refusal() {
+        error
+    } else {
+        mark_transient_compaction_failure(error)
+    }
+}
+
 pub(super) fn cold_http_sse_stream(
     selector: Arc<dyn GrokSessionSelector>,
     transport: Arc<dyn GrokInferenceTransport>,
@@ -433,7 +450,9 @@ pub(super) fn cold_http_sse_stream(
                 }
                 InferenceBoundary::Response(Ok(response)) => break response,
                 InferenceBoundary::Response(Err(error)) => {
-                    if !invalid_encrypted_content_retried
+                    if !(context.cyber_session_block_enabled()
+                        && error.is_cyber_policy_refusal())
+                        && !invalid_encrypted_content_retried
                         && is_invalid_encrypted_content_failure(&error)
                         && request.strip_invalid_encrypted_reasoning()
                     {
@@ -456,6 +475,7 @@ pub(super) fn cold_http_sse_stream(
                         error,
                         credential_failure,
                         context.credential_recovery_attempted(),
+                        context.cyber_session_block_enabled(),
                     )
                     .await;
                     yield ProviderEvent::observation(observation);
@@ -497,6 +517,7 @@ pub(super) fn cold_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        context.cyber_session_block_enabled(),
                     ).await),
                     None => Ok(None),
                 },
@@ -513,6 +534,7 @@ pub(super) fn cold_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        context.cyber_session_block_enabled(),
                     )
                     .await;
                     Err(error)?;
@@ -570,6 +592,7 @@ pub(super) fn cold_http_sse_stream(
                     &session,
                     error,
                     &upstream_model,
+                    context.cyber_session_block_enabled(),
                 )
                 .await;
                 Err(error)?;

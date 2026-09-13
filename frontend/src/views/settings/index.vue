@@ -11,6 +11,7 @@ import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import AdminApiKeyCard from './components/AdminApiKeyCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
 import ClientVersionSettings from './components/client-version/index.vue'
+import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import OverloadCooldownCard from './components/OverloadCooldownCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
@@ -60,6 +61,8 @@ const {
   overloadCooldownThresholdValue,
   overloadCooldownSecondsValue,
   overloadCooldownErrors,
+  cyberSessionBlockTtlSecondsValue,
+  cyberSessionBlockTtlError,
   openaiUserAgentError,
   minCodexDesktopVersionError,
   minCodexCliVersionError,
@@ -163,6 +166,13 @@ watch(
         v-model="form.openaiUserAgent"
         :disabled="loading || saving"
         :error="openaiUserAgentError"
+      />
+
+      <CyberSessionBlockCard
+        v-model:enabled="form.cyberSessionBlockEnabled"
+        v-model:seconds="cyberSessionBlockTtlSecondsValue"
+        :disabled="loading || saving"
+        :error="cyberSessionBlockTtlError"
       />
 
       <ClientVersionSettings

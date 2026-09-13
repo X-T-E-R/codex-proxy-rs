@@ -256,6 +256,43 @@ async fn codex_backend_client_should_parse_retry_after_from_rate_limit_error_bod
 }
 
 #[tokio::test]
+async fn codex_backend_http_sse_should_preserve_success_json_cyber_refusal() {
+    let server = wiremock::MockServer::start().await;
+    let raw = r#"{"error":{"code":" cyber_policy ","type":"permission_error","message":"request refused"}}"#;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/codex/responses"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("x-request-id", "req-cyber-json")
+                .set_body_raw(raw, "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        server.uri(),
+        test_wire_profile(),
+    );
+    let mut request = codex_request("gpt-5.5", "", Vec::new());
+    request.force_http_sse = true;
+
+    let mut response = client
+        .create_response_stream(
+            &request,
+            request_context("req_success_json_cyber", Some("acct")),
+        )
+        .await
+        .expect("transport keeps successful response wire");
+    assert!(response.cyber_policy_refusal);
+    let mut body = Vec::new();
+    while let Some(chunk) = response.body.next().await {
+        body.extend_from_slice(&chunk.expect("buffered body"));
+    }
+    assert_eq!(body, raw.as_bytes());
+}
+
+#[tokio::test]
 async fn codex_backend_http_sse_should_capture_structured_rate_limit_event_updates() {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))

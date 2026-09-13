@@ -151,6 +151,9 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
             redis_connection.clone(),
             REDIS_NAMESPACE,
         )?);
+    let cyber_sessions: Arc<dyn gateway_core::policy::CyberSessionPort> = Arc::new(
+        redis::RedisCyberSessionRepository::new(redis_connection.clone(), REDIS_NAMESPACE)?,
+    );
     let (admissions, admission_release_writer) =
         redis::BufferedClientAdmissionPort::new(admissions);
     let (circuits, circuit_feedback_writer) = redis::BufferedProviderCircuitPort::new(circuits);
@@ -173,7 +176,8 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         ),
         Arc::new(client_key_usage),
     )
-    .with_budget(Arc::new(postgres::PgClientBudgetStore::new(pool.clone())));
+    .with_budget(Arc::new(postgres::PgClientBudgetStore::new(pool.clone())))
+    .with_cyber_sessions(cyber_sessions);
 
     let provider_ports = ProviderStorePorts::new(
         account_store,

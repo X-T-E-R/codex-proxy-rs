@@ -191,9 +191,43 @@ impl CodexBackendClient {
             });
         }
 
+        let is_json_response = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
         let rate_limit_updates = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (body, cyber_policy_refusal) = if is_json_response {
+            let raw_body = read_error_response_body(response).await.map_err(|source| {
+                CodexClientError::ErrorBodyRead {
+                    source,
+                    status,
+                    diagnostics: Box::new(diagnostics.clone()),
+                    transport: CodexBackendTransport::HttpSse,
+                    transport_metrics: Box::new(CodexTransportMetrics {
+                        upstream_headers_ms: Some(upstream_headers_ms),
+                        http_version: Some(http_version.clone()),
+                        ..CodexTransportMetrics::default()
+                    }),
+                }
+            })?;
+            trace.capture("upstream.response.body", &raw_body);
+            let cyber_policy_refusal = gateway_protocol::openai::is_cyber_policy_refusal_json(
+                &String::from_utf8_lossy(&raw_body),
+            );
+            (
+                buffered_http_sse_stream(raw_body, Arc::clone(&rate_limit_updates), trace),
+                cyber_policy_refusal,
+            )
+        } else {
+            (
+                http_sse_stream(response, Arc::clone(&rate_limit_updates), trace),
+                false,
+            )
+        };
         Ok(CodexBackendStreamingResponse {
-            body: http_sse_stream(response, Arc::clone(&rate_limit_updates), trace),
+            body,
             transport: CodexBackendTransport::HttpSse,
             websocket_connection_id: None,
             turn_state,
@@ -210,6 +244,7 @@ impl CodexBackendClient {
                 ..CodexTransportMetrics::default()
             },
             connection_local_continuation: false,
+            cyber_policy_refusal,
         })
     }
 
@@ -484,6 +519,7 @@ impl CodexBackendClient {
                     response_metadata: exchange.response_metadata,
                     transport_metrics: metrics,
                     connection_local_continuation: exchange.connection_local_continuation,
+                    cyber_policy_refusal: false,
                 })
             }
         }
@@ -666,6 +702,26 @@ fn http_sse_stream(
             let failed = chunk.is_err();
             yield chunk;
             if failed { return; }
+        }
+        capture.finish();
+    });
+    observe_http_sse_rate_limits(stream, rate_limit_updates)
+}
+
+fn buffered_http_sse_stream(
+    body: bytes::Bytes,
+    rate_limit_updates: CodexRateLimitUpdates,
+    trace: TraceContext,
+) -> CodexBackendSseStream {
+    let stream = Box::pin(futures::stream::once(async move { Ok(body) }));
+    let stream = Box::pin(async_stream::stream! {
+        let mut stream = stream;
+        let mut capture = StreamCapture::new(trace, StreamFormat::Sse);
+        while let Some(chunk) = stream.next().await {
+            if let Ok(bytes) = &chunk {
+                capture.push(bytes);
+            }
+            yield chunk;
         }
         capture.finish();
     });

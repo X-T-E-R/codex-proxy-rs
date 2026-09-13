@@ -51,6 +51,8 @@ pub struct RuntimeSettingsView {
     pub overload_cooldown_enabled: bool,
     pub overload_cooldown_threshold: u64,
     pub overload_cooldown_seconds: u64,
+    pub cyber_session_block_enabled: bool,
+    pub cyber_session_block_ttl_seconds: u64,
     pub openai_user_agent: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
@@ -78,6 +80,10 @@ pub struct UpdateRuntimeSettingsRequest {
     pub overload_cooldown_enabled: bool,
     pub overload_cooldown_threshold: u64,
     pub overload_cooldown_seconds: u64,
+    #[serde(default)]
+    pub cyber_session_block_enabled: Option<bool>,
+    #[serde(default)]
+    pub cyber_session_block_ttl_seconds: Option<u64>,
     pub openai_user_agent: Option<String>,
 }
 
@@ -111,6 +117,11 @@ impl UpdateRuntimeSettingsRequest {
             (self.overload_cooldown_seconds, "overloadCooldownSeconds"),
         ] {
             require_positive_i64(value, field)?;
+        }
+        if let Some(value) = self.cyber_session_block_ttl_seconds {
+            require_positive_i64(value, "cyberSessionBlockTtlSeconds")?;
+            u32::try_from(value)
+                .map_err(|_| WireValidationError::new("cyberSessionBlockTtlSeconds"))?;
         }
         if i64::try_from(self.request_interval_ms).is_err() {
             return Err(WireValidationError::new("requestIntervalMs"));
@@ -160,6 +171,12 @@ impl UpdateRuntimeSettingsRequest {
                 .map_err(|_| WireValidationError::new("overloadCooldownThreshold"))?,
             overload_cooldown_seconds: u32::try_from(self.overload_cooldown_seconds)
                 .map_err(|_| WireValidationError::new("overloadCooldownSeconds"))?,
+            cyber_session_block_enabled: self.cyber_session_block_enabled,
+            cyber_session_block_ttl_seconds: self
+                .cyber_session_block_ttl_seconds
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| WireValidationError::new("cyberSessionBlockTtlSeconds"))?,
             openai_user_agent: self.openai_user_agent,
         })
     }
@@ -187,6 +204,8 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
             overload_cooldown_enabled: settings.overload_cooldown_enabled,
             overload_cooldown_threshold: u64::from(settings.overload_cooldown_threshold),
             overload_cooldown_seconds: u64::from(settings.overload_cooldown_seconds),
+            cyber_session_block_enabled: settings.cyber_session_block_enabled,
+            cyber_session_block_ttl_seconds: u64::from(settings.cyber_session_block_ttl_seconds),
             openai_user_agent: settings.openai_user_agent,
             updated_at: settings.updated_at,
         }

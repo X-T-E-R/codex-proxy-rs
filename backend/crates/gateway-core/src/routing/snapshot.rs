@@ -11,7 +11,7 @@ use crate::account::{AccountSelectionPolicy, ProviderAccountId, RotationStrategy
 use crate::operation::Operation;
 use crate::policy::{
     ClientApiKeyId, ClientPolicy, CodexClientMinVersions, CodexClientVersion,
-    PlaintextClientApiKey, RateLimits,
+    CyberSessionBlockPolicy, PlaintextClientApiKey, RateLimits,
 };
 use crate::validation::RoutingError;
 
@@ -36,6 +36,8 @@ pub struct SnapshotSettingsFacts {
     overload_cooldown_enabled: bool,
     overload_cooldown_threshold: u32,
     overload_cooldown_seconds: u32,
+    cyber_session_block_enabled: bool,
+    cyber_session_block_ttl_seconds: u32,
 }
 
 impl SnapshotSettingsFacts {
@@ -58,6 +60,8 @@ impl SnapshotSettingsFacts {
             overload_cooldown_enabled: false,
             overload_cooldown_threshold: 2,
             overload_cooldown_seconds: 120,
+            cyber_session_block_enabled: false,
+            cyber_session_block_ttl_seconds: 3600,
         }
     }
 
@@ -71,6 +75,13 @@ impl SnapshotSettingsFacts {
         self.overload_cooldown_enabled = enabled;
         self.overload_cooldown_threshold = threshold;
         self.overload_cooldown_seconds = seconds;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_cyber_session_block(mut self, enabled: bool, ttl_seconds: u32) -> Self {
+        self.cyber_session_block_enabled = enabled;
+        self.cyber_session_block_ttl_seconds = ttl_seconds;
         self
     }
 }
@@ -378,6 +389,8 @@ async fn compile_runtime_snapshot(
         .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
     let overload_seconds = NonZeroU32::new(facts.settings.overload_cooldown_seconds)
         .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
+    let cyber_session_ttl = NonZeroU32::new(facts.settings.cyber_session_block_ttl_seconds)
+        .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
     let selection_policy = AccountSelectionPolicy::new(
         rotation_strategy,
         NonZeroU32::new(facts.settings.max_concurrent_per_account)
@@ -447,6 +460,12 @@ async fn compile_runtime_snapshot(
             .with_account_directory(account_directory)
             .with_known_provider_catalogs(known_provider_catalogs)
             .with_min_codex_client_versions(min_client_versions)
+            .with_cyber_session_block_policy(
+                facts
+                    .settings
+                    .cyber_session_block_enabled
+                    .then_some(CyberSessionBlockPolicy::new(cyber_session_ttl)),
+            )
     })
 }
 
@@ -465,6 +484,7 @@ pub struct RuntimeSnapshot {
     account_directory: Arc<RuntimeAccountDirectory>,
     client_policies: Arc<BTreeMap<ClientApiKeyId, ClientPolicy>>,
     min_codex_client_versions: CodexClientMinVersions,
+    cyber_session_block_policy: Option<CyberSessionBlockPolicy>,
 }
 
 impl RuntimeSnapshot {
@@ -547,6 +567,7 @@ impl RuntimeSnapshot {
             account_directory: Arc::new(RuntimeAccountDirectory::default()),
             client_policies: Arc::new(client_policy_map),
             min_codex_client_versions: CodexClientMinVersions::default(),
+            cyber_session_block_policy: None,
         })
     }
 
@@ -566,6 +587,20 @@ impl RuntimeSnapshot {
     pub fn with_min_codex_client_versions(mut self, versions: CodexClientMinVersions) -> Self {
         self.min_codex_client_versions = versions;
         self
+    }
+
+    #[must_use]
+    pub const fn with_cyber_session_block_policy(
+        mut self,
+        policy: Option<CyberSessionBlockPolicy>,
+    ) -> Self {
+        self.cyber_session_block_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub const fn cyber_session_block_policy(&self) -> Option<CyberSessionBlockPolicy> {
+        self.cyber_session_block_policy
     }
 
     #[must_use]
@@ -838,6 +873,7 @@ impl RuntimeSnapshot {
                 .expect("constant request attempt limit is non-zero"),
             account_scope,
             candidates: Arc::from(candidates),
+            cyber_session_block_policy: self.cyber_session_block_policy,
         })
     }
 
@@ -879,6 +915,7 @@ impl RuntimeSnapshot {
                 .expect("constant request attempt limit is non-zero"),
             account_scope,
             candidates: Arc::from([candidate]),
+            cyber_session_block_policy: self.cyber_session_block_policy,
         })
     }
 }

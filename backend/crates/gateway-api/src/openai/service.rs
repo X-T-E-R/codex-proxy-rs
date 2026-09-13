@@ -101,6 +101,7 @@ impl OpenAiService {
                     client_ip: metadata.client_ip(),
                     user_agent: metadata.user_agent().map(str::to_owned),
                     previous_response_id,
+                    cyber_session: metadata.cyber_session().clone(),
                 },
             })
             .await
@@ -133,6 +134,7 @@ impl OpenAiService {
                     client_ip,
                     user_agent,
                     previous_response_id: None,
+                    cyber_session: Default::default(),
                 },
             })
             .await

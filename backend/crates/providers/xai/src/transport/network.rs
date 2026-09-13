@@ -20,8 +20,8 @@ use crate::credential::discovery::MAX_OAUTH_RESPONSE_BYTES;
 use crate::{
     GrokBillingRequest, GrokBillingTransport, GrokBillingTransportError,
     GrokBillingTransportErrorKind, GrokBillingTransportFuture, GrokBillingTransportResponse,
-    GrokInferenceClientCacheStatus, GrokInferenceDnsObservation, GrokInferenceDnsSource,
-    GrokInferenceRequest, GrokInferenceResponse, GrokInferenceTransport,
+    GrokInferenceChunkStream, GrokInferenceClientCacheStatus, GrokInferenceDnsObservation,
+    GrokInferenceDnsSource, GrokInferenceRequest, GrokInferenceResponse, GrokInferenceTransport,
     GrokInferenceTransportError, GrokInferenceTransportErrorKind, GrokInferenceTransportFuture,
     GrokInferenceTransportMetrics, GrokModelCatalogRequest, GrokModelCatalogTransport,
     GrokModelCatalogTransportError, GrokModelCatalogTransportErrorKind,
@@ -435,6 +435,12 @@ impl GrokInferenceTransport for ReqwestGrokInferenceTransport {
                 "status": response.status().as_u16(), "httpVersion": format!("{:?}", response.version()),
                 "headersMs": elapsed_millis(headers_started_at.elapsed()),
             }), response.headers().iter().map(|(name, value)| (name.as_str(), value.as_bytes())));
+            let is_json_response = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("application/json"));
             if !response.status().is_success() {
                 return Err(classify_inference_status(response, &trace)
                     .await
@@ -443,9 +449,9 @@ impl GrokInferenceTransport for ReqwestGrokInferenceTransport {
             let http_version = upstream_http_version(response.version());
             let status_code = response.status().as_u16();
             let request_id = upstream_request_id(&response);
-            let body = response
-                .bytes_stream()
-                .scan(0_usize, move |observed, chunk| {
+            let body: GrokInferenceChunkStream = Box::pin(response.bytes_stream().scan(
+                0_usize,
+                move |observed, chunk| {
                     let item = match chunk {
                         Ok(chunk)
                             if observed
@@ -465,7 +471,20 @@ impl GrokInferenceTransport for ReqwestGrokInferenceTransport {
                             .with_transport_metrics(transport_metrics)),
                     };
                     std::future::ready(Some(item))
-                });
+                },
+            ));
+            let body = if is_json_response {
+                inspect_success_json(
+                    body,
+                    status_code,
+                    http_version,
+                    request_id.clone(),
+                    transport_metrics,
+                )
+                .await?
+            } else {
+                body
+            };
             let body = async_stream::stream! {
                 let mut body = Box::pin(body);
                 let mut capture = StreamCapture::new(trace.clone(), StreamFormat::Sse);
@@ -486,6 +505,90 @@ impl GrokInferenceTransport for ReqwestGrokInferenceTransport {
             )
         })
     }
+}
+
+async fn inspect_success_json(
+    mut body: GrokInferenceChunkStream,
+    status_code: u16,
+    http_version: UpstreamHttpVersion,
+    request_id: Option<OpaqueUpstreamValue>,
+    transport_metrics: GrokInferenceTransportMetrics,
+) -> Result<GrokInferenceChunkStream, GrokInferenceTransportError> {
+    let mut buffered = Vec::new();
+    let mut buffered_bytes = 0_usize;
+    let mut json_candidate = None;
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk?;
+        buffered_bytes = buffered_bytes.saturating_add(chunk.len());
+        if json_candidate.is_none() {
+            json_candidate = chunk
+                .iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                .map(|byte| matches!(byte, b'{' | b'['));
+        }
+        buffered.push(chunk);
+        if json_candidate == Some(false) || buffered_bytes > MAX_ERROR_BODY_BYTES {
+            return Ok(replay_prefixed_stream(buffered, body));
+        }
+    }
+    let mut raw = Vec::with_capacity(buffered_bytes);
+    for chunk in buffered {
+        raw.extend_from_slice(&chunk);
+    }
+    if gateway_protocol::openai::is_cyber_policy_refusal_json(
+        std::str::from_utf8(&raw).unwrap_or_default(),
+    ) {
+        return Err(
+            success_json_cyber_policy_error(status_code, http_version, request_id, &raw)
+                .with_transport_metrics(transport_metrics),
+        );
+    }
+    Ok(Box::pin(futures::stream::once(async move {
+        Ok(bytes::Bytes::from(raw))
+    })))
+}
+
+fn replay_prefixed_stream(
+    buffered: Vec<bytes::Bytes>,
+    body: GrokInferenceChunkStream,
+) -> GrokInferenceChunkStream {
+    Box::pin(
+        futures::stream::iter(
+            buffered
+                .into_iter()
+                .map(Ok::<_, GrokInferenceTransportError>),
+        )
+        .chain(body),
+    )
+}
+
+fn success_json_cyber_policy_error(
+    status_code: u16,
+    http_version: UpstreamHttpVersion,
+    request_id: Option<OpaqueUpstreamValue>,
+    body: &[u8],
+) -> GrokInferenceTransportError {
+    let metadata = inference_error_metadata(body);
+    let mut error = GrokInferenceTransportError::new(
+        GrokInferenceTransportErrorKind::Protocol,
+        UpstreamSendState::Sent,
+    )
+    .with_status(status_code)
+    .with_response_facts(http_version, request_id)
+    .with_cyber_policy_refusal()
+    .redact_sensitive_context("upstream response body");
+    if let Some(message) = metadata.client_message.as_deref() {
+        error = error.with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            scrub_account_fingerprints(message),
+            metadata.code.clone(),
+            metadata.error_type.clone(),
+        ));
+    }
+    if let Some(code) = metadata.code.as_deref().and_then(normalize_failure_code) {
+        error = error.with_upstream_code(OpaqueUpstreamValue::new(code));
+    }
+    error
 }
 
 fn inference_client_pool_unavailable() -> GrokInferenceTransportError {
@@ -1107,6 +1210,11 @@ async fn classify_inference_status(
         .with_status(status_code)
         .with_response_facts(http_version, request_id)
         .redact_sensitive_context("upstream response body");
+    if gateway_protocol::openai::is_cyber_policy_refusal_json(
+        std::str::from_utf8(&body).unwrap_or_default(),
+    ) {
+        error = error.with_cyber_policy_refusal();
+    }
     let upstream_code = if status == StatusCode::BAD_REQUEST && reasoning_decode_failed(&metadata) {
         Some("reasoning_decode_failed".to_owned())
     } else {

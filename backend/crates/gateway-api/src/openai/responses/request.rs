@@ -5,6 +5,7 @@ use std::{borrow::Cow, fmt, net::IpAddr};
 use axum::http::HeaderMap;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload, ProviderSessionState};
+use gateway_core::policy::CyberSessionRequest;
 use gateway_protocol::openai::{
     X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER, X_OPENAI_MEMGEN_REQUEST_HEADER,
     is_transport_managed_request_header,
@@ -49,6 +50,7 @@ pub struct OpenAiRequestHeaders {
     memgen_request: Option<String>,
     subagent: Option<String>,
     passthrough_headers: Vec<Value>,
+    cyber_semantic_headers: Vec<String>,
 }
 
 impl OpenAiRequestHeaders {
@@ -75,6 +77,18 @@ impl OpenAiRequestHeaders {
             memgen_request: header_string(headers, X_OPENAI_MEMGEN_REQUEST_HEADER),
             subagent: header_string(headers, OPENAI_SUBAGENT_KEY),
             passthrough_headers: passthrough_headers(headers),
+            cyber_semantic_headers: [
+                "session-id",
+                "session_id",
+                "conversation_id",
+                "x-session-id",
+                "x-opencode-session",
+                "x-conversation-id",
+                "x-claude-code-session-id",
+            ]
+            .into_iter()
+            .filter_map(|name| header_string(headers, name))
+            .collect(),
         }
     }
 
@@ -209,6 +223,7 @@ pub struct ResponsesRequestMetadata {
     continuation: ContinuationIntent,
     client_ip: Option<IpAddr>,
     user_agent: Option<String>,
+    cyber_session: CyberSessionRequest,
 }
 
 impl ResponsesRequestMetadata {
@@ -246,6 +261,11 @@ impl ResponsesRequestMetadata {
     #[must_use]
     pub fn user_agent(&self) -> Option<&str> {
         self.user_agent.as_deref()
+    }
+
+    #[must_use]
+    pub const fn cyber_session(&self) -> &CyberSessionRequest {
+        &self.cyber_session
     }
 }
 
@@ -450,6 +470,14 @@ pub(super) fn decode_request_object(
         .and_then(Value::as_str)
         .map(|response_id| ContinuationIntent::PreviousResponseId(response_id.to_owned()))
         .unwrap_or(ContinuationIntent::None);
+    let cyber_session = CyberSessionRequest::from_responses(
+        &object,
+        request_headers.turn_metadata.as_deref(),
+        request_headers
+            .cyber_semantic_headers
+            .iter()
+            .map(String::as_str),
+    );
 
     request_headers.apply_subagent(&mut object);
     let frame_turn_metadata = match source {
@@ -473,6 +501,7 @@ pub(super) fn decode_request_object(
             continuation,
             client_ip: None,
             user_agent: None,
+            cyber_session,
         },
     })
 }

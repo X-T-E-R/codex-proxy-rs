@@ -59,6 +59,8 @@ fn update_body() -> Value {
         "overloadCooldownEnabled": true,
         "overloadCooldownThreshold": 2,
         "overloadCooldownSeconds": 120,
+        "cyberSessionBlockEnabled": true,
+        "cyberSessionBlockTtlSeconds": 600,
         "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)"
     })
 }
@@ -268,6 +270,8 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         overload_cooldown_enabled: true,
         overload_cooldown_threshold: 2,
         overload_cooldown_seconds: 120,
+        cyber_session_block_enabled: true,
+        cyber_session_block_ttl_seconds: 600,
         openai_user_agent: Some("Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)".to_owned()),
         updated_at: Utc
             .with_ymd_and_hms(2026, 8, 2, 10, 30, 0)
@@ -301,6 +305,8 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "overloadCooldownEnabled": true,
             "overloadCooldownThreshold": 2,
             "overloadCooldownSeconds": 120,
+            "cyberSessionBlockEnabled": true,
+            "cyberSessionBlockTtlSeconds": 600,
             "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)",
             "updatedAt": "2026-08-02T10:30:00Z"
         })
@@ -360,6 +366,11 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         overload_cooldown_threshold: u32::try_from(request.overload_cooldown_threshold)
             .expect("u32"),
         overload_cooldown_seconds: u32::try_from(request.overload_cooldown_seconds).expect("u32"),
+        cyber_session_block_enabled: request.cyber_session_block_enabled.expect("cyber enabled"),
+        cyber_session_block_ttl_seconds: u32::try_from(
+            request.cyber_session_block_ttl_seconds.expect("cyber TTL"),
+        )
+        .expect("u32"),
         openai_user_agent: request.openai_user_agent,
         updated_at: chrono::Utc::now(),
     };
@@ -437,11 +448,13 @@ async fn settings_post_should_replace_global_model_mappings() {
     assert_eq!(data["overloadCooldownEnabled"], true);
     assert_eq!(data["overloadCooldownThreshold"], 2);
     assert_eq!(data["overloadCooldownSeconds"], 120);
+    assert_eq!(data["cyberSessionBlockEnabled"], true);
+    assert_eq!(data["cyberSessionBlockTtlSeconds"], 600);
     assert_eq!(data["openaiUserAgent"], update_body()["openaiUserAgent"]);
 }
 
 #[tokio::test]
-async fn overload_cooldown_and_user_agent_settings_reject_invalid_values() {
+async fn runtime_settings_reject_invalid_values() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
     for (field, value) in [
@@ -449,6 +462,11 @@ async fn overload_cooldown_and_user_agent_settings_reject_invalid_values() {
         ("overloadCooldownSeconds", json!(0)),
         ("overloadCooldownThreshold", json!(u64::from(u32::MAX) + 1)),
         ("overloadCooldownSeconds", json!(u64::from(u32::MAX) + 1)),
+        ("cyberSessionBlockTtlSeconds", json!(0)),
+        (
+            "cyberSessionBlockTtlSeconds",
+            json!(u64::from(u32::MAX) + 1),
+        ),
         ("openaiUserAgent", json!("agent\r\nAuthorization: injected")),
         ("openaiUserAgent", json!(" ")),
         ("openaiUserAgent", json!("a".repeat(513))),
@@ -465,6 +483,58 @@ async fn overload_cooldown_and_user_agent_settings_reject_invalid_values() {
             .expect("response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
     }
+
+    let mut body = update_body();
+    body["cyberSessionBlockTtlSeconds"] = json!(1.5);
+    let response = app(fixture.state())
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn old_settings_client_omissions_preserve_each_cyber_field() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let mut body = update_body();
+    body.as_object_mut()
+        .expect("object")
+        .remove("cyberSessionBlockEnabled");
+    body.as_object_mut()
+        .expect("object")
+        .remove("cyberSessionBlockTtlSeconds");
+    let response = app(fixture.state())
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .expect("response");
+    let data = response_json(response).await["data"].clone();
+    assert_eq!(data["cyberSessionBlockEnabled"], false);
+    assert_eq!(data["cyberSessionBlockTtlSeconds"], 3600);
+
+    let mut body = update_body();
+    body.as_object_mut()
+        .expect("object")
+        .remove("cyberSessionBlockTtlSeconds");
+    let response = app(fixture.state())
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .expect("response");
+    let data = response_json(response).await["data"].clone();
+    assert_eq!(data["cyberSessionBlockEnabled"], true);
+    assert_eq!(data["cyberSessionBlockTtlSeconds"], 3600);
 }
 
 #[tokio::test]

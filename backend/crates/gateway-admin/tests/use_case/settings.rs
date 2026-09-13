@@ -68,6 +68,8 @@ fn valid_replace_command() -> ReplaceRuntimeSettings {
         overload_cooldown_enabled: false,
         overload_cooldown_threshold: 2,
         overload_cooldown_seconds: 120,
+        cyber_session_block_enabled: Some(false),
+        cyber_session_block_ttl_seconds: Some(3600),
         openai_user_agent: None,
     }
 }
@@ -139,6 +141,15 @@ async fn overload_cooldown_settings_reject_zero_even_when_disabled() {
     .await;
     replace_and_expect_invalid(ReplaceRuntimeSettings {
         overload_cooldown_seconds: 0,
+        ..valid_replace_command()
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn cyber_session_ttl_rejects_zero_even_when_disabled() {
+    replace_and_expect_invalid(ReplaceRuntimeSettings {
+        cyber_session_block_ttl_seconds: Some(0),
         ..valid_replace_command()
     })
     .await;

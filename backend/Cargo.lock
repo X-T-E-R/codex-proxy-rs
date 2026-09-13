@@ -1486,6 +1486,7 @@ dependencies = [
  "bytes",
  "futures",
  "futures-timer",
+ "hex",
  "semver",
  "serde",
  "serde_json",

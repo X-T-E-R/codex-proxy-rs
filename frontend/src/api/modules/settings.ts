@@ -22,6 +22,8 @@ export interface RuntimeSettings {
   overloadCooldownEnabled: boolean
   overloadCooldownThreshold: number
   overloadCooldownSeconds: number
+  cyberSessionBlockEnabled: boolean
+  cyberSessionBlockTtlSeconds: number
   openaiUserAgent: string | null
   updatedAt: string
 }
