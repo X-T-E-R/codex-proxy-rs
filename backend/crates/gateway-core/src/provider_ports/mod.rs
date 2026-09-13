@@ -884,7 +884,7 @@ pub trait ProviderRuntimePolicyPort: Send + Sync {
     }
 }
 
-/// 一次 OpenAI 请求使用的正文地理画像。
+/// 一次 OpenAI 请求使用的环境与设备 metadata 覆盖策略。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenAiRequestBodyOverride {
     enabled: bool,

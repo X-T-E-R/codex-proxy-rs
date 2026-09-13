@@ -3,13 +3,16 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use bytes::Bytes;
 use chrono::{DateTime, TimeZone as _, Utc};
-use futures::{StreamExt, future::BoxFuture};
+use futures::{SinkExt, StreamExt, future::BoxFuture};
 use gateway_admin::model::accounts::AccountRecord;
 use gateway_admin::model::observability::{
-    CurrencyCost, DesktopReleaseStatus, ProviderBillingInput,
+    CurrencyCost, DashboardUserAgentSource, DesktopReleaseStatus, ProviderBillingInput,
 };
 use gateway_admin::model::provider_credentials::{
     AuthorizationMutationTarget, AuthorizationOwnerBinding, CompleteAuthorization,
@@ -26,7 +29,8 @@ use gateway_core::account::{
 };
 use gateway_core::engine::provider::ProviderRequest;
 use gateway_core::engine::{
-    AccountAttemptContext, AttemptContext, ModelRequestId, RequestAttemptContext,
+    AccountAttemptContext, AttemptContext, ModelRequestId, ProviderAccountStateOwner,
+    RequestAttemptContext,
 };
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::operation::{
@@ -55,6 +59,8 @@ use provider_openai::transport::profile::APPCAST_POLL_INTERVAL;
 use secrecy::SecretString;
 use serde_json::{Map, Value, json};
 use tempfile::TempDir;
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -63,6 +69,7 @@ use crate::support::{
     MemoryAccountStore, MemorySessionAffinity, MemorySessionExclusions, TestLeaseCoordinator,
     account_policy, profile, secret,
 };
+use crate::transport::accept_codex_test_websocket_with;
 
 const COMPLETED_SESSION_SSE: &str = concat!(
     "event: response.completed\n",
@@ -397,23 +404,68 @@ async fn runtime_policy_worker_hot_updates_the_initialized_provider_request_body
                     "role": "user",
                     "content": [{
                         "type": "input_text",
-                        "text": "<environment_context>\n  <cwd>C:/workspace</cwd>\n  <current_date>2000-01-01</current_date>\n  <timezone>Etc/UTC</timezone>\n</environment_context>"
+                        "text": "<environment_context>\n  <cwd>C:/workspace</cwd>\n  <current_date>2000-01-01</current_date>\n  <timezone>Etc/UTC</timezone>\n</environment_context>",
+                        "hostname": "input-must-stay"
                     }]
                 }]),
             ),
             ("tools".to_owned(), json!([{"type": "web_search"}])),
+            (
+                "turnMetadata".to_owned(),
+                json!(r#"{"session_id":"session","hostname":"device","os":"macos","arch":"arm64","unknown":"keep"}"#),
+            ),
+            (
+                "turn_metadata".to_owned(),
+                json!(r#"{"session_id":"plain","unknown":"untouched"}"#),
+            ),
+            (
+                "x-codex-turn-metadata".to_owned(),
+                json!(r#"{"root_turn_id":"root","device_id":"device","unknown":"keep"}"#),
+            ),
+            (
+                "client_metadata".to_owned(),
+                json!({
+                    "session_id": "session",
+                    "hostname": "device",
+                    "os": "macos",
+                    "arch": "arm64",
+                    "unknown": "keep",
+                    "x-codex-turn-metadata": r#"{"thread_id":"thread","terminal":"iTerm.app","unknown":"keep"}"#,
+                    "turnMetadata": r#"{"parent_turn_id":"parent","os_type":"macos","unknown":"keep"}"#,
+                    "turn_metadata": r#"{"session_id":"plain","unknown":"untouched"}"#
+                }),
+            ),
             ("future".to_owned(), json!({"preserved": true})),
         ]),
     )
     .expect("OpenAI payload")
-    .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))]));
+    .with_context(Map::from_iter([
+        ("use_websocket".to_owned(), json!(false)),
+        (
+            "turn_metadata".to_owned(),
+            json!(r#"{"turn_id":"turn","machine_id":"device","unknown":"keep"}"#),
+        ),
+        (
+            "opaque_request_headers".to_owned(),
+            json!([
+                [
+                    "x-codex-turn-metadata",
+                    STANDARD.encode(
+                        r#"{"root_turn_id":"root","hostname":"工作站","unknown":"业务"}"#
+                            .as_bytes()
+                    )
+                ],
+                ["x-codex-turn-metadata", STANDARD.encode(b"future-opaque-shape")]
+            ]),
+        ),
+    ]));
     let operation = Operation::Generate(GenerateRequest::from_protocol_payload(payload));
     let before = Utc::now();
     let mut stream = bundle
         .core_provider()
         .execute(
             initialized_provider_request(operation, account_id),
-            initialized_attempt_context("req_request_locale_policy", account_id),
+            initialized_attempt_context_with_state_owner("req_request_locale_policy", account_id),
         )
         .await
         .expect("prepare provider stream");
@@ -447,6 +499,72 @@ async fn runtime_policy_worker_hot_updates_the_initialized_provider_request_body
     assert_eq!(body["tools"][0]["user_location"]["country"], "JP");
     assert_eq!(body["tools"][0]["user_location"]["timezone"], "Asia/Tokyo");
     assert_eq!(body["future"], json!({"preserved": true}));
+    assert_eq!(
+        body["input"][0]["content"][0]["hostname"],
+        "input-must-stay"
+    );
+    assert_eq!(body["client_metadata"]["session_id"], "session");
+    assert_eq!(body["client_metadata"]["unknown"], "keep");
+    for key in ["hostname", "os", "arch"] {
+        assert!(body["client_metadata"].get(key).is_none());
+    }
+    let body_turn_metadata_raw = body["turnMetadata"].as_str().expect("turn metadata");
+    let body_turn_metadata: Value =
+        serde_json::from_str(body_turn_metadata_raw).expect("turn metadata JSON");
+    assert_eq!(body_turn_metadata["session_id"], "session");
+    assert_eq!(body_turn_metadata["unknown"], "keep");
+    for key in ["hostname", "os", "arch"] {
+        assert!(body_turn_metadata.get(key).is_none());
+    }
+    assert!(
+        body_turn_metadata_raw.find("session_id") < body_turn_metadata_raw.find("unknown"),
+        "remaining turn metadata order must stay stable"
+    );
+    assert_eq!(
+        body["turn_metadata"],
+        r#"{"session_id":"plain","unknown":"untouched"}"#
+    );
+    assert_eq!(
+        body["client_metadata"]["turn_metadata"],
+        r#"{"session_id":"plain","unknown":"untouched"}"#
+    );
+    for (value, preserved_key, removed_key) in [
+        (&body["x-codex-turn-metadata"], "root_turn_id", "device_id"),
+        (
+            &body["client_metadata"]["turnMetadata"],
+            "parent_turn_id",
+            "os_type",
+        ),
+        (
+            &body["client_metadata"]["x-codex-turn-metadata"],
+            "thread_id",
+            "terminal",
+        ),
+    ] {
+        let metadata: Value = serde_json::from_str(
+            value
+                .as_str()
+                .expect("recognized turn metadata representation"),
+        )
+        .expect("recognized turn metadata JSON");
+        assert!(metadata.get(preserved_key).is_some());
+        assert_eq!(metadata["unknown"], "keep");
+        assert!(metadata.get(removed_key).is_none());
+    }
+    let header_values = request
+        .headers
+        .get_all("x-codex-turn-metadata")
+        .iter()
+        .map(|value| value.to_str().expect("ASCII turn metadata header"))
+        .collect::<Vec<_>>();
+    assert_eq!(header_values.len(), 2);
+    let header_turn_metadata: Value =
+        serde_json::from_str(header_values[0]).expect("header turn metadata JSON");
+    assert!(header_values[0].is_ascii());
+    assert_eq!(header_turn_metadata["root_turn_id"], "root");
+    assert_eq!(header_turn_metadata["unknown"], "业务");
+    assert!(header_turn_metadata.get("hostname").is_none());
+    assert_eq!(header_values[1], "future-opaque-shape");
 
     let search = Operation::Search(StandaloneSearchRequest::from_raw_json(
         RawJsonPayload::new(
@@ -455,7 +573,11 @@ async fn runtime_policy_worker_hot_updates_the_initialized_provider_request_body
                 br#"{"id":"search-locale","settings":{"search_context_size":"high"},"future":{"preserved":true}}"#,
             ),
         )
-        .expect("search payload"),
+        .expect("search payload")
+        .with_context(Map::from_iter([(
+            "turn_metadata".to_owned(),
+            json!(r#"{"session_id":"search-session","installation_id":"client-installation","hostname":"device","platform":"darwin","unknown":"keep"}"#),
+        )])),
     ));
     let mut stream = bundle
         .core_provider()
@@ -479,6 +601,199 @@ async fn runtime_policy_worker_hot_updates_the_initialized_provider_request_body
     assert_eq!(body["settings"]["user_location"]["timezone"], "Asia/Tokyo");
     assert_eq!(body["settings"]["search_context_size"], "high");
     assert_eq!(body["future"], json!({"preserved": true}));
+    let search_turn_metadata: Value = serde_json::from_str(
+        search_request.headers["x-codex-turn-metadata"]
+            .to_str()
+            .expect("Search turn metadata header"),
+    )
+    .expect("Search turn metadata JSON");
+    assert_eq!(search_turn_metadata["session_id"], "search-session");
+    assert_eq!(search_turn_metadata["unknown"], "keep");
+    assert_ne!(
+        search_turn_metadata["installation_id"],
+        "client-installation"
+    );
+    assert!(search_turn_metadata.get("hostname").is_none());
+    assert!(search_turn_metadata.get("platform").is_none());
+}
+
+#[tokio::test]
+async fn enabled_runtime_policy_sanitizes_websocket_header_and_client_metadata_projection() {
+    let account_id = "acct_device_metadata_ws";
+    let store = Arc::new(MemoryAccountStore::default());
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: account_id.to_owned(),
+            name: account_id.to_owned(),
+            secret: secret("device-metadata-ws-token"),
+            verified_account: profile("device-metadata-ws-account"),
+            next_refresh_at: Some(Utc::now() + chrono::Duration::minutes(30)),
+            enabled: true,
+        })
+        .await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WebSocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("WebSocket listener address")
+    );
+    let captured_headers = Arc::new(Mutex::new(Vec::<String>::new()));
+    let server_headers = Arc::clone(&captured_headers);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept WebSocket");
+        let mut socket = accept_codex_test_websocket_with(stream, move |request, response| {
+            *server_headers.lock().expect("captured WebSocket headers") = request
+                .headers()
+                .get_all("x-codex-turn-metadata")
+                .iter()
+                .map(|value| {
+                    value
+                        .to_str()
+                        .expect("ASCII WebSocket turn metadata")
+                        .to_owned()
+                })
+                .collect();
+            response.headers_mut().insert(
+                "sec-websocket-extensions",
+                "permessage-deflate"
+                    .parse()
+                    .expect("WebSocket extension header"),
+            );
+        })
+        .await;
+        let message = socket
+            .next()
+            .await
+            .expect("WebSocket request")
+            .expect("valid WebSocket request");
+        let body: Value =
+            serde_json::from_str(message.to_text().expect("text frame")).expect("request JSON");
+        socket
+            .send(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_device_metadata_ws",
+                        "model": "gpt-5.4",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send WebSocket completion");
+        body
+    });
+
+    let runtime_policy = Arc::new(MutableRequestBodyRuntimePolicy(Mutex::new(
+        OpenAiRequestBodyOverride::try_new(true, "America/Los_Angeles", "US")
+            .expect("request override"),
+    )));
+    let mut config = valid_config();
+    config.config.api.base_url = base_url;
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with_runtime_policy(
+            store,
+            Arc::new(TestOAuthPending::default()),
+            Arc::new(TestCatalogCache::default()),
+            Arc::new(TestWsPoolPolicy::default()),
+            runtime_policy,
+        ),
+    )
+    .await
+    .expect("OpenAI bundle");
+    let turn_metadata = r#"{"session_id":"session","thread_id":"thread","window_id":"window","turn_id":"turn","parent_thread_id":"parent-thread","parent_turn_id":"parent-turn","root_turn_id":"root-turn","prompt_cache_key":"cache","trace":"trace","hostname":"device","target_os":"macos","terminal":"iTerm.app","unknown":"keep"}"#;
+    let payload = ProtocolPayload::json_object(
+        "openai",
+        json!({
+            "model": "gpt-5.4",
+            "input": [{"role": "user", "content": "hello", "device_id": "input-must-stay"}],
+            "turnMetadata": turn_metadata,
+            "client_metadata": {
+                "session_id": "session",
+                "hostname": "device",
+                "osVersion": "15.6",
+                "arch": "arm64",
+                "unknown": "keep",
+                "x-codex-turn-metadata": turn_metadata
+            }
+        })
+        .as_object()
+        .expect("request object")
+        .clone(),
+    )
+    .expect("OpenAI payload")
+    .with_context(Map::from_iter([
+        ("use_websocket".to_owned(), json!(true)),
+        ("turn_metadata".to_owned(), json!(turn_metadata)),
+    ]));
+    let mut stream = bundle
+        .core_provider()
+        .execute(
+            initialized_provider_request(
+                Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                account_id,
+            ),
+            initialized_attempt_context_with_state_owner("req_device_metadata_ws", account_id),
+        )
+        .await
+        .expect("prepare WebSocket provider stream");
+    while let Some(event) = stream.next().await {
+        event.expect("WebSocket provider response");
+    }
+
+    let body = server.await.expect("WebSocket server");
+    assert_eq!(body["type"], "response.create");
+    assert_eq!(body["input"][0]["device_id"], "input-must-stay");
+    assert_eq!(body["client_metadata"]["session_id"], "session");
+    assert_eq!(body["client_metadata"]["unknown"], "keep");
+    for key in ["hostname", "osVersion", "arch"] {
+        assert!(body["client_metadata"].get(key).is_none());
+    }
+    for value in [
+        body["turnMetadata"].as_str().expect("body turn metadata"),
+        body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .expect("WS client metadata turn metadata"),
+    ] {
+        assert!(value.is_ascii());
+        let metadata: Value = serde_json::from_str(value).expect("turn metadata JSON");
+        assert_eq!(metadata["session_id"], "session");
+        assert_eq!(metadata["thread_id"], "thread");
+        assert_eq!(metadata["window_id"], "window");
+        assert_eq!(metadata["turn_id"], "turn");
+        assert_eq!(metadata["parent_thread_id"], "parent-thread");
+        assert_eq!(metadata["parent_turn_id"], "parent-turn");
+        assert_eq!(metadata["root_turn_id"], "root-turn");
+        assert_eq!(metadata["prompt_cache_key"], "cache");
+        assert_eq!(metadata["trace"], "trace");
+        assert_eq!(metadata["unknown"], "keep");
+        for key in ["hostname", "target_os", "terminal"] {
+            assert!(metadata.get(key).is_none());
+        }
+    }
+    let headers = captured_headers.lock().expect("captured WebSocket headers");
+    assert_eq!(headers.len(), 1);
+    assert!(headers[0].is_ascii());
+    let metadata: Value = serde_json::from_str(&headers[0]).expect("handshake metadata JSON");
+    assert_eq!(metadata["session_id"], "session");
+    assert_eq!(metadata["thread_id"], "thread");
+    assert_eq!(metadata["window_id"], "window");
+    assert_eq!(metadata["turn_id"], "turn");
+    assert_eq!(metadata["parent_thread_id"], "parent-thread");
+    assert_eq!(metadata["parent_turn_id"], "parent-turn");
+    assert_eq!(metadata["root_turn_id"], "root-turn");
+    assert_eq!(metadata["prompt_cache_key"], "cache");
+    assert_eq!(metadata["trace"], "trace");
+    assert_eq!(metadata["unknown"], "keep");
+    assert!(metadata.get("hostname").is_none());
+    assert!(metadata.get("target_os").is_none());
+    assert!(metadata.get("terminal").is_none());
 }
 
 #[tokio::test]
@@ -572,6 +887,10 @@ async fn openai_admin_provider_exposes_live_wire_profile_and_validated_billing()
     assert_eq!(profile.target.os_type, "Mac OS");
     assert_eq!(profile.target.os_version, "15.5.0");
     assert_eq!(
+        profile.user_agent_source,
+        DashboardUserAgentSource::LaunchProfile
+    );
+    assert_eq!(
         profile.user_agent,
         "Codex Desktop/0.102.0 (Mac OS 15.5.0; arm64) xterm-256color (Codex Desktop; 1.2026.190)"
     );
@@ -624,6 +943,39 @@ async fn openai_admin_provider_exposes_live_wire_profile_and_validated_billing()
     assert_eq!(fast_billing.multiplier_percent, 170);
     assert_eq!(fast_billing.standard_amount.amount.as_str(), "2.5");
     assert_eq!(fast_billing.total_amount.amount.as_str(), "4.25");
+}
+
+#[tokio::test]
+async fn openai_dashboard_profile_reports_effective_overridden_user_agent_and_launch_baseline() {
+    let config = valid_config();
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with_runtime_policy(
+            Arc::new(MemoryAccountStore::default()),
+            Arc::new(TestOAuthPending::default()),
+            Arc::new(TestCatalogCache::default()),
+            Arc::new(TestWsPoolPolicy::default()),
+            Arc::new(UserAgentRuntimePolicy),
+        ),
+    )
+    .await
+    .expect("OpenAI bundle");
+
+    let profile = bundle
+        .admin_provider()
+        .dashboard_wire_profile()
+        .expect("wire profile");
+    assert_eq!(
+        profile.user_agent,
+        "Codex Desktop/0.102.0 (Windows 10.0.26100; x86_64)"
+    );
+    assert_eq!(
+        profile.user_agent_source,
+        DashboardUserAgentSource::AdminOverride
+    );
+    assert_eq!(profile.target.os_type, "Mac OS");
+    assert_eq!(profile.target.os_version, "15.5.0");
+    assert_eq!(profile.target.arch, "arm64");
 }
 
 #[tokio::test]
@@ -1552,6 +1904,29 @@ fn initialized_attempt_context(request_id: &str, account_id: &str) -> AttemptCon
     )
 }
 
+fn initialized_attempt_context_with_state_owner(
+    request_id: &str,
+    account_id: &str,
+) -> AttemptContext {
+    let owner = ProviderAccountStateOwner::new(
+        ProviderKind::new("openai").expect("provider"),
+        ProviderAccountId::new(account_id).expect("account id"),
+    );
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new(request_id).expect("request id"),
+            ClientApiKeyId::new("key_openai_initialized").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, Some(owner))
+            .with_account_scope(initialized_account_scope(account_id)),
+        None,
+        CancellationToken::new(),
+    )
+}
+
 fn initialized_account_scope(account_id: &str) -> Arc<FrozenAccountScope> {
     let provider = ProviderKind::new("openai").expect("provider");
     Arc::new(FrozenAccountScope::new(
@@ -1877,6 +2252,31 @@ impl ProviderRuntimePolicyPort for TestRuntimePolicy {
                 Duration::from_secs(300),
                 NonZeroU32::new(4).expect("nonzero concurrency"),
             )
+        })
+    }
+}
+
+struct UserAgentRuntimePolicy;
+
+impl ProviderRuntimePolicyPort for UserAgentRuntimePolicy {
+    fn load_refresh_policy(
+        &self,
+    ) -> BoxFuture<'_, Result<ProviderRefreshPolicy, ProviderStoreError>> {
+        Box::pin(async {
+            ProviderRefreshPolicy::try_new(
+                Duration::from_secs(300),
+                NonZeroU32::new(4).expect("nonzero concurrency"),
+            )
+        })
+    }
+
+    fn load_user_agent_override(
+        &self,
+    ) -> BoxFuture<'_, Result<Option<String>, ProviderStoreError>> {
+        Box::pin(async {
+            Ok(Some(
+                "Codex Desktop/{codex_version} (Windows 10.0.26100; x86_64)".to_owned(),
+            ))
         })
     }
 }

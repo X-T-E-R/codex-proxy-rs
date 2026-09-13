@@ -1,4 +1,4 @@
-//! OpenAI 请求正文中的时区与搜索位置覆盖。
+//! OpenAI 请求环境、搜索位置与设备 metadata 覆盖策略。
 
 use std::sync::{Arc, RwLock};
 

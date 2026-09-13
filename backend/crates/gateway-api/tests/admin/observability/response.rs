@@ -39,6 +39,7 @@ fn dashboard_wire_profiles_should_keep_provider_specific_attributes() {
             terminal: "headless".to_owned(),
         },
         user_agent: "grok-shell/0.2.106 (linux; x86_64)".to_owned(),
+        user_agent_source: "launch_profile".to_owned(),
         attributes: vec![DashboardWireAttributeView {
             label: "客户端标识".to_owned(),
             value: "grok-shell".to_owned(),
@@ -50,6 +51,7 @@ fn dashboard_wire_profiles_should_keep_provider_specific_attributes() {
 
     assert_eq!(value["provider"], "xai");
     assert_eq!(value["version"], "0.2.106");
+    assert_eq!(value["userAgentSource"], "launch_profile");
     assert_eq!(value["attributes"][0]["label"], "客户端标识");
     assert!(value.get("release").is_none());
     assert!(value.get("verifiedAt").is_none());

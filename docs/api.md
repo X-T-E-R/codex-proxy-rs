@@ -129,8 +129,8 @@ Codex PAT 验证服务不可用和身份响应无效分别通过 `50301`、`5020
 ## 3. OpenAI 数据面与模型目录
 
 除下述 Responses 入站解压保护外，Responses、Images 和 standalone Search HTTP body、
-WebSocket message 和 frame 不设置网关私有长度上限；协议可接受性由上游决定。OpenAI Responses
-和 standalone Search 的请求正文在启用正文地域覆盖时，按下文只修改指定的环境与位置字段；其他字段
+WebSocket message 和 frame 不设置网关私有长度上限；协议可接受性由上游决定。启用 OpenAI 环境与设备
+metadata 覆盖时，Responses 和 standalone Search 按下文只修改指定的环境、位置与 metadata 字段；其他字段
 仍按原协议处理。
 
 | 方法 | 路由 | 说明 |
@@ -190,17 +190,17 @@ Codex 专用目录中的 `context_window` 与 `max_context_window` 分别表示�
 覆盖这些值。Codex 客户端配置 `model_context_window` 后，按该值与非空 `max_context_window` 的较小值
 使用窗口；上限为空时保留客户端本地值。xAI 目录只声明一个窗口，其 Provider 继续以该值作为客户端覆盖上限。
 
-正文地域覆盖关闭时，OpenAI 路径保留客户端 Responses wire 语义：解析后的请求结构中未知字段、字段值和顺序保持不变（受控模型
+环境与设备 metadata 覆盖关闭时，OpenAI 路径保留客户端 Responses wire 语义：解析后的请求结构中未知字段、字段值和顺序保持不变（受控模型
 映射除外），HTTP SSE 与 WebSocket 的上游业务事件字节原样转发，response ID 按 opaque 值处理而不
 假设 UUID 或固定长度；OpenAI 上游错误 envelope 和允许下发的 opaque header 值也不由 canonical
 观测结果重写。
 
-启用正文地域覆盖时，正文只在下文列出的目标字段上例外更新；覆盖关闭或目标字段没有变化时，
+启用环境与设备 metadata 覆盖时，请求只在下文列出的目标字段上例外更新；覆盖关闭或目标字段没有变化时，
 Responses 保留解析后的请求结构，但不保证输入 JSON 的空白与转义字节；standalone Search 保留原始正文 bytes。
 
 Images 请求不读取或重建 JSON，也不要求或映射模型字段；它固定使用 OpenAI Provider，
 只在原始字节之外完成账号选择、鉴权头替换和端点路由，成功与失败响应正文同样保持原始字节。
-`/v1/alpha/search` 使用相同的 OpenAI Provider 原生端点边界：body 中的 `model` 不映射；正文覆盖
+`/v1/alpha/search` 使用相同的 OpenAI Provider 原生端点边界：body 中的 `model` 不映射；地域覆盖
 关闭时不解析。启用时，standalone Search 只处理 `settings.user_location`；Responses 只处理已声明且受支持的
 `web_search` location 对象，字段规则见 [运行设置](#8-运行设置)。`x-codex-turn-metadata` 在移除客户端账号身份并按
 当前 lease 重写 installation ID 后转发；上游账号 Authorization、Cookie、account ID、originator 和
@@ -706,11 +706,11 @@ Core/Desktop 版本，无需每次发版修改模板。例如保持 Windows 平�
 设置持久化后约 5 秒内用于新 HTTP 请求和 WebSocket 握手，重启后也会在对外服务前恢复。
 已开始的请求继续完成；依赖旧 WebSocket 连接的续接可能因画像变化而失效。
 
-OpenAI 请求正文地域覆盖由以下字段控制，管理端运行设置页提供相同的编辑项：
+OpenAI 环境与设备 metadata 覆盖由以下字段控制，管理端运行设置页提供相同的编辑项：
 
 | 字段 | 类型 | 默认值 | 含义 |
 | --- | --- | --- | --- |
-| `openaiRequestBodyOverrideEnabled` | `boolean` | `true` | 是否按配置更新 OpenAI Responses 与 standalone Search 正文中的地域字段 |
+| `openaiRequestBodyOverrideEnabled` | `boolean` | `true` | 是否更新 OpenAI 环境与搜索地域，并移除明确 metadata 容器中的设备字段 |
 | `openaiRequestTimezone` | `string` | `America/Los_Angeles` | 有效的 IANA 时区；用于环境日期和搜索位置时区，支持夏令时 |
 | `openaiSearchCountry` | `string` | `US` | 两位 ASCII 字母国家代码；保存和发送时统一为大写 |
 
@@ -721,12 +721,30 @@ OpenAI 请求正文地域覆盖由以下字段控制，管理端运行设置页�
 工具输出、其他历史消息和其他环境块不改写；没有符合条件的环境块时不注入，也不通过
 `previous_response_id` 补写历史。不添加搜索工具。
 
-启用正文地域覆盖时，standalone Search 的 `settings.user_location` 与 Responses 中已声明且受支持的
+启用覆盖时，standalone Search 的 `settings.user_location` 与 Responses 中已声明且受支持的
 `web_search` 工具的 `user_location` 都设置为近似位置对象：`type` 为 `"approximate"`，并写入配置的
 `country` 与 `timezone`。覆盖会删除冲突的 `city` / `region`，保留其他无关字段，不添加搜索工具。
 standalone Search 的 `settings` 或 `user_location` 缺失、为 `null` 时创建所需对象；已有字段不是对象时
 保持不变。关闭覆盖或目标值没有变化时，standalone Search 整份正文保持原始 bytes；Responses 保留解析后的
 请求结构，但不保证输入 JSON 的空白与转义字节。
+
+同一开关还在账号 lease 选定后清理有限的设备 metadata。只处理 `client_metadata` 对象的直接键，以及
+正文顶层或 `client_metadata` 内 `turnMetadata`、`turn_metadata`、`x-codex-turn-metadata` 的 JSON object
+字符串；连接上下文、HTTP header、WebSocket 投影和 standalone Search 使用的 turn metadata 采用同一规则。
+精确移除的键为：
+
+```text
+hostname, host_name, hostName, machine_id, machineId, device_id, deviceId,
+hardware_id, hardwareId, os, os_name, osName, os_type, osType, os_version,
+osVersion, platform, arch, architecture, cpu_arch, cpuArch, target_os, targetOs,
+target_arch, targetArch, terminal, terminal_type, terminalType, shell
+```
+
+清理不递归，不扫描普通 `metadata`、`input`、`instructions`、`tools`、输出、opaque 或 encrypted 内容；
+session、thread、window、turn、parent/root、`prompt_cache_key`、trace 和未知业务字段保持原值与相对顺序。
+installation ID 仍按当前 lease 改写，账号身份与账号绑定状态仍按原 scoping 合同处理。非法 JSON、非 object
+turn metadata 和非 object `client_metadata` 保持原有兼容行为；开关关闭只停用地域与设备覆盖，不停用账号
+及 installation 身份隔离。
 
 Windows 离线包接口固定解析 Microsoft Store Product ID `9PLM9XGG6VKS` 的 Retail 包，不接受调用方提供
 产品 ID、上游地址、ring 或文件名。后端只返回通过包名、架构、Microsoft CDN host/path、scheme 和失效
@@ -890,6 +908,10 @@ Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`
 `usageWindow` 复用账号额度窗口合同，缺失额度事实时为 `null`；窗口标签、百分比、触顶状态、重置时间
 和本地用量由 Provider/Admin 投影。前端不得从套餐缺失推断免费套餐，也不得从显示时舍入的百分比推断
 触顶。滚动窗口使用相应时间范围的本地用量，独立于 Dashboard 的今日统计范围。
+
+Dashboard 的 `wireProfiles[]` 中，`userAgent` 是 Provider 当前发送的最终有效值，`userAgentSource` 为
+`launch_profile` 或 `admin_override`；`target` 只表示启动平台基线。管理端覆盖任意自定义 User-Agent 时，
+服务端不从字符串反推操作系统，因此 `target` 可以与 User-Agent 文本不同。
 
 OpenAI 的 `serviceTier` 只接受上游响应生命周期事件确认的实际 `response.service_tier`；请求里的
 期望档位只保留在 request summary，不能冒充响应事实。计费展示把 `priority`/`fast` 映射为 `Fast`，

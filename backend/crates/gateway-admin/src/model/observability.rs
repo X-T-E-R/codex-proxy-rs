@@ -911,13 +911,30 @@ pub struct HealthTimeline {
     pub points: Vec<HealthTimelinePoint>,
 }
 
-/// Dashboard 请求画像的目标平台。
+/// Dashboard 请求画像启动时采用的平台基线。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardWireTarget {
     pub os_type: String,
     pub os_version: String,
     pub arch: String,
     pub terminal: String,
+}
+
+/// 最终有效 User-Agent 的配置来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardUserAgentSource {
+    LaunchProfile,
+    AdminOverride,
+}
+
+impl DashboardUserAgentSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LaunchProfile => "launch_profile",
+            Self::AdminOverride => "admin_override",
+        }
+    }
 }
 
 /// Desktop 发布检查状态。
@@ -956,6 +973,7 @@ pub struct DashboardWireProfile {
     pub build: Option<String>,
     pub target: DashboardWireTarget,
     pub user_agent: String,
+    pub user_agent_source: DashboardUserAgentSource,
     pub attributes: Vec<DashboardWireAttribute>,
     pub verified_at: Option<DateTime<Utc>>,
     pub release: Option<DashboardDesktopRelease>,

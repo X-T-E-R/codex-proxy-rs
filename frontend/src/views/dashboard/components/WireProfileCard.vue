@@ -21,6 +21,7 @@ interface WireProfile {
     terminal: string
   }
   userAgent: string
+  userAgentSource?: 'launch_profile' | 'admin_override'
   attributes: Array<{ label: string, value: string }>
   verifiedAt?: string | null
   release?: {
@@ -145,6 +146,14 @@ const authProtocol = computed(() => {
   return toPascalCase(value)
 })
 
+const userAgentSourceLabel = computed(() => {
+  if (profile.value?.userAgentSource === 'admin_override')
+    return '管理端覆盖'
+  if (profile.value?.userAgentSource === 'launch_profile')
+    return '启动画像'
+  return '来源未提供'
+})
+
 const runtimeEnvironment = computed(() => {
   const target = profile.value?.target
   if (!target)
@@ -260,7 +269,7 @@ function providerLabel(provider: string) {
             <div class="min-w-0">
               <dt class="flex items-center gap-1.5 text-[10px] leading-none font-bold text-cp-text-quaternary">
                 <Monitor class="size-3.25 text-cp-text-tertiary" />
-                {{ profile.provider === 'openai' ? '模拟运行环境' : '运行环境' }}
+                启动平台基线
               </dt>
               <dd
                 class="mt-2 mb-0 truncate font-mono text-cp-lg leading-none font-bold tabular-nums text-cp-text"
@@ -287,11 +296,26 @@ function providerLabel(provider: string) {
             </div>
           </dl>
 
+          <div class="min-w-0 rounded-cp bg-cp-fill-quaternary px-3.5 py-3">
+            <div class="flex flex-wrap items-center justify-between gap-2 text-[10px] leading-none font-bold text-cp-text-quaternary">
+              <span>最终有效 User-Agent</span>
+              <span class="rounded-full bg-cp-fill-tertiary px-2 py-1 text-cp-text-secondary">
+                {{ userAgentSourceLabel }}
+              </span>
+            </div>
+            <code
+              class="mt-2 block cursor-text select-all break-all font-mono text-cp-xs leading-[1.45] text-cp-text"
+              :title="profile.userAgent"
+            >
+              {{ profile.userAgent }}
+            </code>
+          </div>
+
           <footer
             v-if="verifiedLabel || checkedLabel"
             class="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 text-[10px] leading-none font-emphasis text-cp-text-quaternary"
           >
-            <span v-if="verifiedLabel" :title="profile.userAgent">{{ verifiedLabel }}</span>
+            <span v-if="verifiedLabel">{{ verifiedLabel }}</span>
             <span v-if="checkedLabel">{{ checkedLabel }}</span>
           </footer>
         </section>

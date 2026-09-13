@@ -3564,6 +3564,9 @@ async fn same_account_scope_preserves_future_protocol_shapes() {
             "x-codex-turn-metadata": false,
             "client_metadata": {
                 "token": "client-metadata-extension",
+                "hostname": "device-must-stay-when-disabled",
+                "os": "macos",
+                "arch": "arm64",
                 "x-codex-turn-state": {"future": "metadata"},
                 "x-codex-turn-metadata": [1, 2, 3],
                 "turnMetadata": {"opaque": true}
@@ -3589,6 +3592,12 @@ async fn same_account_scope_preserves_future_protocol_shapes() {
         body.pointer("/client_metadata/token"),
         Some(&json!("client-metadata-extension"))
     );
+    assert_eq!(
+        body.pointer("/client_metadata/hostname"),
+        Some(&json!("device-must-stay-when-disabled"))
+    );
+    assert_eq!(body.pointer("/client_metadata/os"), Some(&json!("macos")));
+    assert_eq!(body.pointer("/client_metadata/arch"), Some(&json!("arm64")));
     assert_eq!(
         body.pointer("/client_metadata/x-codex-turn-state"),
         Some(&json!({"future": "metadata"}))
@@ -3705,7 +3714,7 @@ async fn cross_account_scope_sanitizes_only_known_turn_metadata_fields() {
         json!({
             "model": "gpt-5.4",
             "input": "hello",
-            "turnMetadata": r#"{"account_id":"old-account","future":{"keep":true}}"#,
+            "turnMetadata": r#"{"account_id":"old-account","hostname":"device-must-stay-when-disabled","os":"macos","arch":"arm64","future":{"keep":true}}"#,
             "turn_metadata": "future-opaque-shape",
             "x-codex-turn-metadata": r#"{"conversation":"old-conversation","safe":17}"#
         })
@@ -3727,7 +3736,15 @@ async fn cross_account_scope_sanitizes_only_known_turn_metadata_fields() {
         .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
         .expect("sanitized x-codex-turn-metadata");
 
-    assert_eq!(turn_metadata, json!({"future": {"keep": true}}));
+    assert_eq!(
+        turn_metadata,
+        json!({
+            "hostname": "device-must-stay-when-disabled",
+            "os": "macos",
+            "arch": "arm64",
+            "future": {"keep": true}
+        })
+    );
     assert_eq!(codex_turn_metadata, json!({"safe": 17}));
     assert_eq!(
         body.get("turn_metadata"),

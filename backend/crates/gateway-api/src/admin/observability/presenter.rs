@@ -803,6 +803,7 @@ pub(crate) fn wire_profile_view(profile: domain::DashboardWireProfile) -> Dashbo
             terminal: profile.target.terminal,
         },
         user_agent: profile.user_agent,
+        user_agent_source: profile.user_agent_source.as_str().to_owned(),
         attributes: profile
             .attributes
             .into_iter()

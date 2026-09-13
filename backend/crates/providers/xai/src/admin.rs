@@ -9,9 +9,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, TimeDelta, Utc};
 use gateway_admin::model::accounts::AccountRecord;
 use gateway_admin::model::observability::{
-    CalculatedBillingBreakdown, CurrencyCost, DashboardDesktopRelease, DashboardWireAttribute,
-    DashboardWireProfile, DashboardWireTarget, DecimalAmount, DesktopReleaseStatus,
-    ProviderBillingInput,
+    CalculatedBillingBreakdown, CurrencyCost, DashboardDesktopRelease, DashboardUserAgentSource,
+    DashboardWireAttribute, DashboardWireProfile, DashboardWireTarget, DecimalAmount,
+    DesktopReleaseStatus, ProviderBillingInput,
 };
 use gateway_admin::model::provider_credentials::{
     AuthorizationCommitGuard, AuthorizationMutationTarget, AuthorizationOwner,
@@ -363,6 +363,7 @@ impl ProviderAdmin for XaiAdminProvider {
                 profile.target_os,
                 profile.target_arch
             ),
+            user_agent_source: DashboardUserAgentSource::LaunchProfile,
             attributes: vec![
                 DashboardWireAttribute {
                     label: "客户端标识".to_owned(),

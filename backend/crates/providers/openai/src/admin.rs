@@ -9,9 +9,9 @@ use futures::TryStreamExt as _;
 use gateway_admin::model::Revision;
 use gateway_admin::model::accounts::AccountRecord;
 use gateway_admin::model::observability::{
-    CalculatedBillingBreakdown, CurrencyCost, DashboardDesktopRelease, DashboardWireAttribute,
-    DashboardWireProfile, DashboardWireTarget, DecimalAmount, DesktopReleaseStatus,
-    ProviderBillingInput,
+    CalculatedBillingBreakdown, CurrencyCost, DashboardDesktopRelease, DashboardUserAgentSource,
+    DashboardWireAttribute, DashboardWireProfile, DashboardWireTarget, DecimalAmount,
+    DesktopReleaseStatus, ProviderBillingInput,
 };
 use gateway_admin::model::provider_credentials::{
     AuthorizationMutationTarget, AuthorizationOwnerBinding, AuthorizationStarted,
@@ -219,6 +219,11 @@ impl ProviderAdmin for OpenAiAdminProvider {
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile> {
         let profile = self.profile.snapshot();
         let release = self.desktop_release.snapshot();
+        let user_agent_source = if profile.user_agent_override.is_some() {
+            DashboardUserAgentSource::AdminOverride
+        } else {
+            DashboardUserAgentSource::LaunchProfile
+        };
         let user_agent = profile.user_agent();
         let client_identity = format!("{}; {}", profile.originator, profile.desktop_version);
         let release = dashboard_desktop_release(&profile, release);
@@ -234,6 +239,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
                 terminal: profile.terminal,
             },
             user_agent,
+            user_agent_source,
             attributes: vec![DashboardWireAttribute {
                 label: "客户端标识".to_owned(),
                 value: client_identity,

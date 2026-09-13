@@ -489,6 +489,7 @@ pub struct DashboardWireProfileView {
     pub build: Option<String>,
     pub target: DashboardWireTargetView,
     pub user_agent: String,
+    pub user_agent_source: String,
     pub attributes: Vec<DashboardWireAttributeView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<DateTime<Utc>>,

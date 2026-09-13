@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use gateway_admin::model::accounts::AccountRecord;
 use gateway_admin::model::observability::{
-    CurrencyCost, DesktopReleaseStatus, ProviderBillingInput,
+    CurrencyCost, DashboardUserAgentSource, DesktopReleaseStatus, ProviderBillingInput,
 };
 use gateway_admin::model::provider_credentials::{
     CompleteAuthorization, PrepareCredentialImport, PrepareCredentialRefresh,
@@ -230,6 +230,10 @@ async fn xai_admin_provider_validates_known_billing_breakdown() {
     assert_eq!(profile.product, "Grok Build");
     assert_eq!(profile.version, "0.2.106");
     assert_eq!(profile.user_agent, "grok-shell/0.2.106 (linux; x86_64)");
+    assert_eq!(
+        profile.user_agent_source,
+        DashboardUserAgentSource::LaunchProfile
+    );
     let release = profile.release.expect("release status");
     assert_eq!(release.status, DesktopReleaseStatus::Unchecked);
     assert!(release.checked_at.is_none());

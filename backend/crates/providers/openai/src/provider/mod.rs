@@ -497,6 +497,7 @@ impl Provider for CodexProvider {
             &mut upstream_request,
             lease.installation_id(),
             account_scope,
+            request_body_override.enabled(),
         );
         let requirement = transport_requirement(&upstream_request);
         let requested_transport = selected_transport(&upstream_request);

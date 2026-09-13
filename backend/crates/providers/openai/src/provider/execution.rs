@@ -43,6 +43,7 @@ impl CodexProvider {
                 body: image.payload().body().clone(),
                 image_turn_id,
                 turn_metadata: None,
+                override_device_metadata: false,
                 session_affinity,
             },
         )
@@ -72,10 +73,9 @@ impl CodexProvider {
             context.client_api_key_ref(),
             "id",
         );
-        let body = apply_standalone_search_override(
-            search.payload().body(),
-            &self.request_body_override.snapshot(),
-        );
+        let request_body_override = self.request_body_override.snapshot();
+        let body =
+            apply_standalone_search_override(search.payload().body(), &request_body_override);
         self.execute_raw_json_endpoint(
             context,
             RawJsonEndpointRequest {
@@ -84,6 +84,7 @@ impl CodexProvider {
                 body,
                 image_turn_id: None,
                 turn_metadata,
+                override_device_metadata: request_body_override.enabled(),
                 session_affinity,
             },
         )
@@ -125,7 +126,12 @@ impl CodexProvider {
         // Standalone Provider 端点没有可证明的账号 owner；Search metadata 必须按
         // 跨账号输入收敛到当前 lease，不能沿用下游声明的账号或 installation identity。
         let turn_metadata = request.turn_metadata.as_deref().and_then(|metadata| {
-            crate::transport::request::scope_turn_metadata(metadata, lease.installation_id(), true)
+            crate::transport::request::scope_turn_metadata(
+                metadata,
+                lease.installation_id(),
+                true,
+                request.override_device_metadata,
+            )
         });
         let events = cold_json_response_stream(ColdJsonResponse {
             client: self.client.for_account(lease.account()).map_err(|_| {
@@ -161,6 +167,7 @@ struct RawJsonEndpointRequest {
     body: Bytes,
     image_turn_id: Option<String>,
     turn_metadata: Option<String>,
+    override_device_metadata: bool,
     session_affinity: Option<CodexSessionAffinity>,
 }
 

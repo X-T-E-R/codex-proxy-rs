@@ -255,6 +255,7 @@ export const themeDashboardSummary: DashboardSummaryResponse = {
         terminal: 'iTerm.app',
       },
       userAgent: 'codex_cli_rs/0.34.0',
+      userAgentSource: 'admin_override',
       attributes: [
         { label: '客户端标识', value: 'codex_cli_rs' },
         { label: 'Token 认证', value: 'bearer' },
@@ -278,6 +279,7 @@ export const themeDashboardSummary: DashboardSummaryResponse = {
         terminal: 'xterm-256color',
       },
       userAgent: 'grok_cli/0.7.3',
+      userAgentSource: 'launch_profile',
       attributes: [
         { label: '客户端标识', value: 'grok_cli' },
         { label: 'Token 认证', value: 'bearer' },

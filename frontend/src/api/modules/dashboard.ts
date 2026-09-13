@@ -120,6 +120,7 @@ export interface DashboardWireProfile {
     terminal: string
   }
   userAgent: string
+  userAgentSource?: 'launch_profile' | 'admin_override'
   attributes: Array<{ label: string, value: string }>
   verifiedAt?: string
   release?: {

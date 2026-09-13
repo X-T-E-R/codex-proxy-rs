@@ -12,11 +12,11 @@ const windowsTemplate = '{originator}/{codex_version} (Windows 10.0.26100; x86_6
 <template>
   <BaseCard
     title="OpenAI 上游 User-Agent"
-    description="保存后约 5 秒内用于新的 HTTP 请求和 WebSocket 握手"
+    description="保存后约 5 秒内用于新的 HTTP 请求和 WebSocket 握手；Dashboard 会显示最终值及其来源"
   >
     <BaseFormItem
       label="User-Agent 模板"
-      description="支持 {originator}、{codex_version}、{desktop_version}，每次生成请求头时替换为当前值；版本继续自动更新。留空使用启动平台，填写固定版本号则保持原文。修改可能使依赖旧 WebSocket 连接的续接失效"
+      description="支持 {originator}、{codex_version}、{desktop_version}，每次生成请求头时替换为当前值；版本继续自动更新。留空使用启动画像，填写固定版本号则保持原文。这里只改变 User-Agent；环境与设备 metadata 由独立开关控制。修改可能使依赖旧 WebSocket 连接的续接失效"
       :error="error"
     >
       <BaseInput

@@ -70,6 +70,40 @@ const INSTALLATION_ID_KEYS: &[&str] = &[
     "x-codex-installation-id",
 ];
 
+// 只在 Codex 明确的 metadata 容器中移除这些设备属性。这里故意不用
+// substring 或递归匹配，避免把业务正文与未来协议字段误判为设备信息。
+const DEVICE_METADATA_KEYS: &[&str] = &[
+    "hostname",
+    "host_name",
+    "hostName",
+    "machine_id",
+    "machineId",
+    "device_id",
+    "deviceId",
+    "hardware_id",
+    "hardwareId",
+    "os",
+    "os_name",
+    "osName",
+    "os_type",
+    "osType",
+    "os_version",
+    "osVersion",
+    "platform",
+    "arch",
+    "architecture",
+    "cpu_arch",
+    "cpuArch",
+    "target_os",
+    "targetOs",
+    "target_arch",
+    "targetArch",
+    "terminal",
+    "terminal_type",
+    "terminalType",
+    "shell",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestAccountScope {
     Same,
@@ -326,6 +360,7 @@ pub(crate) fn scope_request_to_account(
     request: &mut CodexResponsesRequest,
     installation_id: &str,
     account_scope: RequestAccountScope,
+    override_device_metadata: bool,
 ) {
     let reset_account_state = !account_scope.can_reuse_account_state();
     let client_metadata_turn_state = metadata_string(request, "x-codex-turn-state");
@@ -339,12 +374,23 @@ pub(crate) fn scope_request_to_account(
     } else {
         None
     };
-    let turn_metadata = request
-        .turn_metadata
-        .as_deref()
-        .and_then(|metadata| scope_turn_metadata(metadata, installation_id, reset_account_state));
-    let client_metadata_turn_metadata = metadata_string(request, "x-codex-turn-metadata")
-        .and_then(|metadata| scope_turn_metadata(&metadata, installation_id, reset_account_state));
+    let turn_metadata = request.turn_metadata.as_deref().and_then(|metadata| {
+        scope_turn_metadata(
+            metadata,
+            installation_id,
+            reset_account_state,
+            override_device_metadata,
+        )
+    });
+    let client_metadata_turn_metadata =
+        metadata_string(request, "x-codex-turn-metadata").and_then(|metadata| {
+            scope_turn_metadata(
+                &metadata,
+                installation_id,
+                reset_account_state,
+                override_device_metadata,
+            )
+        });
 
     if reset_account_state {
         request.passthrough_headers.remove("x-codex-turn-state");
@@ -365,7 +411,14 @@ pub(crate) fn scope_request_to_account(
             .body()
             .get(*key)
             .and_then(Value::as_str)
-            .and_then(|value| scope_turn_metadata(value, installation_id, reset_account_state));
+            .and_then(|value| {
+                scope_turn_metadata(
+                    value,
+                    installation_id,
+                    reset_account_state,
+                    override_device_metadata,
+                )
+            });
         replace_existing_body_string(request, key, scoped.as_deref());
     }
 
@@ -380,7 +433,12 @@ pub(crate) fn scope_request_to_account(
                     (
                         key,
                         metadata.get(key).and_then(Value::as_str).and_then(|value| {
-                            scope_turn_metadata(value, installation_id, reset_account_state)
+                            scope_turn_metadata(
+                                value,
+                                installation_id,
+                                reset_account_state,
+                                override_device_metadata,
+                            )
                         }),
                     )
                 });
@@ -391,6 +449,9 @@ pub(crate) fn scope_request_to_account(
                 {
                     metadata.remove(*key);
                 }
+            }
+            if override_device_metadata {
+                remove_device_metadata(&mut metadata);
             }
             metadata.insert(
                 "installation_id".to_owned(),
@@ -423,6 +484,12 @@ pub(crate) fn scope_request_to_account(
 
     request.turn_state = turn_state;
     request.turn_metadata = turn_metadata;
+    scope_passthrough_turn_metadata(
+        &mut request.passthrough_headers,
+        installation_id,
+        reset_account_state,
+        override_device_metadata,
+    );
 }
 
 fn metadata_string(request: &CodexResponsesRequest, key: &str) -> Option<String> {
@@ -438,6 +505,7 @@ pub(crate) fn scope_turn_metadata(
     raw: &str,
     installation_id: &str,
     cross_account: bool,
+    override_device_metadata: bool,
 ) -> Option<String> {
     let Ok(Value::Object(mut metadata)) = serde_json::from_str::<Value>(raw) else {
         return (!cross_account).then(|| raw.to_owned());
@@ -451,6 +519,9 @@ pub(crate) fn scope_turn_metadata(
         {
             changed |= metadata.remove(*key).is_some();
         }
+    }
+    if override_device_metadata {
+        changed |= remove_device_metadata(&mut metadata);
     }
     if raw.is_ascii()
         && !cross_account
@@ -477,6 +548,43 @@ pub(crate) fn scope_turn_metadata(
         ))
         .ok()?;
     String::from_utf8(bytes).ok()
+}
+
+fn remove_device_metadata(metadata: &mut Map<String, Value>) -> bool {
+    let mut changed = false;
+    for key in DEVICE_METADATA_KEYS {
+        changed |= metadata.shift_remove(*key).is_some();
+    }
+    changed
+}
+
+fn scope_passthrough_turn_metadata(
+    headers: &mut HeaderMap,
+    installation_id: &str,
+    cross_account: bool,
+    override_device_metadata: bool,
+) {
+    const NAME: &str = "x-codex-turn-metadata";
+    if cross_account {
+        headers.remove(NAME);
+        return;
+    }
+    if !override_device_metadata {
+        return;
+    }
+
+    let values = headers.get_all(NAME).iter().cloned().collect::<Vec<_>>();
+    if values.is_empty() {
+        return;
+    }
+    headers.remove(NAME);
+    for original in values {
+        let scoped = std::str::from_utf8(original.as_bytes())
+            .ok()
+            .and_then(|raw| scope_turn_metadata(raw, installation_id, false, true))
+            .and_then(|raw| HeaderValue::from_str(&raw).ok());
+        headers.append(NAME, scoped.unwrap_or(original));
+    }
 }
 
 struct AsciiTurnMetadataFormatter;

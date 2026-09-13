@@ -38,10 +38,11 @@ use gateway_admin::{
             NewClientKey, SetClientKeyEnabled, UpdateClientKey,
         },
         observability::{
-            DashboardDesktopRelease, DashboardObservation, DashboardWireAttribute,
-            DashboardWireProfile, DashboardWireTarget, DesktopReleaseStatus, DiagnosticDimension,
-            DiagnosticObservation, OpsErrorPage, OpsErrorQuery, RequestMetricPoint, TimeRange,
-            UsageDetail, UsageFilter, UsageOverview, UsagePage, UsageQuery,
+            DashboardDesktopRelease, DashboardObservation, DashboardUserAgentSource,
+            DashboardWireAttribute, DashboardWireProfile, DashboardWireTarget,
+            DesktopReleaseStatus, DiagnosticDimension, DiagnosticObservation, OpsErrorPage,
+            OpsErrorQuery, RequestMetricPoint, TimeRange, UsageDetail, UsageFilter, UsageOverview,
+            UsagePage, UsageQuery,
         },
         provider_credentials::{
             AuthorizationCommit, AuthorizationStarted, CompleteAuthorization, CredentialDetails,
@@ -728,6 +729,7 @@ pub(super) fn dashboard_profile_provider() -> Arc<dyn ProviderAdmin> {
                 terminal: "test".to_owned(),
             },
             user_agent: "gateway-admin-test".to_owned(),
+            user_agent_source: DashboardUserAgentSource::LaunchProfile,
             attributes: vec![DashboardWireAttribute {
                 label: "Core".to_owned(),
                 value: "test".to_owned(),
