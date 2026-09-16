@@ -6,6 +6,7 @@ use std::{
 };
 
 use futures::{StreamExt, TryStreamExt};
+use gateway_core::provider_ports::turn_state::{TurnStateObservation, TurnStateStore};
 use gateway_protocol::openai::{
     X_OPENAI_MEMGEN_REQUEST_HEADER,
     events::{self, retry_after_seconds_from_body},
@@ -66,12 +67,18 @@ impl CodexBackendClient {
             profile,
             websocket_pool: None,
             websocket_origin_breaker: WebSocketOriginBreaker::default(),
+            turn_state_store: None,
         }
     }
 
     /// 为 Responses WebSocket 请求启用连接池。
     pub fn with_websocket_pool(mut self, pool: Arc<CodexWebSocketPool>) -> Self {
         self.websocket_pool = Some(pool);
+        self
+    }
+
+    pub(crate) fn with_turn_state_store(mut self, store: Option<Arc<dyn TurnStateStore>>) -> Self {
+        self.turn_state_store = store;
         self
     }
 
@@ -87,6 +94,7 @@ impl CodexBackendClient {
         &self,
         upstream_request: &CodexResponsesRequest,
         context: CodexRequestContext<'_>,
+        provider_account_id: Option<&str>,
     ) -> CodexClientResult<CodexBackendStreamingResponse> {
         let headers = self.request_headers_for_http_response(upstream_request, context)?;
         let headers_started_at = Instant::now();
@@ -140,6 +148,22 @@ impl CodexBackendClient {
         );
         let diagnostics = response_meta::diagnostics(Some(status.as_u16()), response.headers());
         let turn_state = response_meta::turn_state(response.headers());
+        let turn_state_observation = turn_state.clone().map(CodexObservedTurnState::new);
+        if let (Some(store), Some(account_id), Some(receipt)) = (
+            self.turn_state_store.as_ref(),
+            provider_account_id,
+            turn_state_observation.as_ref(),
+        ) {
+            store.enqueue_observation(TurnStateObservation {
+                id: receipt.id.clone(),
+                account_id: account_id.to_owned(),
+                value: receipt.value.clone(),
+                observed_at: receipt.observed_at,
+                transport: "http".to_owned(),
+                upstream_response_id: None,
+                client_turn_id: context.turn_id.map(str::to_owned),
+            });
+        }
         let set_cookie_headers = response_meta::set_cookie_headers(response.headers());
         let rate_limit_headers = response_meta::rate_limit_headers(response.headers());
         let response_metadata = response_meta::response_metadata(response.headers());
@@ -176,6 +200,7 @@ impl CodexBackendClient {
                     content_type,
                     client_headers,
                     raw_body,
+                    turn_state_observation.clone(),
                 ))),
                 retry_after_seconds,
                 diagnostics: Box::new(diagnostics),
@@ -231,10 +256,13 @@ impl CodexBackendClient {
             transport: CodexBackendTransport::HttpSse,
             websocket_connection_id: None,
             turn_state,
+            turn_state_observation,
             set_cookie_headers,
             rate_limit_headers,
             rate_limit_updates: Some(rate_limit_updates),
             turn_state_update: None,
+            turn_state_observations: None,
+            turn_state_response_id: None,
             websocket_pool_decision: None,
             diagnostics,
             response_metadata,
@@ -280,6 +308,7 @@ impl CodexBackendClient {
             return Ok(PreparedResponseTransport {
                 requirement,
                 route: PreparedResponseRoute::Http,
+                provider_account_id: pool_account_id.map(str::to_owned),
                 metrics: CodexTransportMetrics {
                     decision: Some(CodexTransportDecision::HttpRequired),
                     ..CodexTransportMetrics::default()
@@ -372,6 +401,7 @@ impl CodexBackendClient {
                 return Ok(PreparedResponseTransport {
                     requirement,
                     route: PreparedResponseRoute::Http,
+                    provider_account_id: pool_account_id.map(str::to_owned),
                     metrics: CodexTransportMetrics {
                         decision: Some(decision),
                         ws_connect_ms: None,
@@ -396,6 +426,7 @@ impl CodexBackendClient {
                 return Ok(PreparedResponseTransport {
                     requirement,
                     route: PreparedResponseRoute::Http,
+                    provider_account_id: pool_account_id.map(str::to_owned),
                     metrics: CodexTransportMetrics {
                         decision: Some(decision),
                         ws_connect_ms: None,
@@ -438,6 +469,7 @@ impl CodexBackendClient {
                 request: websocket_create,
                 prepared,
             })),
+            provider_account_id: pool_account_id.map(str::to_owned),
             metrics,
         })
     }
@@ -453,6 +485,7 @@ impl CodexBackendClient {
             requirement,
             route,
             metrics,
+            provider_account_id,
         } = prepared;
         context.trace.cloned().unwrap_or_default().record(
             "transport.selected",
@@ -463,7 +496,7 @@ impl CodexBackendClient {
         );
         match route {
             PreparedResponseRoute::Http => self
-                .create_response_stream_http_sse(request, context)
+                .create_response_stream_http_sse(request, context, provider_account_id.as_deref())
                 .await
                 .map(|mut response| {
                     merge_preparation_metrics(&mut response.transport_metrics, metrics);
@@ -510,10 +543,13 @@ impl CodexBackendClient {
                     transport: CodexBackendTransport::WebSocket,
                     websocket_connection_id: Some(exchange.websocket_connection_id),
                     turn_state: exchange.turn_state,
+                    turn_state_observation: exchange.turn_state_observation,
                     set_cookie_headers: exchange.set_cookie_headers,
                     rate_limit_headers: exchange.rate_limit_headers,
                     rate_limit_updates: Some(exchange.rate_limit_updates),
                     turn_state_update: Some(exchange.turn_state_update),
+                    turn_state_observations: Some(exchange.turn_state_observations),
+                    turn_state_response_id: Some(exchange.turn_state_response_id),
                     websocket_pool_decision: exchange.pool_decision,
                     diagnostics: exchange.diagnostics,
                     response_metadata: exchange.response_metadata,

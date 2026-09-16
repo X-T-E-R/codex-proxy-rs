@@ -242,6 +242,9 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/accounts` | `page`、`pageSize`、`provider`、`groupId`、`search`、`status`、排序字段 | 分页查询账号与汇总 |
 | `GET` | `/api/admin/accounts/detail` | `accountId` | 查询账号详情、额度和本地用量 |
+| `GET` | `/api/admin/accounts/turn-state` | `accountId` | 显式读取 OpenAI 账号最近真实上游 Turn State 与手动覆盖明文 |
+| `POST` | `/api/admin/accounts/turn-state/update` | `{ accountId, enabled, value?, expectedRevision }` | 按账号版本更新出站覆盖 |
+| `POST` | `/api/admin/accounts/turn-state/use-observed` | `{ accountId, observationId, enabled, expectedRevision }` | 仅在观测 ID 仍有效时复制最近上游值 |
 | `GET` | `/api/admin/accounts/export` | `accountIds`、`confirm=export_sensitive_accounts` | 显式导出最多 200 个账号的敏感 Provider 文档 |
 | `POST` | `/api/admin/accounts/import` | `{ provider, data, settings?, outboundProxyId? }` | 导入或按上游身份更新账号，可同时应用调度、分组设置与默认代理 |
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
@@ -282,6 +285,41 @@ OpenAI 的 `self_serve_business_prolite` 等 Team 套餐显示为 `Business`；�
 指定代理后，推理、OAuth 服务端交换/刷新及账号辅助请求使用同一出口；代理失败不会退回直连。
 浏览器打开的第三方 OAuth 授权页仍使用浏览器自身网络。
 账号出口与连接隔离见 [架构说明](architecture.md#账号出站代理)。
+
+### OpenAI 账号 Turn State
+
+三条接口只支持已有 OpenAI 账号，使用管理员鉴权及 `Cache-Control: no-store`；明文只在这组显式
+接口返回，账号列表、普通请求日志和审计不包含该值。成功响应使用普通管理信封，`data` 形状如下：
+
+```json
+{
+  "accountId": "acct_...",
+  "observed": {
+    "id": "observation-id", "value": "upstream-value", "bytes": 14,
+    "sha256": "lowercase-hex-sha256", "observedAt": "2026-09-16T12:00:00Z",
+    "transport": "http", "upstreamResponseId": null, "clientTurnId": null
+  },
+  "override": {
+    "enabled": false, "value": null, "bytes": 0, "sha256": null, "updatedAt": null
+  },
+  "configRevision": 1
+}
+```
+
+`observed` 未采集时为 `null`；`transport` 为 `http` 或 `websocket`。`bytes` 是 UTF-8
+字节数，`sha256` 为原值的十六进制 SHA-256；可得的上游 response ID 与客户端 turn ID 随观测保存。
+`configRevision` 是该账号覆盖配置的版本，从 1 开始，与全局运行设置 revision 独立。三个接口均返回
+同形 `data`，写入必须提供当前 `expectedRevision`，否则返回 `40901`。
+
+`update` 中省略 `value` 保留已保存的覆盖值；显式 `null` 清空值并关闭覆盖，空字符串不能启用。
+值最大 16384 bytes，且只能包含可打印 ASCII（`0x20`–`0x7e`），保证 HTTP header 与 WebSocket
+投影使用同一个无损值；换行、控制字符和非 ASCII 值返回参数错误。`use-observed` 复制当前最近一次
+上游观测并执行相同校验；新观测已替换请求的
+`observationId` 时返回 `40901`，须重新查询并确认。该操作不会把手动覆盖值写成上游观测。
+开启后每次 OpenAI Responses 上游 attempt 在选定账号并完成身份隔离后，统一替换 HTTP 请求头或
+WebSocket `client_metadata` 的出站值，包括当前 turn；关闭后恢复既有续接传递规则。账号 A 的值不会
+带入账号 B。成功、失败和流式传输中实际收到的上游值尽力写入最近观测；观测持久化失败不改变
+客户端响应。仅数据库及备份保存明文，按账号凭据保护。
 
 ### 独立代理管理 / Managed Proxies
 

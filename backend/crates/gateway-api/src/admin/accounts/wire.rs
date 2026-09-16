@@ -1,6 +1,92 @@
 //! 账号管理请求、响应与查询 wire contract。
 
 use super::*;
+use gateway_core::provider_ports::turn_state::TurnStateView;
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateTurnStateRequest {
+    pub account_id: String,
+    pub enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_turn_state_value")]
+    pub value: Option<Option<String>>,
+    pub expected_revision: u64,
+}
+
+fn deserialize_turn_state_value<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UseObservedTurnStateRequest {
+    pub account_id: String,
+    pub observation_id: String,
+    pub enabled: bool,
+    pub expected_revision: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateData {
+    account_id: String,
+    observed: Option<TurnStateObservedData>,
+    #[serde(rename = "override")]
+    override_state: TurnStateOverrideData,
+    config_revision: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnStateObservedData {
+    id: String,
+    value: String,
+    bytes: usize,
+    sha256: String,
+    observed_at: DateTime<Utc>,
+    transport: String,
+    upstream_response_id: Option<String>,
+    client_turn_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnStateOverrideData {
+    enabled: bool,
+    value: Option<String>,
+    bytes: usize,
+    sha256: Option<String>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+impl From<TurnStateView> for TurnStateData {
+    fn from(view: TurnStateView) -> Self {
+        Self {
+            account_id: view.account_id,
+            observed: view.observed.map(|item| TurnStateObservedData {
+                id: item.id,
+                value: item.value,
+                bytes: item.bytes,
+                sha256: item.sha256,
+                observed_at: item.observed_at,
+                transport: item.transport,
+                upstream_response_id: item.upstream_response_id,
+                client_turn_id: item.client_turn_id,
+            }),
+            override_state: TurnStateOverrideData {
+                enabled: view.override_state.enabled,
+                value: view.override_state.value,
+                bytes: view.override_state.bytes,
+                sha256: view.override_state.sha256,
+                updated_at: view.override_state.updated_at,
+            },
+            config_revision: view.config_revision,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct AccountProxyUpdate(pub Option<gateway_core::account::OutboundProxy>);

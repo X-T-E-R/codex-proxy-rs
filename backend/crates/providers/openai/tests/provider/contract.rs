@@ -32,6 +32,9 @@ use gateway_core::operation::{
     OperationKind, ProtocolPayload, ProviderSessionState, RawJsonPayload, StandaloneSearchRequest,
 };
 use gateway_core::policy::ClientApiKeyId;
+use gateway_core::provider_ports::turn_state::{
+    TurnStateObservation, TurnStateOverride, TurnStateStore, TurnStateStoreError, TurnStateView,
+};
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ProviderKind,
     ProviderModel, PublicModelId, RoutingContext, RuntimeAccount, RuntimeAccountDirectory,
@@ -51,7 +54,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::oneshot,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
@@ -63,7 +66,7 @@ use crate::support::{
     MemoryAccountStore, MemoryCooldownPort, MemorySessionAffinity, MemorySessionExclusions,
     TestLeaseCoordinator, account_policy, catalog_cache, profile, secret,
 };
-use crate::transport::accept_codex_test_websocket;
+use crate::transport::{accept_codex_test_websocket, accept_codex_test_websocket_with};
 
 const OFFICIAL_FIXTURE: &[u8] =
     include_bytes!("../transport/fixtures/official_models_snapshot.json");
@@ -71,6 +74,80 @@ const CAPTURE_COMPLETED_SSE: &str = concat!(
     "event: response.completed\n",
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
 );
+
+#[derive(Default)]
+struct MemoryTurnStateStore {
+    overrides: Mutex<BTreeMap<String, String>>,
+    observations: Mutex<Vec<CapturedTurnStateObservation>>,
+}
+
+#[derive(Debug)]
+struct CapturedTurnStateObservation {
+    id: String,
+    account_id: String,
+    value: String,
+    observed_at: chrono::DateTime<Utc>,
+    transport: String,
+    upstream_response_id: Option<String>,
+    client_turn_id: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl TurnStateStore for MemoryTurnStateStore {
+    async fn load(&self, account_id: &str) -> Result<TurnStateView, TurnStateStoreError> {
+        Ok(TurnStateView {
+            account_id: account_id.to_owned(),
+            observed: None,
+            override_state: TurnStateOverride {
+                enabled: false,
+                value: None,
+                bytes: 0,
+                sha256: None,
+                updated_at: None,
+            },
+            config_revision: 1,
+        })
+    }
+
+    async fn update(
+        &self,
+        _: &str,
+        _: bool,
+        _: Option<Option<String>>,
+        _: u64,
+    ) -> Result<TurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    async fn use_observed(
+        &self,
+        _: &str,
+        _: &str,
+        _: bool,
+        _: u64,
+    ) -> Result<TurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    fn enqueue_observation(&self, observation: TurnStateObservation) {
+        self.observations
+            .lock()
+            .unwrap()
+            .push(CapturedTurnStateObservation {
+                id: observation.id,
+                account_id: observation.account_id,
+                value: observation.value,
+                observed_at: observation.observed_at,
+                transport: observation.transport,
+                upstream_response_id: observation.upstream_response_id,
+                client_turn_id: observation.client_turn_id,
+            });
+    }
+
+    fn active_override(&self, account_id: &str) -> Option<String> {
+        self.overrides.lock().unwrap().get(account_id).cloned()
+    }
+}
 
 #[derive(Clone, Default)]
 struct CapturedLogs {
@@ -985,6 +1062,68 @@ async fn paused_chunked_sse_server(
             .expect("terminate chunked SSE response");
     });
     (base_url, release_sender, first_chunk_sent, server)
+}
+
+async fn paused_turn_state_headers_server() -> (
+    String,
+    oneshot::Sender<()>,
+    oneshot::Receiver<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind turn state headers listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let (release_sender, release_receiver) = oneshot::channel();
+    let (headers_sender, headers_received) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        read_http_request(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nx-codex-turn-state: received-before-cancel\r\n\r\n",
+            )
+            .await
+            .expect("write response headers");
+        stream.flush().await.expect("flush response headers");
+        let _ = headers_sender.send(());
+        let _ = release_receiver.await;
+    });
+    (base_url, release_sender, headers_received, server)
+}
+
+async fn paused_error_turn_state_headers_server() -> (
+    String,
+    oneshot::Sender<()>,
+    oneshot::Receiver<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind error headers listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let (release_sender, release_receiver) = oneshot::channel();
+    let (headers_sender, headers_received) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        read_http_request(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: 1024\r\nx-codex-turn-state: old-slow-error\r\n\r\n",
+            )
+            .await
+            .expect("write error headers");
+        stream.flush().await.expect("flush error headers");
+        let _ = headers_sender.send(());
+        let _ = release_receiver.await;
+    });
+    (base_url, release_sender, headers_received, server)
 }
 
 async fn truncated_chunked_sse_server() -> (String, tokio::task::JoinHandle<()>) {
@@ -3317,7 +3456,14 @@ async fn downstream_websocket_new_chain_should_override_session_and_attempt_http
 #[tokio::test]
 async fn websocket_turn_state_metadata_is_exposed_through_response_observation() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_websocket_turn_state").await;
+    const ACCOUNT_ID: &str = "acct_websocket_turn_state";
+    create_account(&store, ACCOUNT_ID).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    turn_state
+        .overrides
+        .lock()
+        .unwrap()
+        .insert(ACCOUNT_ID.to_owned(), "manual-ws-value".to_owned());
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind WebSocket listener");
@@ -3325,17 +3471,31 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
         "http://{}",
         listener.local_addr().expect("listener address")
     );
+    let (request_sender, request_receiver) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener
             .accept()
             .await
             .expect("accept WebSocket connection");
-        let mut websocket = accept_codex_test_websocket(stream).await;
-        let _request = websocket
+        let mut websocket = accept_codex_test_websocket_with(stream, |_request, response| {
+            response.headers_mut().insert(
+                "sec-websocket-extensions",
+                "permessage-deflate".parse().unwrap(),
+            );
+            response
+                .headers_mut()
+                .insert("x-codex-turn-state", "handshake-state".parse().unwrap());
+        })
+        .await;
+        let request = websocket
             .next()
             .await
             .expect("WebSocket request")
             .expect("valid WebSocket request");
+        let request = request.into_text().expect("text response.create");
+        request_sender
+            .send(serde_json::from_str::<Value>(&request).expect("request JSON"))
+            .expect("capture request");
         websocket
             .send(Message::Text(
                 json!({
@@ -3349,6 +3509,32 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
             ))
             .await
             .expect("send response metadata");
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.metadata",
+                    "headers": {"x-codex-turn-state": "turn-state-later"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send later response metadata");
+        for index in 0..40 {
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "type": "response.metadata",
+                        "headers": {
+                            "x-codex-turn-state": format!("stress-turn-{index}")
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send stress response metadata");
+        }
         websocket
             .send(Message::Text(
                 json!({
@@ -3373,7 +3559,9 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
         websocket.close(None).await.expect("close WebSocket");
     });
 
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
     let mut stream = provider_with_base_url(&store, base_url)
+        .with_turn_state_store(Some(turn_state_port))
         .execute(
             planned_request("openai", generate_operation()),
             context("req_websocket_turn_state", CancellationToken::new()),
@@ -3381,13 +3569,21 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
         .await
         .expect("prepare WebSocket provider stream");
     let mut observed_turn_state = false;
+    let mut session_turn_state = None;
     while let Some(event) = stream.next().await {
         let event = event.expect("provider event");
         if let Some(observation) = event.response_observation() {
             observed_turn_state |= observation.client_headers().iter().any(|header| {
                 header.name().eq_ignore_ascii_case("x-codex-turn-state")
-                    && header.value().as_ref() == b"turn-state-from-websocket"
+                    && header.value().as_ref() == b"handshake-state"
             });
+        }
+        if let Some(update) = event.session_update() {
+            session_turn_state = update
+                .payload()
+                .get("turn_state")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
         }
         if event
             .canonical_facts()
@@ -3398,8 +3594,34 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
         }
     }
     server.await.expect("WebSocket server");
+    let request = request_receiver.await.expect("captured request");
 
     assert!(observed_turn_state);
+    assert_eq!(
+        request.pointer("/client_metadata/x-codex-turn-state"),
+        Some(&json!("manual-ws-value"))
+    );
+    assert_eq!(session_turn_state.as_deref(), Some("handshake-state"));
+    let observations = turn_state.observations.lock().unwrap();
+    for value in ["handshake-state", "stress-turn-39"] {
+        assert!(
+            observations
+                .iter()
+                .any(|observation| observation.value == value),
+            "missing observation {value}: {observations:?}"
+        );
+    }
+    let enriched = observations
+        .iter()
+        .filter(|observation| {
+            observation.upstream_response_id.as_deref() == Some("resp_websocket_turn_state")
+                && observation.value.starts_with("stress-turn-")
+        })
+        .map(|observation| observation.value.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(enriched.len(), 32);
+    assert!(!enriched.contains("stress-turn-0"));
+    assert!(enriched.contains("stress-turn-39"));
 }
 
 #[tokio::test]
@@ -4075,6 +4297,231 @@ async fn matching_turn_id_should_prefer_an_explicit_client_echo_over_saved_provi
         captured_header_values(&request, "x-codex-turn-state"),
         vec![b"client-turn-state".to_vec()]
     );
+}
+
+#[tokio::test]
+async fn account_override_replaces_outbound_value_without_becoming_an_observation() {
+    let account_id = "acct_session_affinity";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, account_id).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    turn_state
+        .overrides
+        .lock()
+        .unwrap()
+        .insert(account_id.to_owned(), "manual-outbound".to_owned());
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .insert_header("x-codex-turn-state", "real-upstream")
+            .set_body_string(format!(
+                "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
+            )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("current input")),
+            ]),
+        )
+        .unwrap()
+        .with_context(Map::from_iter([
+            ("use_websocket".to_owned(), json!(false)),
+            ("turn_id".to_owned(), json!("client-turn")),
+            ("turn_state".to_owned(), json!("client-value")),
+            (
+                "opaque_request_headers".to_owned(),
+                json!([
+                    ["X-Codex-Turn-State", STANDARD.encode(b"passthrough-one")],
+                    ["x-codex-turn-state", STANDARD.encode(b"passthrough-two")]
+                ]),
+            ),
+        ])),
+    ));
+    let store: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(store))
+        .execute(
+            planned_request("openai", operation),
+            context("req_manual_turn_state", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare provider stream");
+    while let Some(event) = stream.next().await {
+        event.expect("provider response");
+    }
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !turn_state.observations.lock().unwrap().is_empty() {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("turn state observation");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        captured_header_values(&requests[0], "x-codex-turn-state"),
+        vec![b"manual-outbound".to_vec()]
+    );
+    let observations = turn_state.observations.lock().unwrap();
+    assert!(!observations.is_empty());
+    assert!(
+        observations
+            .iter()
+            .all(|observation| observation.value == "real-upstream")
+    );
+    assert!(observations.iter().all(|observation| {
+        observation
+            .upstream_response_id
+            .as_deref()
+            .is_none_or(|id| id == "resp_scope_capture")
+    }));
+    assert!(
+        observations
+            .iter()
+            .any(|observation| observation.account_id == account_id
+                && observation.value == "real-upstream"
+                && observation.transport == "http"
+                && observation.upstream_response_id.as_deref() == Some("resp_scope_capture")
+                && observation.client_turn_id.as_deref() == Some("client-turn")),
+        "observations: {observations:?}"
+    );
+}
+
+#[tokio::test]
+async fn http_turn_state_is_enqueued_at_headers_before_stream_cancellation() {
+    let account_id = "acct_session_affinity";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, account_id).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    let (base_url, release, headers_received, server) = paused_turn_state_headers_server().await;
+    let cancellation = CancellationToken::new();
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_turn_state_cancel", cancellation.clone()),
+        )
+        .await
+        .expect("prepare provider stream");
+    let first = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("response header observation")
+        .expect("provider event")
+        .expect("valid provider event");
+    assert!(first.response_observation().is_some());
+    headers_received.await.expect("headers sent");
+    cancellation.cancel();
+    drop(stream);
+    let _ = release.send(());
+    server.await.expect("server");
+
+    let observations = turn_state.observations.lock().unwrap();
+    assert!(observations.iter().any(|observation| {
+        observation.account_id == account_id
+            && observation.value == "received-before-cancel"
+            && observation.transport == "http"
+    }));
+}
+
+#[tokio::test]
+async fn slow_http_error_turn_state_is_enqueued_before_body_and_keeps_receipt_order() {
+    let account_id = "acct_session_affinity";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, account_id).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    let (base_url, release, mut headers_received, server) =
+        paused_error_turn_state_headers_server().await;
+    let cancellation = CancellationToken::new();
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_slow_error_turn_state", cancellation.clone()),
+        )
+        .await
+        .expect("prepare provider stream");
+    let next = stream.next();
+    tokio::pin!(next);
+    tokio::select! {
+        result = &mut next => panic!("body should still be pending: {result:?}"),
+        result = &mut headers_received => result.expect("error headers sent"),
+    }
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if turn_state
+                .observations
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|observation| observation.value == "old-slow-error")
+            {
+                break;
+            }
+            tokio::select! {
+                result = &mut next => panic!("body should still be pending: {result:?}"),
+                () = sleep(Duration::from_millis(5)) => {}
+            }
+        }
+    })
+    .await
+    .expect("header receipt before body");
+    cancellation.cancel();
+    let error = next
+        .await
+        .expect("cancelled stream result")
+        .expect_err("cancelled request");
+    assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
+    let _ = release.send(());
+    server.await.expect("server");
+
+    let newer = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .insert_header("content-type", "application/json")
+                .insert_header("x-codex-turn-state", "new-fast-error")
+                .set_body_json(json!({"error":{"message":"synthetic"}})),
+        )
+        .expect(1)
+        .mount(&newer)
+        .await;
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut newer_stream = provider_with_base_url(&accounts, newer.uri())
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_fast_error_turn_state", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare newer provider stream");
+    let _ = newer_stream.next().await.expect("newer result");
+
+    let observations = turn_state.observations.lock().unwrap();
+    let old = observations
+        .iter()
+        .find(|observation| observation.value == "old-slow-error")
+        .expect("old header receipt");
+    let new = observations
+        .iter()
+        .find(|observation| observation.value == "new-fast-error")
+        .expect("new header receipt");
+    assert!(old.observed_at < new.observed_at);
+    assert_ne!(old.id, new.id);
 }
 
 #[tokio::test]

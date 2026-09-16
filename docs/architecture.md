@@ -321,6 +321,23 @@ Continuation 仍受原请求的 Client Key、账号范围、Provider 和发送/�
 
 会话亲和是优先选择提示，不是硬账号绑定；native continuation 才携带不可跨越的 owner 约束。
 
+OpenAI 的实验性 Turn State 覆盖按账号保存在 PostgreSQL，默认关闭。Provider 在取得账号 lease、
+完成账号身份及续接状态隔离后读取该账号的启用值，统一作用于本次 attempt 的 HTTP 和上游 WebSocket
+出站编码；不更改 Redis native continuation pin 的保存和读取。真实上游 HTTP 响应头或 WebSocket
+metadata 单独记录为该账号最近观测，不把手动出站值当成上游事实。观测写入尽力执行，失败不改变
+客户端结果；管理端读取和覆盖修改经专用 Admin 端口，按账号版本及观测 ID 防并发覆盖。
+服务启动时在接受请求前把最多 65536 个已有账号配置条目（含禁用 revision tombstone）hydrate 到
+进程内账号快照；超限会阻止启动，不截断。管理事务提交后按账号 revision 单调更新快照，迟到的旧 revision
+不能覆盖新值或禁用 tombstone。Provider 在每个 attempt 的最终账号边界只读一次快照，不执行 SQL；已经读到旧值的 attempt
+继续使用该值，后续 attempt 使用新值。重启以 PostgreSQL 全量重建快照。
+
+上游值在 HTTP headers、WebSocket 握手或每个 metadata 帧的实际接收边界生成 UUIDv7 与观测时间。
+同一观测随后取得 response ID 时以相同观测 ID 补充关联；PostgreSQL 只接受时间/ID 更新的观测或同 ID
+补充，旧长流的迟到写入不能覆盖新请求。WebSocket 的全量观测通道独立于 continuation 的首值通道，
+连接复用仍在每轮清空连接级 metadata；单次 WS exchange 的待消费观测最多保留最新 32 项。数据面只向
+容量 512 的进程内队列执行非阻塞入队；满载或关闭时
+丢弃并记录不含原值的告警，Store daemon 串行写 PostgreSQL，关闭时最多排空 2 秒。
+
 ### Client Key 限额与结算
 
 日金额、七天金额、并发和 RPM 按 Client Key 跨账号、跨 Provider 合计，零表示不限；修改限额不重置已用金额。

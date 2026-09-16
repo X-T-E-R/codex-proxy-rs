@@ -10,6 +10,18 @@ where
     Router::new()
         .route("/api/admin/accounts", get(list_accounts::<S>))
         .route("/api/admin/accounts/detail", get(account_detail::<S>))
+        .route(
+            "/api/admin/accounts/turn-state",
+            get(account_turn_state::<S>),
+        )
+        .route(
+            "/api/admin/accounts/turn-state/update",
+            post(update_account_turn_state::<S>),
+        )
+        .route(
+            "/api/admin/accounts/turn-state/use-observed",
+            post(use_observed_account_turn_state::<S>),
+        )
         .route("/api/admin/accounts/export", get(export_accounts::<S>))
         .route("/api/admin/accounts/import", post(import_accounts::<S>))
         .route("/api/admin/accounts/refresh", post(refresh_account::<S>))
@@ -55,6 +67,83 @@ where
             "/api/admin/accounts/oauth/complete",
             post(complete_account_authorization::<S>),
         )
+}
+
+async fn account_turn_state<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let id = query.into_id().map_err(map_wire_error)?;
+    let view = state
+        .admin_services()
+        .accounts()
+        .turn_state(&id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(TurnStateData::from(view)),
+    ))
+}
+
+async fn update_account_turn_state<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<UpdateTurnStateRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let view = state
+        .admin_services()
+        .accounts()
+        .update_turn_state(
+            &id,
+            request.enabled,
+            request.value,
+            request.expected_revision,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(TurnStateData::from(view)),
+    ))
+}
+
+async fn use_observed_account_turn_state<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<UseObservedTurnStateRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let view = state
+        .admin_services()
+        .accounts()
+        .use_observed_turn_state(
+            &id,
+            &request.observation_id,
+            request.enabled,
+            request.expected_revision,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(TurnStateData::from(view)),
+    ))
 }
 
 async fn batch_update_accounts<S>(

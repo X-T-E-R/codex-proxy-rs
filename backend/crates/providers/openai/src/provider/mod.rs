@@ -1,6 +1,6 @@
 //! Codex 的 `gateway-core` Provider adapter。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -33,6 +33,7 @@ use gateway_core::operation::{
     ProviderSessionState, StandaloneSearchRequest,
 };
 use gateway_core::provider_ports::ProviderSessionAffinityKey;
+use gateway_core::provider_ports::turn_state::{TurnStateObservation, TurnStateStore};
 use gateway_core::routing::{
     ModelCapabilities, ModelPresentation, ProviderCandidate, ProviderCatalogGeneration,
     ProviderKind, ProviderModelCapabilities, UpstreamModelId,
@@ -69,6 +70,7 @@ use crate::transport::canonical::{
 use crate::transport::catalog::{
     CodexCatalogCapabilityEvidence, CodexCatalogModel, CodexCatalogVisibility,
 };
+use crate::transport::client::CodexObservedTurnState;
 use crate::transport::diagnostics::{
     CodexFailureCategory, CodexUpstreamFailure, CodexUpstreamSendPhase,
 };
@@ -90,6 +92,9 @@ use crate::transport::request_override::{
 use crate::transport::session::CodexSessionIdentity;
 use crate::transport::usage::normalize_service_tier;
 use crate::transport::websocket::{CodexWebSocketExchangeError, PreviousResponseUnavailableReason};
+use crate::transport::websocket::{
+    CodexWebSocketTurnStateObservations, CodexWebSocketTurnStateResponseId,
+};
 use crate::transport::{
     CODEX_ALPHA_SEARCH_PATH, CODEX_IMAGE_EDITS_PATH, CODEX_IMAGE_GENERATIONS_PATH,
     CODEX_RESPONSES_PATH, CodexAccountSelectionTelemetry, CodexBackendClient,
@@ -119,6 +124,7 @@ const MAX_COOKIE_HEADER_BYTES: usize = 16 * 1024;
 /// 提交边界前最多保留 64 KiB 原始上游 chunk；达到阈值后结束无感换号窗口，
 /// 但不会把上游数据改写成协议失败。
 const MAX_STREAM_PREFETCH_BYTES: usize = 64 * 1024;
+const MAX_PENDING_TURN_STATE_RECEIPTS: usize = 32;
 /// 短暂保留 response.created 等结构事件，让随后到达的明确拒绝可以无感换号；
 /// 到期即放行，避免模型长时间思考时让客户端一直收不到首事件。
 const STREAM_REPLAY_GRACE: Duration = Duration::from_millis(1_200);
@@ -153,6 +159,7 @@ pub struct CodexProvider {
     session_identity: Option<CodexSessionIdentity>,
     session_transport_recovery: CodexSessionTransportRecovery,
     request_body_override: CodexRequestBodyOverrideState,
+    turn_state_store: Option<Arc<dyn TurnStateStore>>,
     stream_max_retries: u32,
 }
 
@@ -196,6 +203,7 @@ impl CodexProvider {
             request_body_override: CodexRequestBodyOverrideState::new(
                 gateway_core::provider_ports::OpenAiRequestBodyOverride::disabled(),
             ),
+            turn_state_store: None,
             stream_max_retries,
         })
     }
@@ -210,6 +218,13 @@ impl CodexProvider {
         request_body_override: CodexRequestBodyOverrideState,
     ) -> Self {
         self.request_body_override = request_body_override;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_turn_state_store(mut self, store: Option<Arc<dyn TurnStateStore>>) -> Self {
+        self.client = self.client.with_turn_state_store(store.clone());
+        self.turn_state_store = store;
         self
     }
 }
@@ -513,6 +528,15 @@ impl Provider for CodexProvider {
             requested_transport
         };
         apply_transport(&mut upstream_request, transport);
+        if let Some(store) = &self.turn_state_store
+            && let Some(value) = store.active_override(lease.account_id().as_str())
+        {
+            upstream_request.turn_state = Some(value);
+            // 手动覆盖是最终账号级出站决策；客户端透传的同名多值头不能再次覆盖它。
+            upstream_request
+                .passthrough_headers
+                .remove("x-codex-turn-state");
+        }
         let metadata = ProviderCallMetadata::new(
             provider_kind,
             upstream_model.clone(),
@@ -564,6 +588,7 @@ impl Provider for CodexProvider {
             websocket_retry_count,
             stream_max_retries: self.stream_max_retries,
             session_capture,
+            turn_state_store: self.turn_state_store.clone(),
         });
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {

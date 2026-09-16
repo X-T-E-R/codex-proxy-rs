@@ -78,6 +78,7 @@ pub async fn initialize(
             .await
             .map_err(|_| OpenAiInitializeError::RuntimePolicy)?,
     );
+    let turn_state_store = ports.turn_state();
     let artifact_cache =
         CodexArtifactProfileCache::new(provider_kind.clone(), ports.artifact_profiles());
     let configured_build = profile.snapshot().desktop_build.parse::<u64>().ok();
@@ -164,7 +165,8 @@ pub async fn initialize(
         )
         .map_err(OpenAiInitializeError::Provider)?
         .with_session_identity(session_identity)
-        .with_request_body_override(request_body_override.clone()),
+        .with_request_body_override(request_body_override.clone())
+        .with_turn_state_store(turn_state_store),
     );
     let token_client = Arc::new(
         credential::token_client::openai_token_client(

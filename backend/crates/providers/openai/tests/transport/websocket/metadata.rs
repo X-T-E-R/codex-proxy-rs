@@ -80,6 +80,11 @@ async fn reused_websocket_should_keep_response_metadata_scoped_to_each_exchange(
         assert_eq!(response.response_metadata, expected, "exchange {round}");
         assert!(response.body.contains(&format!("etag-{round}")));
         assert_eq!(response.turn_state, Some(format!("turn-{round}")));
+        assert_eq!(
+            response.turn_state_observations,
+            vec![format!("turn-{round}")],
+            "exchange {round}"
+        );
         if round > 0 {
             assert!(
                 response

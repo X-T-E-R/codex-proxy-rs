@@ -70,6 +70,32 @@ mod query {
     }
 }
 
+mod turn_state {
+    use gateway_api::admin::accounts::UpdateTurnStateRequest;
+    use serde_json::json;
+
+    #[test]
+    fn update_distinguishes_omitted_null_and_explicit_turn_state_values() {
+        let omitted: UpdateTurnStateRequest = serde_json::from_value(json!({
+            "accountId": "acct_1", "enabled": false, "expectedRevision": 1
+        }))
+        .expect("omitted value");
+        assert_eq!(omitted.value, None);
+
+        let cleared: UpdateTurnStateRequest = serde_json::from_value(json!({
+            "accountId": "acct_1", "enabled": true, "value": null, "expectedRevision": 1
+        }))
+        .expect("null value");
+        assert_eq!(cleared.value, Some(None));
+
+        let replaced: UpdateTurnStateRequest = serde_json::from_value(json!({
+            "accountId": "acct_1", "enabled": true, "value": "opaque", "expectedRevision": 1
+        }))
+        .expect("explicit value");
+        assert_eq!(replaced.value, Some(Some("opaque".to_owned())));
+    }
+}
+
 mod profile_statistics {
     use chrono::NaiveDate;
     use gateway_admin::model::provider_credentials::{

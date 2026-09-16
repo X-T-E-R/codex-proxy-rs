@@ -223,6 +223,11 @@ impl CodexCanonicalDecoder {
         self.response_service_tier.as_deref()
     }
 
+    /// 当前流已经确认的真实上游 response ID。
+    pub fn response_id(&self) -> Option<&str> {
+        self.response_id.as_deref()
+    }
+
     fn decode(&mut self, events: Vec<SseEvent>) -> CodexCanonicalOutcome {
         let mut output = Vec::new();
         for event in events {

@@ -17,6 +17,9 @@ use crate::policy::ClientApiKeyId;
 use crate::routing::UpstreamModelId;
 use crate::validation::{IdentifierError, validate_text};
 
+pub mod turn_state;
+use turn_state::TurnStateStore;
+
 const MAX_PENDING_FLOW_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Provider 可据此决定是否重试，但看不到 SQL、Redis 或秘密原文。
@@ -1221,6 +1224,7 @@ pub struct ProviderStorePorts {
     runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
     ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
     oauth_pending: Arc<dyn OAuthPendingFlowPort>,
+    turn_state: Option<Arc<dyn TurnStateStore>>,
 }
 
 impl ProviderStorePorts {
@@ -1253,7 +1257,19 @@ impl ProviderStorePorts {
             runtime_policy,
             ws_pool_policy,
             oauth_pending,
+            turn_state: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_turn_state(mut self, store: Arc<dyn TurnStateStore>) -> Self {
+        self.turn_state = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn turn_state(&self) -> Option<Arc<dyn TurnStateStore>> {
+        self.turn_state.clone()
     }
 
     #[must_use]

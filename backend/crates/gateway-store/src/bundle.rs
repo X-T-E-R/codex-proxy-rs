@@ -92,6 +92,9 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         REDIS_NAMESPACE,
     )?);
     let runtime_policy = Arc::new(postgres::PgRuntimeSettingsRepository::new(pool.clone()));
+    let (turn_state, turn_state_writer) =
+        postgres::PgTurnStateStore::initialize(pool.clone()).await?;
+    let turn_state = Arc::new(turn_state);
     let oauth_pending = Arc::new(redis::RedisOAuthPendingFlowRepository::new(
         redis_connection.clone(),
         REDIS_NAMESPACE,
@@ -127,7 +130,8 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
             control_plane: postgres::PgControlPlaneRepository::new(pool.clone()),
         }),
         backup_ports(pool.clone(), &config)?,
-    );
+    )
+    .with_turn_state(turn_state.clone());
 
     let execution_repository = Arc::new(postgres::PgExecutionStore::new(pool.clone()));
     let (execution, execution_writer) =
@@ -194,7 +198,8 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         runtime_policy.clone(),
         runtime_policy,
         oauth_pending,
-    );
+    )
+    .with_turn_state(turn_state);
     let worker_leader_lease = Arc::new(redis::worker_lease::RedisWorkerLeaderLeasePort::new(
         credential_leases,
     ));
@@ -213,6 +218,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         client_key_usage_writer,
         admission_release_writer,
         circuit_feedback_writer,
+        turn_state_writer,
         retention,
     )?;
     Ok(StoreBundle {
