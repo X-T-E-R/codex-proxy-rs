@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import type { AccountRow } from './constants'
 import { ChevronDown } from '@lucide/vue'
-import { ref } from 'vue'
 
+import { ref } from 'vue'
 import AccountGroupMarks from '@/components/AccountGroupMarks.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
@@ -27,6 +28,7 @@ import AccountQuotaPanel from './components/AccountQuotaPanel/index.vue'
 import AccountQuotaSummaryCell from './components/AccountQuotaSummaryCell/index.vue'
 import AccountStatusBadge from './components/AccountStatusBadge/index.vue'
 import AccountTableActions from './components/AccountTableActions.vue'
+import AccountTurnStateModal from './components/AccountTurnStateModal.vue'
 import AccountUsagePanel from './components/AccountUsagePanel.vue'
 import { useAccountBatchEditor } from './composables/useAccountBatchEditor'
 import { useAccountConnectionTest } from './composables/useAccountConnectionTest'
@@ -38,7 +40,13 @@ import { useAccountsTable } from './composables/useAccountsTable'
 import { accountColumns, derivedAccountStatus } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
-const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(accountColumns, 'accounts')
+const showTurnStateModal = ref(false)
+const turnStateAccount = ref<AccountRow | null>(null)
+
+function openTurnState(account: AccountRow) {
+  turnStateAccount.value = account
+  showTurnStateModal.value = true
+}
 const {
   loading,
   accounts,
@@ -329,6 +337,7 @@ const {
                 @refresh="handleRefresh"
                 @reauthorize="openReauthorizeAccount"
                 @test="openConnectionTest"
+                @turn-state="openTurnState"
               />
             </template>
 
@@ -376,19 +385,7 @@ const {
       @test="handleTestConnection()"
     />
 
-    <AccountImportTasks
-      v-model="showImportTasks"
-      :tasks="recentImportTasks"
-      :selected-id="importTaskId"
-      :detail="importTaskDetail"
-      :loading="loadingImportTasks"
-      :stopping="stoppingImportTask"
-      :error="importTaskError"
-      @select="importTasks.select"
-      @refresh="importTasks.refresh"
-      @stop="importTasks.stop"
-      @view-accounts="showImportTasks = false; loadAccounts()"
-    />
+    <AccountTurnStateModal v-model="showTurnStateModal" :account="turnStateAccount" />
 
     <AccountCreateModal
       v-model="showCreateModal"

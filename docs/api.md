@@ -371,6 +371,9 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/accounts` | `page`、`pageSize`、`provider`、`groupId`、`search`、`status`、排序字段 | 分页查询账号与汇总 |
 | `GET` | `/api/admin/accounts/detail` | `accountId` | 查询账号详情、额度和本地用量 |
+| `GET` | `/api/admin/accounts/turn-state` | `accountId` | 显式读取 OpenAI 账号最近真实上游 Turn State 与手动覆盖明文 |
+| `POST` | `/api/admin/accounts/turn-state/update` | `{ accountId, enabled, value?, expectedRevision }` | 按账号版本更新出站覆盖 |
+| `POST` | `/api/admin/accounts/turn-state/use-observed` | `{ accountId, observationId, enabled, expectedRevision }` | 仅在观测 ID 仍有效时复制最近上游值 |
 | `GET` | `/api/admin/accounts/export` | `accountIds`、`confirm=export_sensitive_accounts` | 显式导出最多 200 个账号的敏感 Provider 文档 |
 | `POST` | `/api/admin/accounts/import` | `{ provider, data, settings?, outboundProxyId? }` | 导入或按上游身份更新账号，可同时应用调度、分组设置与默认代理 |
 | `POST` | `/api/admin/accounts/import-tasks` | `{ submissionId, items: [{ provider, data, settings?, outboundProxyId? }] }` | 接受后台导入，返回 HTTP 202 和任务摘要 |
@@ -428,29 +431,40 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 浏览器打开的第三方 OAuth 授权页仍使用浏览器自身网络。
 账号出口与连接隔离见 [架构说明](architecture.md#账号出站代理)。
 
-### 账号模型限制
+### OpenAI 账号 Turn State
 
-账号列表和详情返回 `modelAccess: { mode, models }`，模型 ID 区分大小写并精确匹配：
+三条接口只支持已有 OpenAI 账号，使用管理员鉴权及 `Cache-Control: no-store`；明文只在这组显式
+接口返回，账号列表、普通请求日志和审计不包含该值。成功响应使用普通管理信封，`data` 形状如下：
 
-| `mode` | `models` | 含义 |
-| --- | --- | --- |
-| `all` | `[]` | 不额外限制模型，默认值 |
-| `allowlist` | 非空 ID 数组 | 仅允许指定模型 |
-| `denylist` | 非空 ID 数组 | 排除指定模型 |
+```json
+{
+  "accountId": "acct_...",
+  "observed": {
+    "id": "observation-id", "value": "upstream-value", "bytes": 14,
+    "sha256": "lowercase-hex-sha256", "observedAt": "2026-09-16T12:00:00Z",
+    "transport": "http", "upstreamResponseId": null, "clientTurnId": null
+  },
+  "override": {
+    "enabled": false, "value": null, "bytes": 0, "sha256": null, "updatedAt": null
+  },
+  "configRevision": 1
+}
+```
 
-最多 256 项，每个 ID 最多 256 字节；重复 ID 去重，不接受空白、控制字符、`__` 前缀或 `*` 通配符。
-允许保存当前上游目录尚未返回的 ID。限制按全局模型映射后的上游 ID 判断，不扩大账号本身的上游权限。
-例如 Plus 设置 `allowlist` 并选中 luna 的实际 ID，Pro 设置 `denylist` 并选中同一 ID，即可严格分流；
-Pro 使用 `all` 时也能参与 luna 调度。套餐名称不自动生成或修改规则。
+`observed` 未采集时为 `null`；`transport` 为 `http` 或 `websocket`。`bytes` 是 UTF-8
+字节数，`sha256` 为原值的十六进制 SHA-256；可得的上游 response ID 与客户端 turn ID 随观测保存。
+`configRevision` 是该账号覆盖配置的版本，从 1 开始，与全局运行设置 revision 独立。三个接口均返回
+同形 `data`，写入必须提供当前 `expectedRevision`，否则返回 `40901`。
 
-单账号更新或批量更新省略 `modelAccess` 时保留原值，显式提交 `{ "mode": "all", "models": [] }` 清除限制。
-批量接口的调度、分组、模型与代理字段均可省略；省略的字段保持各账号原值。
-提供 `groupIds` 时替换完整分组集合，提供 `concurrencyLimit: null` 时恢复继承运行参数。
-
-限制适用于 Responses HTTP、WebSocket 及其带压缩触发的请求选号，包括重试、亲和和换号；没有合规账号时沿用
-无可用账号错误，不会回退到被禁止的账号。已开始请求使用冻结的政策，新请求使用已发布的新配置。
-Images、独立 Search 及管理员连接测试不受该文本模型限制；连接测试成功只证明指定账号的上游能力。
-`/v1/models` 和单模型查询按当前 Key 范围内账号政策过滤；原生目录保留已有来源选择和完整模型对象。
+`update` 中省略 `value` 保留已保存的覆盖值；显式 `null` 清空值并关闭覆盖，空字符串不能启用。
+值最大 16384 bytes，且只能包含可打印 ASCII（`0x20`–`0x7e`），保证 HTTP header 与 WebSocket
+投影使用同一个无损值；换行、控制字符和非 ASCII 值返回参数错误。`use-observed` 复制当前最近一次
+上游观测并执行相同校验；新观测已替换请求的
+`observationId` 时返回 `40901`，须重新查询并确认。该操作不会把手动覆盖值写成上游观测。
+开启后每次 OpenAI Responses 上游 attempt 在选定账号并完成身份隔离后，统一替换 HTTP 请求头或
+WebSocket `client_metadata` 的出站值，包括当前 turn；关闭后恢复既有续接传递规则。账号 A 的值不会
+带入账号 B。成功、失败和流式传输中实际收到的上游值尽力写入最近观测；观测持久化失败不改变
+客户端响应。仅数据库及备份保存明文，按账号凭据保护。
 
 ### 独立代理管理 / Managed Proxies
 

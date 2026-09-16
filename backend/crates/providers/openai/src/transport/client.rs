@@ -12,6 +12,7 @@ use crate::transport::profile::CodexWireProfileState;
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use futures::{Stream, StreamExt};
+use gateway_core::provider_ports::turn_state::TurnStateStore;
 use gateway_protocol::openai::{
     WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY, events::retry_after_seconds_from_body,
     sse::SseError,
@@ -33,8 +34,9 @@ use super::response_meta::CodexResponseMetadata;
 use super::tls::{CustomCaError, build_reqwest_client_with_custom_ca, custom_ca_env_cache_key};
 use super::websocket::{
     CodexWebSocketExchangeError, CodexWebSocketPool, CodexWebSocketPoolKey,
-    CodexWebSocketRateLimitUpdates, CodexWebSocketRequest, CodexWebSocketResponseMetadataUpdates,
-    PreparedWebSocket, WebSocketOriginBreaker, WebSocketPoolDecision,
+    CodexWebSocketRateLimitUpdates, CodexWebSocketRequest, CodexWebSocketTurnStateObservations,
+    CodexWebSocketTurnStateUpdate, PreparedWebSocket, WebSocketOriginBreaker,
+    WebSocketPoolDecision,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +121,7 @@ pub struct CodexClientVisibleUpstreamResponse {
     content_type: Option<Vec<u8>>,
     client_headers: Vec<(String, Bytes)>,
     body: Bytes,
+    turn_state_observation: Option<CodexObservedTurnState>,
 }
 
 pub(crate) struct CodexClientVisibleUpstreamResponseParts {
@@ -134,12 +137,14 @@ impl CodexClientVisibleUpstreamResponse {
         content_type: Option<Vec<u8>>,
         client_headers: Vec<(String, Bytes)>,
         body: Bytes,
+        turn_state_observation: Option<CodexObservedTurnState>,
     ) -> Self {
         Self {
             status: status.as_u16(),
             content_type,
             client_headers,
             body,
+            turn_state_observation,
         }
     }
 
@@ -157,6 +162,10 @@ impl CodexClientVisibleUpstreamResponse {
 
     pub const fn body(&self) -> &Bytes {
         &self.body
+    }
+
+    pub(crate) fn turn_state_observation(&self) -> Option<&CodexObservedTurnState> {
+        self.turn_state_observation.as_ref()
     }
 
     pub(crate) fn into_parts(self) -> CodexClientVisibleUpstreamResponseParts {
@@ -592,6 +601,30 @@ pub type CodexRateLimitUpdates = CodexWebSocketRateLimitUpdates;
 /// 响应头之后在 live 流中采集的请求级 metadata 更新。
 pub type CodexResponseMetadataUpdates = CodexWebSocketResponseMetadataUpdates;
 
+/// 在真实上游接收边界生成的敏感观测；不实现 Debug，避免原值进入诊断。
+#[derive(Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct CodexObservedTurnState {
+    pub(crate) id: String,
+    pub(crate) value: String,
+    pub(crate) observed_at: DateTime<Utc>,
+}
+
+impl CodexObservedTurnState {
+    pub(crate) fn new(value: String) -> Self {
+        Self {
+            id: Uuid::now_v7().to_string(),
+            value,
+            observed_at: Utc::now(),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
 /// Codex Responses 上游 live SSE 响应。
 pub struct CodexBackendStreamingResponse {
     /// 上游 SSE 字节流。
@@ -602,14 +635,21 @@ pub struct CodexBackendStreamingResponse {
     pub websocket_connection_id: Option<Uuid>,
     /// 响应头或 metadata 事件里最先确认的 turn state。
     pub turn_state: Option<String>,
+    /// 与 continuation turn state 对应的真实接收边界。
+    #[doc(hidden)]
+    pub turn_state_observation: Option<CodexObservedTurnState>,
     /// 上游透传的 `set-cookie` 列表。
     pub set_cookie_headers: Vec<String>,
     /// 上游透传的限流头。
     pub rate_limit_headers: Vec<(String, String)>,
     /// live stream 期间捕获的结构化限流更新。
     pub rate_limit_updates: Option<CodexRateLimitUpdates>,
-    /// live stream 期间捕获的请求级 metadata 更新。
-    pub response_metadata_updates: Option<CodexResponseMetadataUpdates>,
+    /// live stream 期间捕获的 turn-state 更新。
+    pub turn_state_update: Option<CodexTurnStateUpdate>,
+    /// WS 每次 metadata 实际值；独立于 continuation 的首值语义。
+    #[doc(hidden)]
+    pub turn_state_observations: Option<CodexWebSocketTurnStateObservations>,
+    pub(crate) turn_state_response_id: Option<super::websocket::CodexWebSocketTurnStateResponseId>,
     /// WebSocket 连接池决策。
     pub websocket_pool_decision: Option<WebSocketPoolDecision>,
     /// 上游诊断元数据。
@@ -673,6 +713,7 @@ pub struct CodexBackendClient {
     pub(super) websocket_origin_key: String,
     pub(super) outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     pub(super) egress_key: String,
+    pub(super) turn_state_store: Option<Arc<dyn TurnStateStore>>,
 }
 
 impl CodexBackendClient {
@@ -751,6 +792,7 @@ pub(crate) struct PreparedResponseTransport {
     pub(super) requirement: TransportRequirement,
     pub(super) route: PreparedResponseRoute,
     pub(super) metrics: CodexTransportMetrics,
+    pub(super) provider_account_id: Option<String>,
 }
 
 pub(super) enum PreparedResponseRoute {

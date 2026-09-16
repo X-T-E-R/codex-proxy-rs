@@ -64,11 +64,20 @@ pub async fn initialize(
     let runtime_policy = ports.runtime_policy();
     let ws_pool_policy = ports.ws_pool_policy();
     let credential_state = ports.credential_state();
-    let profile =
-        transport::profile::CodexWireProfileState::new(transport::profile::CodexWireProfile {
-            residency: config.residency,
-            ..Default::default()
-        });
+    let profile = config.wire_profile_state();
+    profile.update_user_agent_override(
+        runtime_policy
+            .load_user_agent_override()
+            .await
+            .map_err(|_| OpenAiInitializeError::RuntimePolicy)?,
+    );
+    let request_body_override = CodexRequestBodyOverrideState::new(
+        runtime_policy
+            .load_openai_request_body_override()
+            .await
+            .map_err(|_| OpenAiInitializeError::RuntimePolicy)?,
+    );
+    let turn_state_store = ports.turn_state();
     let artifact_cache =
         CodexArtifactProfileCache::new(provider_kind.clone(), ports.artifact_profiles());
     let configured_build = profile.snapshot().desktop_build.parse::<u64>().ok();
@@ -176,7 +185,9 @@ pub async fn initialize(
             config.stream_max_retries(),
         )
         .map_err(OpenAiInitializeError::Provider)?
-        .with_session_identity(session_identity),
+        .with_session_identity(session_identity)
+        .with_request_body_override(request_body_override.clone())
+        .with_turn_state_store(turn_state_store),
     );
     let token_client = Arc::new(
         credential::token_client::openai_token_client(

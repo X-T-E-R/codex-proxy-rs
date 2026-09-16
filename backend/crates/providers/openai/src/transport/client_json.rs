@@ -120,6 +120,7 @@ impl CodexBackendClient {
                     content_type,
                     client_headers,
                     raw_body,
+                    None,
                 ))),
                 retry_after_seconds,
                 diagnostics: Box::new(diagnostics),

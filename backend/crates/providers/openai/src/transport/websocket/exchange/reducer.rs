@@ -32,6 +32,8 @@ pub(super) struct ReducedWebSocketEvent {
     pub(super) action: ExchangeAction,
     pub(super) diagnostic_event_type: Option<String>,
     pub(super) turn_state_update: Option<String>,
+    pub(super) turn_state_observation: Option<String>,
+    pub(super) upstream_response_id: Option<String>,
 }
 
 pub(super) fn reduce_websocket_event(
@@ -46,6 +48,8 @@ pub(super) fn reduce_websocket_event(
             action: ExchangeAction::Ignore,
             diagnostic_event_type: None,
             turn_state_update: None,
+            turn_state_observation: None,
+            upstream_response_id: None,
         });
     };
     let diagnostic_event_type = diagnostic_event_type(websocket_event_type(&value));
@@ -56,6 +60,8 @@ pub(super) fn reduce_websocket_event(
             action: ExchangeAction::RateLimits(parsed),
             diagnostic_event_type,
             turn_state_update: None,
+            turn_state_observation: None,
+            upstream_response_id: None,
         });
     }
 
@@ -63,10 +69,8 @@ pub(super) fn reduce_websocket_event(
         &mut metadata.response_metadata,
         websocket_metadata_headers(&value),
     );
-    if let Some(model) = response_meta::reported_model_from_event(&value) {
-        metadata.response_metadata.effective_model = Some(model.to_owned());
-    }
-    let turn_state_update = websocket_metadata_turn_state(&value).and_then(|turn_state| {
+    let turn_state_observation = websocket_metadata_turn_state(&value);
+    let turn_state_update = turn_state_observation.clone().and_then(|turn_state| {
         if metadata.turn_state.is_some() {
             return None;
         }
@@ -75,10 +79,11 @@ pub(super) fn reduce_websocket_event(
     });
 
     let event = websocket_event_type(&value);
+    let upstream_response_id = websocket_response_completed_id(&value);
     if event == Some("response.completed")
-        && let Some(response_id) = websocket_response_completed_id(&value)
+        && let Some(response_id) = upstream_response_id.as_deref()
     {
-        continuation.record_completed(response_id);
+        continuation.record_completed(response_id.to_owned());
     }
 
     let terminal = match event {
@@ -95,6 +100,8 @@ pub(super) fn reduce_websocket_event(
         action,
         diagnostic_event_type,
         turn_state_update,
+        turn_state_observation,
+        upstream_response_id,
     })
 }
 

@@ -390,20 +390,22 @@ Continuation 仍受原请求的 Client Key、账号范围、Provider 和发送/�
 
 会话亲和是优先选择提示，不是硬账号绑定；native continuation 才携带不可跨越的 owner 约束。
 
-### 并发等待
+OpenAI 的实验性 Turn State 覆盖按账号保存在 PostgreSQL，默认关闭。Provider 在取得账号 lease、
+完成账号身份及续接状态隔离后读取该账号的启用值，统一作用于本次 attempt 的 HTTP 和上游 WebSocket
+出站编码；不更改 Redis native continuation pin 的保存和读取。真实上游 HTTP 响应头或 WebSocket
+metadata 单独记录为该账号最近观测，不把手动出站值当成上游事实。观测写入尽力执行，失败不改变
+客户端结果；管理端读取和覆盖修改经专用 Admin 端口，按账号版本及观测 ID 防并发覆盖。
+服务启动时在接受请求前把最多 65536 个已有账号配置条目（含禁用 revision tombstone）hydrate 到
+进程内账号快照；超限会阻止启动，不截断。管理事务提交后按账号 revision 单调更新快照，迟到的旧 revision
+不能覆盖新值或禁用 tombstone。Provider 在每个 attempt 的最终账号边界只读一次快照，不执行 SQL；已经读到旧值的 attempt
+继续使用该值，后续 attempt 使用新值。重启以 PostgreSQL 全量重建快照。
 
-Core 的 `concurrency` 拥有中立的有界等待位置与 FIFO 唤醒，不依赖账号、路由或执行会话；
-账号策略仅引用其中的等待配置值。执行准入与各 Provider 选择器分别持有等待队列，按 Key/账号隔离。
-运行并发仍由 Redis 原子准入与账号租约裁决，等待队列只保存当前进程中的等待位置，不复制运行计数，
-也不持久化正文或在重启后重放请求。每个等待 owner 最多容纳 1,024 个等待者作为资源兜底。
-
-新请求不能抢占已有等待队列；队首短周期重读容量，取消/完成等待通过 Drop 回收位置并唤醒后继。
-Provider 等待重试仍在同一次未发送准备阶段重新读取账号资格、容量、目录和冷却，不增加 attempt；
-Key 的 RPM 在成功准入时才计数，金额限制在入队前及成功准入后检查。
-账号并发与本地请求间隔可有限等待，权限、额度和上游冷却不能作为可等待容量。
-密钥准入、账号选择与后续重试共享请求级等待预算，从首次入队开始计时，同时受请求整体截止时刻约束。
-切换等待层、账号或 Provider 不重置等待时限；没有发生排队时不启动该计时，也不据此中断已开始的上游生成。
-队列满/超时属于本地容量拒绝，不作为上游限流反馈或 Provider 故障熔断证据。
+上游值在 HTTP headers、WebSocket 握手或每个 metadata 帧的实际接收边界生成 UUIDv7 与观测时间。
+同一观测随后取得 response ID 时以相同观测 ID 补充关联；PostgreSQL 只接受时间/ID 更新的观测或同 ID
+补充，旧长流的迟到写入不能覆盖新请求。WebSocket 的全量观测通道独立于 continuation 的首值通道，
+连接复用仍在每轮清空连接级 metadata；单次 WS exchange 的待消费观测最多保留最新 32 项。数据面只向
+容量 512 的进程内队列执行非阻塞入队；满载或关闭时
+丢弃并记录不含原值的告警，Store daemon 串行写 PostgreSQL，关闭时最多排空 2 秒。
 
 ### Client Key 限额与结算
 

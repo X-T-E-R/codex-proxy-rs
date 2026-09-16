@@ -351,13 +351,16 @@ pub async fn initialize(
     auth.ensure_default_admin(config.default_password.expose())
         .await?;
 
-    let accounts = Arc::new(DefaultAccountsService::new(
-        store.accounts(),
-        store.account_runtime(),
-        registry.clone(),
-        snapshot.clone(),
-        probe.clone(),
-    ));
+    let accounts = Arc::new(
+        DefaultAccountsService::new(
+            store.accounts(),
+            store.account_runtime(),
+            registry.clone(),
+            snapshot.clone(),
+            probe.clone(),
+        )
+        .with_turn_state(store.turn_state()),
+    );
     let backup_ports = store.backup();
     let backups = Arc::new(DefaultBackupService::new(
         backup_ports.repository(),

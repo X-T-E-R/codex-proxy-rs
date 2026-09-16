@@ -13,13 +13,15 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::transport::{
-    diagnostics::CodexUpstreamDiagnostics, response_meta::CodexResponseMetadata,
+    client::CodexObservedTurnState, diagnostics::CodexUpstreamDiagnostics,
+    response_meta::CodexResponseMetadata,
 };
 
 use super::error::CodexWebSocketExchangeError;
 use super::pool::{CodexWebSocketConnectionMetadata, WebSocketPoolDecision};
 
 const WEBSOCKET_STREAM_BUFFER: usize = 16;
+const WEBSOCKET_TURN_STATE_OBSERVATION_BUFFER: usize = 32;
 
 pub(super) use self::stream::{WebSocketStreamPoolReturn, stream_websocket_response};
 
@@ -31,14 +33,17 @@ pub struct CodexWebSocketStreamingExchange {
     pub body: CodexWebSocketSseStream,
     /// 上游为本次响应返回的首个 turn state。
     pub turn_state: Option<String>,
+    pub(crate) turn_state_observation: Option<CodexObservedTurnState>,
     /// 上游握手响应里的 `set-cookie` 列表。
     pub set_cookie_headers: Vec<String>,
     /// 上游握手响应里的限流头。
     pub rate_limit_headers: Vec<(String, String)>,
     /// 上游内部 `codex.rate_limits` 事件里的结构化动态更新。
     pub rate_limit_updates: CodexWebSocketRateLimitUpdates,
-    /// 上游内部 metadata 事件里的请求级动态更新。
-    pub response_metadata_updates: CodexWebSocketResponseMetadataUpdates,
+    /// 上游内部 metadata 事件里的首个动态 turn state。
+    pub turn_state_update: CodexWebSocketTurnStateUpdate,
+    pub turn_state_observations: CodexWebSocketTurnStateObservations,
+    pub(crate) turn_state_response_id: CodexWebSocketTurnStateResponseId,
     /// WebSocket 连接池决策。
     pub pool_decision: Option<WebSocketPoolDecision>,
     /// terminal completed 后该 socket 是否会保留 connection-local continuation。
@@ -54,16 +59,10 @@ pub type CodexWebSocketSseStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, CodexWebSocketExchangeError>> + Send + 'static>>;
 /// live 流中的结构化限流动态更新。
 pub type CodexWebSocketRateLimitUpdates = Arc<Mutex<Vec<ParsedRateLimits>>>;
-/// 单次响应的动态 metadata，与连接池保存的握手快照隔离。
-#[derive(Debug, Default)]
-pub struct CodexWebSocketResponseMetadataUpdate {
-    /// 当前响应首次声明的会话续接状态。
-    pub turn_state: Option<String>,
-    /// 当前响应最新的服务端模型报告。
-    pub reported_model: Option<String>,
-}
-
-pub type CodexWebSocketResponseMetadataUpdates = Arc<Mutex<CodexWebSocketResponseMetadataUpdate>>;
+/// live 流中的 turn state 动态更新。
+pub type CodexWebSocketTurnStateUpdate = Arc<Mutex<Option<String>>>;
+pub type CodexWebSocketTurnStateObservations = Arc<Mutex<Vec<CodexObservedTurnState>>>;
+pub(crate) type CodexWebSocketTurnStateResponseId = Arc<Mutex<Option<String>>>;
 
 pub(super) fn reusable_websocket_metadata(
     mut metadata: CodexWebSocketConnectionMetadata,

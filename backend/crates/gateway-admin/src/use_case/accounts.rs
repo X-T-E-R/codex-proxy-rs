@@ -8,6 +8,7 @@ use futures::StreamExt as _;
 use gateway_core::{
     account::ProviderAccountId,
     engine::probe::{AccountProbe, AccountProbeRequest},
+    provider_ports::turn_state::{TurnStateStore, TurnStateStoreError, TurnStateView},
     routing::{ProviderKind, UpstreamModelId},
     runtime::SnapshotControl,
 };
@@ -44,9 +45,45 @@ use super::{
 
 const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 
+fn map_turn_state_error(error: TurnStateStoreError) -> AdminError {
+    match error {
+        TurnStateStoreError::Invalid => AdminError::invalid("Turn State 值无效"),
+        TurnStateStoreError::NotFound => AdminError::not_found("OpenAI 账号不存在"),
+        TurnStateStoreError::Conflict => AdminError::conflict("Turn State 已变化，请刷新后重试"),
+        TurnStateStoreError::Unavailable => AdminError::unavailable("Turn State 服务暂不可用"),
+    }
+}
+
 /// 统一账号页消费的服务。
 #[async_trait]
 pub trait AccountsService: Send + Sync {
+    async fn turn_state(
+        &self,
+        _account_id: &ProviderAccountId,
+    ) -> Result<TurnStateView, AdminError> {
+        Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
+    async fn update_turn_state(
+        &self,
+        _account_id: &ProviderAccountId,
+        _enabled: bool,
+        _value: Option<Option<String>>,
+        _expected_revision: u64,
+    ) -> Result<TurnStateView, AdminError> {
+        Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
+    async fn use_observed_turn_state(
+        &self,
+        _account_id: &ProviderAccountId,
+        _observation_id: &str,
+        _enabled: bool,
+        _expected_revision: u64,
+    ) -> Result<TurnStateView, AdminError> {
+        Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError>;
 
     async fn export(
@@ -153,6 +190,7 @@ pub(crate) struct DefaultAccountsService {
     providers: ProviderAdminRegistry,
     snapshot: Arc<dyn SnapshotControl>,
     probe: Arc<dyn AccountProbe>,
+    turn_state: Option<Arc<dyn TurnStateStore>>,
     reset_credit_locks:
         Arc<futures::lock::Mutex<BTreeMap<ProviderAccountId, Arc<futures::lock::Mutex<()>>>>>,
 }
@@ -172,8 +210,14 @@ impl DefaultAccountsService {
             providers,
             snapshot,
             probe,
+            turn_state: None,
             reset_credit_locks: Arc::new(futures::lock::Mutex::new(BTreeMap::new())),
         }
+    }
+
+    pub(crate) fn with_turn_state(mut self, store: Option<Arc<dyn TurnStateStore>>) -> Self {
+        self.turn_state = store;
+        self
     }
 
     async fn reset_credit_lock(
@@ -357,6 +401,53 @@ impl DefaultAccountsService {
 
 #[async_trait]
 impl AccountsService for DefaultAccountsService {
+    async fn turn_state(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<TurnStateView, AdminError> {
+        self.turn_state
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 服务暂不可用"))?
+            .load(account_id.as_str())
+            .await
+            .map_err(map_turn_state_error)
+    }
+
+    async fn update_turn_state(
+        &self,
+        account_id: &ProviderAccountId,
+        enabled: bool,
+        value: Option<Option<String>>,
+        expected_revision: u64,
+    ) -> Result<TurnStateView, AdminError> {
+        self.turn_state
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 服务暂不可用"))?
+            .update(account_id.as_str(), enabled, value, expected_revision)
+            .await
+            .map_err(map_turn_state_error)
+    }
+
+    async fn use_observed_turn_state(
+        &self,
+        account_id: &ProviderAccountId,
+        observation_id: &str,
+        enabled: bool,
+        expected_revision: u64,
+    ) -> Result<TurnStateView, AdminError> {
+        self.turn_state
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 服务暂不可用"))?
+            .use_observed(
+                account_id.as_str(),
+                observation_id,
+                enabled,
+                expected_revision,
+            )
+            .await
+            .map_err(map_turn_state_error)
+    }
+
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError> {
         let runtime = self
             .account_runtime

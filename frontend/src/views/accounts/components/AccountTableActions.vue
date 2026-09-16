@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { AccountRow } from '../constants'
-import { KeyRound, MoreHorizontal, Pencil, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
+import { FlaskConical, KeyRound, MoreHorizontal, Pencil, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
 
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseMenuItem from '@/components/base/BaseMenuItem.vue'
@@ -21,6 +21,7 @@ const emit = defineEmits<{
   test: [account: AccountRow]
   refresh: [accountId: string]
   reauthorize: [account: AccountRow]
+  turnState: [account: AccountRow]
 }>()
 </script>
 
@@ -83,6 +84,12 @@ const emit = defineEmits<{
               <KeyRound class="size-3.5 text-cp-text-quaternary" />
             </template>
             重新授权
+          </BaseMenuItem>
+          <BaseMenuItem v-if="account.provider === 'openai'" @click.stop="(close(), emit('turnState', account))">
+            <template #icon>
+              <FlaskConical class="size-3.5 text-cp-text-quaternary" />
+            </template>
+            Turn State 实验
           </BaseMenuItem>
           <BaseMenuItem
             :loading="recovering"

@@ -241,26 +241,9 @@ impl CodexCanonicalDecoder {
         self.response_service_tier.as_deref()
     }
 
-    /// 真实 HTTP 响应头提供初始报告；流内请求级报告可覆盖它。
-    #[must_use]
-    pub fn with_reported_model(mut self, model: Option<&str>) -> Self {
-        self.reported_model = model.and_then(observed_model_name).map(str::to_owned);
-        self
-    }
-
-    /// 接收 transport 已解析的内部 metadata 报告，内部帧无需交付客户端。
-    pub(crate) fn observe_reported_model(&mut self, model: &str) {
-        if let Some(model) = observed_model_name(model) {
-            self.reported_model = Some(model.to_owned());
-        }
-    }
-
-    /// 官方服务端报告优先；缺少报告时仅使用正文明确声明，不使用请求兜底值。
-    #[must_use]
-    pub fn response_model(&self) -> Option<&str> {
-        self.reported_model
-            .as_deref()
-            .or_else(|| self.response_model.model())
+    /// 当前流已经确认的真实上游 response ID。
+    pub fn response_id(&self) -> Option<&str> {
+        self.response_id.as_deref()
     }
 
     fn decode(&mut self, events: Vec<SseEvent>) -> CodexCanonicalOutcome {

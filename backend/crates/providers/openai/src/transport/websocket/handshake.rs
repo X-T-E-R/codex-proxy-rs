@@ -356,6 +356,7 @@ fn websocket_opening_error(response: &WsResponse<Option<Vec<u8>>>) -> CodexWebSo
                     content_type,
                     client_headers,
                     raw_body,
+                    None,
                 ))
             }),
         response_meta::set_cookie_headers(response.headers()),

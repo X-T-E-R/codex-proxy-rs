@@ -169,6 +169,7 @@ struct CollectedBackendResponse {
     transport: CodexBackendTransport,
     usage: Option<TokenUsage>,
     turn_state: Option<String>,
+    turn_state_observations: Vec<String>,
     set_cookie_headers: Vec<String>,
     rate_limit_headers: Vec<(String, String)>,
     websocket_pool_decision: Option<WebSocketPoolDecision>,
@@ -248,13 +249,14 @@ async fn collect_backend_response(
         set_cookie_headers,
         mut rate_limit_headers,
         rate_limit_updates,
-        response_metadata_updates,
+        turn_state_update,
+        turn_state_observations,
         websocket_pool_decision,
         diagnostics: _,
         response_metadata,
         mut transport_metrics,
         connection_local_continuation,
-        cyber_policy_refusal: _,
+        ..
     } = response;
     let mut body_bytes = Vec::new();
     while let Some(chunk) = body.next().await {
@@ -277,6 +279,18 @@ async fn collect_backend_response(
         turn_state = update.turn_state.clone().or(turn_state);
         reported_model = update.reported_model.clone().or(reported_model);
     }
+    let turn_state_observations = turn_state_observations.map(|observations| async move {
+        observations
+            .lock()
+            .await
+            .iter()
+            .map(|observation| observation.value().to_owned())
+            .collect::<Vec<_>>()
+    });
+    let turn_state_observations = match turn_state_observations {
+        Some(observations) => observations.await,
+        None => Vec::new(),
+    };
     let body = String::from_utf8_lossy(&body_bytes).into_owned();
     let usage = extract_sse_usage(&body).map_err(CodexClientError::InvalidSse)?;
     Ok(CollectedBackendResponse {
@@ -284,6 +298,7 @@ async fn collect_backend_response(
         transport,
         usage,
         turn_state,
+        turn_state_observations,
         set_cookie_headers,
         rate_limit_headers,
         websocket_pool_decision,

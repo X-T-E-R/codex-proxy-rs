@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, net::IpAddr, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
+use gateway_core::provider_ports::turn_state::TurnStateStore;
 
 use super::backup::BackupStorePorts;
 use crate::model::{
@@ -488,6 +489,7 @@ pub struct AdminStorePorts {
     observability: Arc<dyn ObservabilityStore>,
     settings: Arc<dyn SettingsStore>,
     backup: BackupStorePorts,
+    turn_state: Option<Arc<dyn TurnStateStore>>,
 }
 
 impl AdminStorePorts {
@@ -507,7 +509,19 @@ impl AdminStorePorts {
             observability,
             settings,
             backup,
+            turn_state: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_turn_state(mut self, store: Arc<dyn TurnStateStore>) -> Self {
+        self.turn_state = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn turn_state(&self) -> Option<Arc<dyn TurnStateStore>> {
+        self.turn_state.clone()
     }
 
     #[must_use]

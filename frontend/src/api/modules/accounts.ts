@@ -330,6 +330,28 @@ export interface AccountOAuthCompleteResponse {
   accountId: string
 }
 
+export interface AccountTurnStateResponse {
+  accountId: string
+  observed: null | {
+    id: string
+    value: string
+    bytes: number
+    sha256: string
+    observedAt: string
+    transport: string
+    upstreamResponseId: string | null
+    clientTurnId: string | null
+  }
+  override: {
+    enabled: boolean
+    value: string | null
+    bytes: number
+    sha256: string | null
+    updatedAt: string | null
+  }
+  configRevision: number
+}
+
 export interface AccountUpdateResponse {
   accountId: string
   configRevision: number
@@ -365,6 +387,18 @@ interface AccountListParams {
 
 interface AccountIdParam {
   accountId: string
+}
+
+interface AccountTurnStateUpdateParam extends AccountIdParam {
+  enabled: boolean
+  value?: string | null
+  expectedRevision: number
+}
+
+interface AccountTurnStateUseObservedParam extends AccountIdParam {
+  observationId: string
+  enabled: boolean
+  expectedRevision: number
 }
 
 interface AccountResetCreditConsumeParam extends AccountIdParam {
@@ -451,6 +485,30 @@ export function getAccounts(data: AccountListParams, options: RequestOptions = {
     method: 'GET',
     params: data,
     ...options,
+  })
+}
+
+export function getAccountTurnState(data: AccountIdParam) {
+  return request<AccountTurnStateResponse>({
+    url: '/api/admin/accounts/turn-state',
+    method: 'GET',
+    params: data,
+  })
+}
+
+export function updateAccountTurnState(data: AccountTurnStateUpdateParam) {
+  return request<AccountTurnStateResponse>({
+    url: '/api/admin/accounts/turn-state/update',
+    method: 'POST',
+    data,
+  })
+}
+
+export function useObservedAccountTurnState(data: AccountTurnStateUseObservedParam) {
+  return request<AccountTurnStateResponse>({
+    url: '/api/admin/accounts/turn-state/use-observed',
+    method: 'POST',
+    data,
   })
 }
 
