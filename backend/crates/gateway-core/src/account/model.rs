@@ -168,6 +168,25 @@ impl CredentialRevision {
     }
 }
 
+/// 仅在上游账号身份实际替换时推进；普通 access-token refresh 不改变它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AccountIdentityRevision(NonZeroU64);
+
+impl AccountIdentityRevision {
+    pub const INITIAL: Self = Self(NonZeroU64::MIN);
+
+    pub fn new(value: u64) -> Result<Self, CredentialError> {
+        NonZeroU64::new(value)
+            .map(Self)
+            .ok_or(CredentialError::InvalidRevision)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
 /// Provider-owned 的明文 credential JSON。
 ///
 /// Core 只保证顶层是 object，绝不读取其中的 AT、RT、Cookie 或 Provider key。
@@ -666,6 +685,7 @@ pub struct ProviderAccount {
     plan_type: Option<String>,
     authentication_kind: String,
     revision: CredentialRevision,
+    identity_revision: AccountIdentityRevision,
     enabled: bool,
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
@@ -701,6 +721,7 @@ impl ProviderAccount {
             plan_type: None,
             authentication_kind,
             revision,
+            identity_revision: AccountIdentityRevision::INITIAL,
             enabled: true,
             concurrency_limit: None,
             weight: AccountWeight::DEFAULT,
@@ -799,6 +820,20 @@ impl ProviderAccount {
     #[must_use]
     pub const fn revision(&self) -> CredentialRevision {
         self.revision
+    }
+
+    #[must_use]
+    pub const fn identity_revision(&self) -> AccountIdentityRevision {
+        self.identity_revision
+    }
+
+    #[must_use]
+    pub const fn with_identity_revision(
+        mut self,
+        identity_revision: AccountIdentityRevision,
+    ) -> Self {
+        self.identity_revision = identity_revision;
+        self
     }
 
     #[must_use]

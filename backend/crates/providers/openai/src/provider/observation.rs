@@ -691,7 +691,7 @@ pub(super) fn codex_request_context<'a>(
     }
 }
 
-pub(super) fn build_cookie_header(
+pub(crate) fn build_cookie_header(
     cookies: &[RuntimeCodexCookie],
 ) -> Result<Option<SecretString>, ProviderError> {
     if cookies.is_empty() {

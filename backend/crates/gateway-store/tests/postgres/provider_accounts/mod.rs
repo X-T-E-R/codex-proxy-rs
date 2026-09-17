@@ -66,6 +66,7 @@ struct CoreRefreshRow {
     plan_type: Option<String>,
     provider_credentials_json: serde_json::Value,
     credential_revision: i64,
+    identity_revision: i64,
     credential_state: String,
     last_error_reason: Option<String>,
     last_error_message: Option<String>,
@@ -1810,7 +1811,7 @@ async fn core_refresh_cas_updates_profile_and_credential_under_one_revision() {
     );
 
     let row = sqlx::query_as::<_, CoreRefreshRow>(
-        "select name, email, plan_type, provider_credentials_json, credential_revision,
+        "select name, email, plan_type, provider_credentials_json, credential_revision, identity_revision,
                 credential_state, last_error_reason, last_error_message,
                 quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at
          from provider_accounts where id = 'acct_core_refresh'",
@@ -1826,6 +1827,7 @@ async fn core_refresh_cas_updates_profile_and_credential_under_one_revision() {
         "after-secret"
     );
     assert_eq!(row.credential_revision, 2);
+    assert_eq!(row.identity_revision, 1);
     assert_eq!(row.credential_state, "ready");
     assert_eq!(row.last_error_reason, None);
     assert_eq!(row.last_error_message, None);
@@ -1855,6 +1857,7 @@ async fn core_refresh_cas_updates_profile_and_credential_under_one_revision() {
         .await
         .expect("load current credential without a caller revision");
     assert_eq!(current.account.revision().get(), 2);
+    assert_eq!(current.account.identity_revision().get(), 1);
     assert_eq!(
         current.credential.expose_to_provider()["access_token"],
         "after-secret"
@@ -2010,8 +2013,8 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         .expect("rotate provider account");
     assert_eq!(rotation.config_revision.get(), 3);
     assert_eq!(rotation.credential_revision.get(), 2);
-    let restored: (String, String, Option<String>) = sqlx::query_as(
-        "select credential_state, upstream_user_id, upstream_account_id
+    let restored: (String, String, Option<String>, i64) = sqlx::query_as(
+        "select credential_state, upstream_user_id, upstream_account_id, identity_revision
          from provider_accounts where id = $1",
     )
     .bind("acct_admin_a")
@@ -2024,6 +2027,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
             "ready".to_owned(),
             "user-admin-rebound".to_owned(),
             Some("workspace-admin-rebound".to_owned()),
+            2,
         )
     );
 

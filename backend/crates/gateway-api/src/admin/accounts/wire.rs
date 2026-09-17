@@ -1,7 +1,293 @@
 //! 账号管理请求、响应与查询 wire contract。
 
 use super::*;
-use gateway_core::provider_ports::turn_state::TurnStateView;
+use gateway_admin::model::accounts::{
+    ModelTurnStateCaptureJob, ModelTurnStateCaptureStatus, ModelTurnStateResult,
+};
+use gateway_core::provider_ports::turn_state::{
+    ModelTurnStatePinAction, ModelTurnStateUpdate, TurnStateView,
+};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelTurnStateQuery {
+    pub account_id: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartModelTurnStateCaptureRequest {
+    pub account_id: String,
+    pub model: String,
+    pub expected_revision: u64,
+    pub expected_identity_revision: u64,
+    pub expected_effective_model: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelTurnStateCaptureQuery {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CancelModelTurnStateCaptureRequest {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ModelTurnStatePinActionWire {
+    Keep,
+    Replace,
+    Clear,
+    Invalidate,
+}
+
+impl From<ModelTurnStatePinActionWire> for ModelTurnStatePinAction {
+    fn from(value: ModelTurnStatePinActionWire) -> Self {
+        match value {
+            ModelTurnStatePinActionWire::Keep => Self::Keep,
+            ModelTurnStatePinActionWire::Replace => Self::Replace,
+            ModelTurnStatePinActionWire::Clear => Self::Clear,
+            ModelTurnStatePinActionWire::Invalidate => Self::Invalidate,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateModelTurnStateRequest {
+    pub account_id: String,
+    pub model: String,
+    pub expected_revision: u64,
+    pub expected_identity_revision: u64,
+    pub expected_effective_model: String,
+    pub lock_enabled: bool,
+    pub capture_enabled: bool,
+    pub reuse_window_seconds: u32,
+    pub capture_proxy_id: Option<String>,
+    pub max_attempts: u8,
+    pub attempt_timeout_seconds: u16,
+    pub job_timeout_seconds: u16,
+    pub backoff_seconds: u8,
+    pub max_backoff_seconds: u8,
+    pub cooldown_seconds: u32,
+    pub pin_action: ModelTurnStatePinActionWire,
+    pub value: Option<String>,
+}
+
+impl UpdateModelTurnStateRequest {
+    pub fn into_update(self) -> ModelTurnStateUpdate {
+        ModelTurnStateUpdate {
+            expected_identity_revision: self.expected_identity_revision,
+            expected_effective_model: self.expected_effective_model,
+            lock_enabled: self.lock_enabled,
+            capture_enabled: self.capture_enabled,
+            reuse_window_seconds: self.reuse_window_seconds,
+            capture_proxy_id: self.capture_proxy_id,
+            max_attempts: self.max_attempts,
+            attempt_timeout_seconds: self.attempt_timeout_seconds,
+            job_timeout_seconds: self.job_timeout_seconds,
+            backoff_seconds: self.backoff_seconds,
+            max_backoff_seconds: self.max_backoff_seconds,
+            cooldown_seconds: self.cooldown_seconds,
+            pin_action: self.pin_action.into(),
+            value: self.value,
+            expected_revision: self.expected_revision,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTurnStateData {
+    account_id: String,
+    requested_model: String,
+    effective_model: String,
+    identity_revision: u64,
+    config_revision: u64,
+    lock_enabled: bool,
+    capture_enabled: bool,
+    reuse_window_seconds: u32,
+    capture_proxy_id: Option<String>,
+    capture_proxy: Option<ModelTurnStateCaptureProxyData>,
+    capture_policy: ModelTurnStateCapturePolicyData,
+    pin: Option<ModelTurnStatePinData>,
+    legacy_override: LegacyTurnStateData,
+    capture: Option<ModelTurnStateCaptureJobData>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelTurnStateCaptureProxyData {
+    id: String,
+    name: String,
+    endpoint: String,
+    last_test_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelTurnStateCapturePolicyData {
+    max_attempts: u8,
+    attempt_timeout_seconds: u16,
+    job_timeout_seconds: u16,
+    backoff_seconds: u8,
+    max_backoff_seconds: u8,
+    cooldown_seconds: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelTurnStatePinData {
+    value: String,
+    encoded_bytes: usize,
+    raw_bytes: Option<usize>,
+    decoded_bytes: Option<usize>,
+    ciphertext_bytes: Option<usize>,
+    token_version: Option<u8>,
+    envelope_format: Option<&'static str>,
+    issued_at: Option<DateTime<Utc>>,
+    timestamp_verified: bool,
+    sha256: String,
+    captured_at: DateTime<Utc>,
+    reuse_deadline: DateTime<Utc>,
+    source: String,
+    compatible_transport: String,
+    status: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyTurnStateData {
+    enabled: bool,
+    configured: bool,
+    will_apply_when_model_pin_unavailable: bool,
+}
+
+impl From<ModelTurnStateResult> for ModelTurnStateData {
+    fn from(result: ModelTurnStateResult) -> Self {
+        let view = result.state;
+        let now = Utc::now();
+        let model_pin_available = view.lock_enabled
+            && view
+                .pin
+                .as_ref()
+                .is_some_and(|pin| !pin.invalidated && pin.reuse_deadline > now);
+        Self {
+            account_id: view.account_id,
+            requested_model: view.requested_model,
+            effective_model: view.effective_model,
+            identity_revision: view.identity_revision,
+            config_revision: view.config_revision,
+            lock_enabled: view.lock_enabled,
+            capture_enabled: view.capture_enabled,
+            reuse_window_seconds: view.reuse_window_seconds,
+            capture_proxy_id: view.capture_proxy_id,
+            capture_proxy: view
+                .capture_proxy
+                .map(|proxy| ModelTurnStateCaptureProxyData {
+                    id: proxy.id,
+                    name: proxy.name,
+                    endpoint: proxy.endpoint,
+                    last_test_at: proxy.last_test_at,
+                }),
+            capture_policy: ModelTurnStateCapturePolicyData {
+                max_attempts: view.capture_policy.max_attempts,
+                attempt_timeout_seconds: view.capture_policy.attempt_timeout_seconds,
+                job_timeout_seconds: view.capture_policy.job_timeout_seconds,
+                backoff_seconds: view.capture_policy.backoff_seconds,
+                max_backoff_seconds: view.capture_policy.max_backoff_seconds,
+                cooldown_seconds: view.capture_policy.cooldown_seconds,
+            },
+            pin: view.pin.map(|pin| ModelTurnStatePinData {
+                status: if pin.invalidated || pin.reuse_deadline <= now {
+                    "aged"
+                } else {
+                    "fresh"
+                },
+                value: pin.value,
+                encoded_bytes: pin.encoded_bytes,
+                raw_bytes: pin.raw_bytes,
+                decoded_bytes: pin.raw_bytes,
+                ciphertext_bytes: pin.ciphertext_bytes,
+                token_version: pin.token_version,
+                envelope_format: pin.envelope_format,
+                issued_at: pin.issued_at,
+                timestamp_verified: pin.timestamp_verified,
+                sha256: pin.sha256,
+                captured_at: pin.captured_at,
+                reuse_deadline: pin.reuse_deadline,
+                source: pin.source,
+                compatible_transport: pin.compatible_transport,
+            }),
+            legacy_override: LegacyTurnStateData {
+                enabled: view.legacy_override_enabled,
+                configured: view.legacy_override_configured,
+                will_apply_when_model_pin_unavailable: view.legacy_override_enabled
+                    && view.legacy_override_configured
+                    && !model_pin_available,
+            },
+            capture: result.capture.map(Into::into),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTurnStateCaptureJobData {
+    job_id: String,
+    status: &'static str,
+    attempts: u8,
+    reason: Option<String>,
+    created_at: DateTime<Utc>,
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTurnStateCaptureAcceptedData {
+    job_id: String,
+    status: &'static str,
+}
+
+impl From<ModelTurnStateCaptureJob> for ModelTurnStateCaptureAcceptedData {
+    fn from(job: ModelTurnStateCaptureJob) -> Self {
+        Self {
+            job_id: job.job_id,
+            status: capture_status(job.status),
+        }
+    }
+}
+
+impl From<ModelTurnStateCaptureJob> for ModelTurnStateCaptureJobData {
+    fn from(job: ModelTurnStateCaptureJob) -> Self {
+        let status = capture_status(job.status);
+        Self {
+            job_id: job.job_id,
+            status,
+            attempts: job.attempts,
+            reason: job.reason,
+            created_at: job.created_at,
+            started_at: job.started_at,
+            finished_at: job.finished_at,
+        }
+    }
+}
+
+const fn capture_status(status: ModelTurnStateCaptureStatus) -> &'static str {
+    match status {
+        ModelTurnStateCaptureStatus::Queued => "queued",
+        ModelTurnStateCaptureStatus::Running => "running",
+        ModelTurnStateCaptureStatus::Succeeded => "succeeded",
+        ModelTurnStateCaptureStatus::Failed => "failed",
+        ModelTurnStateCaptureStatus::Cancelled => "cancelled",
+    }
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

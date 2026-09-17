@@ -27,7 +27,10 @@ use gateway_admin::model::provider_credentials::{
     ProviderResetCredit, ProviderResetCreditResult, ProviderResetCredits,
     QuotaLocalUsageAttribution,
 };
-use gateway_admin::ports::provider::{ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind};
+use gateway_admin::ports::provider::{
+    ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind, ProviderTurnStateCapture,
+    ProviderTurnStateCaptureRequest,
+};
 use gateway_core::account::{
     CredentialCasUpdateParts, CredentialRevision, LoadedCredential, NewProviderAccount,
     OpaqueProviderData, PlaintextCredential, ProviderAccount, ProviderAccountId,
@@ -45,6 +48,7 @@ use gateway_core::routing::{ProviderKind, UpstreamModelId};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::{Map, Number, Value};
+use uuid::Uuid;
 
 use crate::credential::{
     CodexAccountQuotaSnapshot, CodexCredentialAdmin, CodexCredentialAdminError,
@@ -59,10 +63,12 @@ use crate::credential::{
 use crate::credential::{
     CodexCredentialCodec, CodexOAuthSecret, oauth_owner_ref, parse_access_token_expiration,
 };
-use crate::transport::CodexWebSocketPool;
+use crate::transport::client::build_fresh_capture_http_client;
 use crate::transport::profile::{
     CodexDesktopReleaseSnapshot, CodexDesktopReleaseStatus, CodexWireProfile, CodexWireProfileState,
 };
+use crate::transport::protocol::responses::CodexResponsesRequest;
+use crate::transport::{CodexBackendClient, CodexRequestContext, CodexWebSocketPool};
 use crate::transport::{
     CodexProfileAvatar, CodexProfileStatistics, OpenAiBillingUsage, openai_billing_breakdown,
 };
@@ -82,6 +88,7 @@ pub(crate) struct OpenAiAdminProvider {
     catalog: Arc<CodexCredentialCatalogService>,
     websocket_pool: Arc<CodexWebSocketPool>,
     desktop_release: CodexDesktopReleaseStatus,
+    base_url: String,
 }
 
 pub(crate) struct OpenAiAdminServices {
@@ -101,6 +108,7 @@ impl OpenAiAdminProvider {
         services: OpenAiAdminServices,
         websocket_pool: Arc<CodexWebSocketPool>,
         desktop_release: CodexDesktopReleaseStatus,
+        base_url: String,
     ) -> Self {
         Self {
             provider_kind,
@@ -113,6 +121,7 @@ impl OpenAiAdminProvider {
             catalog: services.catalog,
             websocket_pool,
             desktop_release,
+            base_url,
         }
     }
 
@@ -247,6 +256,65 @@ impl ProviderAdmin for OpenAiAdminProvider {
             verified_at: Some(profile.verified_at),
             release: Some(release),
         })
+    }
+
+    async fn capture_turn_state(
+        &self,
+        request: ProviderTurnStateCaptureRequest,
+    ) -> Result<ProviderTurnStateCapture, ProviderAdminError> {
+        let account = self.account(&request.account_id).await?;
+        if account.identity_revision().get() != request.identity_revision {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Conflict));
+        }
+        let loaded = self
+            .accounts
+            .load_credential(account.id(), account.revision())
+            .await
+            .map_err(map_store_error)?;
+        if loaded.account != account {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Conflict));
+        }
+        let credential = CodexCredentialCodec::decode(&loaded.credential)
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let authorization = credential
+            .authentication
+            .authorization_header()
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let cookie = crate::provider::build_cookie_header(&credential.cookies)
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let client = build_fresh_capture_http_client(&request.proxy)
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Unavailable))?;
+        let backend = CodexBackendClient::new(client, self.base_url.clone(), self.profile.clone());
+        let mut body = Map::new();
+        body.insert("model".to_owned(), Value::String(request.effective_model));
+        body.insert(
+            "input".to_owned(),
+            serde_json::json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Reply with exactly OK."}]
+            }]),
+        );
+        body.insert("stream".to_owned(), Value::Bool(true));
+        body.insert("store".to_owned(), Value::Bool(false));
+        let upstream = CodexResponsesRequest::from_body(body);
+        let request_id = Uuid::now_v7().to_string();
+        let context = CodexRequestContext::auxiliary(
+            authorization.expose_secret(),
+            account.upstream_account_id(),
+            &request_id,
+            Some(&credential.installation_id),
+        );
+        let context = CodexRequestContext {
+            cookie_header: cookie.as_ref().map(|value| value.expose_secret()),
+            ..context
+        };
+        let value = backend
+            .capture_turn_state_http_sse(&upstream, context)
+            .await
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::BadGateway))?
+            .ok_or_else(|| provider_admin_error(ProviderAdminErrorKind::BadGateway))?;
+        Ok(ProviderTurnStateCapture::new(value))
     }
 
     fn calculated_billing(

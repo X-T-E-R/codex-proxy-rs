@@ -49,6 +49,16 @@ use crate::transport::{
 
 use super::client::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CodexTurnStateCaptureError {
+    #[error("turn state capture request is invalid")]
+    InvalidRequest,
+    #[error("turn state capture transport failed")]
+    Transport,
+    #[error("turn state capture upstream rejected the probe")]
+    Upstream,
+}
+
 impl CodexBackendClient {
     /// 构造客户端。
     pub fn new(
@@ -275,6 +285,55 @@ impl CodexBackendClient {
             connection_local_continuation: false,
             cyber_policy_refusal,
         })
+    }
+
+    /// 发送固定诊断探针；首个 header/event 候选到达后立即释放响应流。
+    #[doc(hidden)]
+    pub async fn capture_turn_state_http_sse(
+        &self,
+        upstream_request: &CodexResponsesRequest,
+        context: CodexRequestContext<'_>,
+    ) -> Result<Option<String>, CodexTurnStateCaptureError> {
+        let headers = self
+            .request_headers_for_http_response(upstream_request, context)
+            .map_err(|_| CodexTurnStateCaptureError::InvalidRequest)?;
+        let mut upstream_body = upstream_request.body().clone();
+        upstream_body.insert("stream".to_owned(), serde_json::Value::Bool(true));
+        let body = serde_json::to_vec(&upstream_body)
+            .map_err(|_| CodexTurnStateCaptureError::InvalidRequest)?;
+        let body = zstd::stream::encode_all(std::io::Cursor::new(body), 3)
+            .map_err(|_| CodexTurnStateCaptureError::InvalidRequest)?;
+        let response = self
+            .client
+            .post(endpoint_url(&self.base_url, CODEX_RESPONSES_PATH))
+            .headers(headers)
+            .header(CONTENT_ENCODING, HeaderValue::from_static("zstd"))
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| CodexTurnStateCaptureError::Transport)?;
+        if let Some(value) = response_meta::turn_state(response.headers()) {
+            return Ok(Some(value));
+        }
+        if !response.status().is_success() {
+            return Err(CodexTurnStateCaptureError::Upstream);
+        }
+        let mut decoder = SseEventDecoder::default();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| CodexTurnStateCaptureError::Transport)?;
+            for frame in decoder.push_frames(&chunk) {
+                if let Some(value) = turn_state_from_sse_frame(&frame) {
+                    return Ok(Some(value));
+                }
+            }
+        }
+        for frame in decoder.finish_frames() {
+            if let Some(value) = turn_state_from_sse_frame(&frame) {
+                return Ok(Some(value));
+            }
+        }
+        Ok(None)
     }
 
     pub async fn create_response_stream_with_pool_account(
@@ -640,6 +699,24 @@ impl CodexBackendClient {
         }
         Ok(parse_codex_model_catalog(&body, etag.as_deref())?)
     }
+}
+
+fn turn_state_from_sse_frame(frame: &SseFrame) -> Option<String> {
+    frame.events().iter().find_map(|event| {
+        let value = serde_json::from_str::<serde_json::Value>(&event.data).ok()?;
+        [
+            "/x-codex-turn-state",
+            "/turn_state",
+            "/turnState",
+            "/headers/x-codex-turn-state",
+            "/metadata/x-codex-turn-state",
+            "/response/headers/x-codex-turn-state",
+            "/response/metadata/x-codex-turn-state",
+        ]
+        .into_iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(|value| value.as_str()))
+        .map(str::to_owned)
+    })
 }
 
 /// 首个可投递帧前的交付边界结果。

@@ -1,0 +1,616 @@
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use gateway_admin::{
+    AdminBundle, AdminServices,
+    model::{
+        accounts::ModelTurnStateCaptureStatus,
+        proxies::{ProxyRecord, ProxyTestResult},
+    },
+};
+use gateway_core::{
+    account::{OutboundProxy, ProviderAccountId},
+    lifecycle::CancellationToken,
+    provider_ports::turn_state::{
+        ActiveModelTurnStatePin, ModelTurnStateCaptureCursor, ModelTurnStateCapturePolicy,
+        ModelTurnStateCaptureScope, ModelTurnStatePinAction, ModelTurnStateUpdate,
+        ModelTurnStateView, TurnStateObservation, TurnStateStore, TurnStateStoreError,
+        TurnStateView,
+    },
+    task::{WorkerContribution, WorkerKind, WorkerRunnable, WorkerTaskError},
+};
+
+use super::{
+    AdminHarness,
+    accounts::{FakeProviderAdmin, events, revision},
+    proxies::TestProxies,
+};
+
+struct CaptureStore {
+    views: Mutex<HashMap<String, ModelTurnStateView>>,
+    candidates: Vec<ModelTurnStateCaptureScope>,
+    candidate_queries: Mutex<Vec<Option<ModelTurnStateCaptureCursor>>>,
+    commit_delay: Duration,
+    write_before_commit_delay: bool,
+    commit_calls: AtomicUsize,
+    commits: Mutex<Vec<String>>,
+    published: AtomicUsize,
+}
+
+impl CaptureStore {
+    fn new(views: impl IntoIterator<Item = ModelTurnStateView>) -> Arc<Self> {
+        Arc::new(Self {
+            views: Mutex::new(
+                views
+                    .into_iter()
+                    .map(|view| (view.requested_model.clone(), view))
+                    .collect(),
+            ),
+            candidates: Vec::new(),
+            candidate_queries: Mutex::new(Vec::new()),
+            commit_delay: Duration::ZERO,
+            write_before_commit_delay: false,
+            commit_calls: AtomicUsize::new(0),
+            commits: Mutex::new(Vec::new()),
+            published: AtomicUsize::new(0),
+        })
+    }
+
+    fn with_candidates(candidates: Vec<ModelTurnStateCaptureScope>) -> Arc<Self> {
+        Arc::new(Self {
+            views: Mutex::new(HashMap::new()),
+            candidates,
+            candidate_queries: Mutex::new(Vec::new()),
+            commit_delay: Duration::ZERO,
+            write_before_commit_delay: false,
+            commit_calls: AtomicUsize::new(0),
+            commits: Mutex::new(Vec::new()),
+            published: AtomicUsize::new(0),
+        })
+    }
+
+    fn with_commit_ack_delay(view: ModelTurnStateView, commit_delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            views: Mutex::new(HashMap::from([(view.requested_model.clone(), view)])),
+            candidates: Vec::new(),
+            candidate_queries: Mutex::new(Vec::new()),
+            commit_delay,
+            write_before_commit_delay: true,
+            commit_calls: AtomicUsize::new(0),
+            commits: Mutex::new(Vec::new()),
+            published: AtomicUsize::new(0),
+        })
+    }
+
+    fn commits(&self) -> Vec<String> {
+        self.commits.lock().expect("capture commits").clone()
+    }
+
+    fn candidate_queries(&self) -> Vec<Option<ModelTurnStateCaptureCursor>> {
+        self.candidate_queries
+            .lock()
+            .expect("candidate queries")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl TurnStateStore for CaptureStore {
+    async fn load(&self, _: &str) -> Result<TurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    async fn update(
+        &self,
+        _: &str,
+        _: bool,
+        _: Option<Option<String>>,
+        _: u64,
+    ) -> Result<TurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    async fn use_observed(
+        &self,
+        _: &str,
+        _: &str,
+        _: bool,
+        _: u64,
+    ) -> Result<TurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    fn enqueue_observation(&self, _: TurnStateObservation) {}
+
+    fn active_override(&self, _: &str) -> Option<String> {
+        None
+    }
+
+    async fn load_model_state(
+        &self,
+        _: &str,
+        requested_model: &str,
+    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        self.views
+            .lock()
+            .expect("model views")
+            .get(requested_model)
+            .cloned()
+            .ok_or(TurnStateStoreError::NotFound)
+    }
+
+    async fn update_model_state(
+        &self,
+        _: &str,
+        requested_model: &str,
+        update: ModelTurnStateUpdate,
+    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        let mut views = self.views.lock().expect("model views");
+        let view = views
+            .get_mut(requested_model)
+            .ok_or(TurnStateStoreError::NotFound)?;
+        if view.identity_revision != update.expected_identity_revision
+            || view.effective_model != update.expected_effective_model
+            || view.config_revision != update.expected_revision
+        {
+            return Err(TurnStateStoreError::Conflict);
+        }
+        view.lock_enabled = update.lock_enabled;
+        view.capture_enabled = update.capture_enabled;
+        view.config_revision += 1;
+        Ok(view.clone())
+    }
+
+    fn active_model_pin(&self, _: &str, _: u64, _: &str) -> Option<ActiveModelTurnStatePin> {
+        None
+    }
+
+    async fn model_capture_candidates(
+        &self,
+        after: Option<&ModelTurnStateCaptureCursor>,
+        limit: u16,
+    ) -> Result<Vec<ModelTurnStateCaptureScope>, TurnStateStoreError> {
+        self.candidate_queries
+            .lock()
+            .expect("candidate queries")
+            .push(after.cloned());
+        Ok(self
+            .candidates
+            .iter()
+            .filter(|scope| {
+                after.is_none_or(|cursor| {
+                    (
+                        &scope.account_id,
+                        scope.identity_revision,
+                        &scope.effective_model,
+                    ) > (
+                        &cursor.account_id,
+                        cursor.identity_revision,
+                        &cursor.effective_model,
+                    )
+                })
+            })
+            .take(usize::from(limit))
+            .cloned()
+            .collect())
+    }
+
+    async fn commit_model_capture(
+        &self,
+        scope: &ModelTurnStateCaptureScope,
+        _: &str,
+    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        self.commit_calls.fetch_add(1, Ordering::SeqCst);
+        if self.write_before_commit_delay {
+            self.commits
+                .lock()
+                .expect("capture commits")
+                .push(scope.effective_model.clone());
+        }
+        tokio::time::sleep(self.commit_delay).await;
+        self.published.fetch_add(1, Ordering::SeqCst);
+        if !self.write_before_commit_delay {
+            self.commits
+                .lock()
+                .expect("capture commits")
+                .push(scope.effective_model.clone());
+        }
+        Ok(view(
+            &scope.account_id,
+            &scope.requested_model,
+            &scope.effective_model,
+            scope.capture_policy.clone(),
+        ))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn invalid_candidate_waits_for_backoff_before_the_next_attempt() {
+    let policy = policy(2, 10, 30, 1, 1);
+    let store = CaptureStore::new([view(
+        "acct_backoff",
+        "model-backoff",
+        "model-backoff",
+        policy,
+    )]);
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_capture_values(["short".to_owned(), "V".repeat(292)]);
+    let (mut bundle, services) = bundle(Arc::clone(&store), Arc::clone(&provider)).await;
+    let job = start(&services, "acct_backoff", "model-backoff").await;
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+
+    spin_until("first provider attempt", || {
+        provider.capture_calls().len() == 1
+    })
+    .await;
+    tokio::time::advance(Duration::from_millis(999)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(provider.capture_calls().len(), 1);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    spin_until("second provider attempt", || {
+        provider.capture_calls().len() == 2
+    })
+    .await;
+    spin_until("backoff job success", || {
+        services
+            .accounts()
+            .model_turn_state_capture(&job.job_id)
+            .is_ok_and(|job| job.status == ModelTurnStateCaptureStatus::Succeeded)
+    })
+    .await;
+    let calls = provider.capture_calls();
+    assert!(calls[1].duration_since(calls[0]) >= Duration::from_secs(1));
+    assert_eq!(store.commits(), vec!["model-backoff"]);
+    stop_worker(shutdown, worker).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn deadline_and_cancel_after_commit_start_wait_for_ack_and_converge_to_success() {
+    let policy = policy(1, 2, 2, 0, 0);
+    let store = CaptureStore::with_commit_ack_delay(
+        view("acct_timeout", "model-timeout", "model-timeout", policy),
+        Duration::from_secs(30),
+    );
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_capture_values(["T".repeat(292)]);
+    let (mut bundle, services) = bundle(Arc::clone(&store), provider).await;
+    let job = start(&services, "acct_timeout", "model-timeout").await;
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+
+    spin_until("database write completed before delayed ack", || {
+        !store.commits().is_empty()
+    })
+    .await;
+    let cancel_services = services.clone();
+    let cancel_job_id = job.job_id.clone();
+    let cancel = tokio::spawn(async move {
+        cancel_services
+            .accounts()
+            .cancel_model_turn_state_capture(&cancel_job_id)
+            .await
+            .expect("cancel after commit linearization")
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let cancelled = cancel.await.expect("cancel join");
+    assert_eq!(cancelled.status, ModelTurnStateCaptureStatus::Succeeded);
+    let result = services
+        .accounts()
+        .model_turn_state_capture(&job.job_id)
+        .expect("committed job");
+    assert_eq!(result.status, ModelTurnStateCaptureStatus::Succeeded);
+    assert_eq!(store.commits(), vec!["model-timeout"]);
+    assert_eq!(store.published.load(Ordering::SeqCst), 1);
+    stop_worker(shutdown, worker).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_before_commit_start_prevents_the_store_write() {
+    let policy = policy(1, 60, 300, 0, 0);
+    let store = CaptureStore::new([view("acct_cancel", "model-cancel", "model-cancel", policy)]);
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_capture_values(["C".repeat(292)]);
+    let (mut bundle, services) = bundle(Arc::clone(&store), provider).await;
+    let job = start(&services, "acct_cancel", "model-cancel").await;
+    let cancelled = services
+        .accounts()
+        .cancel_model_turn_state_capture(&job.job_id)
+        .await
+        .expect("cancel capture");
+    assert_eq!(cancelled.status, ModelTurnStateCaptureStatus::Cancelled);
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(store.commit_calls.load(Ordering::SeqCst), 0);
+    assert!(store.commits().is_empty());
+    stop_worker(shutdown, worker).await;
+}
+
+#[tokio::test]
+async fn disabling_model_b_does_not_cancel_the_queued_model_a_job() {
+    let policy = policy(1, 10, 30, 0, 0);
+    let store = CaptureStore::new([
+        view("acct_scope", "model-a", "model-a", policy.clone()),
+        view("acct_scope", "model-b", "model-b", policy),
+    ]);
+    let provider = FakeProviderAdmin::new("openai", events());
+    let (_bundle, services) = bundle(store, provider).await;
+    assert!(
+        services
+            .accounts()
+            .start_model_turn_state_capture(
+                &ProviderAccountId::new("acct_scope").expect("account ID"),
+                "model-a",
+                1,
+                99,
+                "model-a",
+            )
+            .await
+            .is_err(),
+        "manual capture start must fence the identity read by the client"
+    );
+    assert!(
+        services
+            .accounts()
+            .start_model_turn_state_capture(
+                &ProviderAccountId::new("acct_scope").expect("account ID"),
+                "model-a",
+                1,
+                1,
+                "stale-effective-model",
+            )
+            .await
+            .is_err(),
+        "manual capture start must fence the effective model read by the client"
+    );
+    let job = start(&services, "acct_scope", "model-a").await;
+    services
+        .accounts()
+        .update_model_turn_state(
+            &ProviderAccountId::new("acct_scope").expect("account ID"),
+            "model-b",
+            disabled_update("model-b"),
+        )
+        .await
+        .expect("disable model B capture");
+    assert_eq!(
+        services
+            .accounts()
+            .model_turn_state_capture(&job.job_id)
+            .expect("model A job")
+            .status,
+        ModelTurnStateCaptureStatus::Queued
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn automatic_scan_advances_past_sixty_four_unusable_candidates() {
+    let policy = policy(1, 10, 30, 0, 0);
+    let candidates = (0..65)
+        .map(|index| ModelTurnStateCaptureScope {
+            account_id: format!("acct_fair_{index:03}"),
+            requested_model: format!("model-{index:03}"),
+            effective_model: format!("model-{index:03}"),
+            identity_revision: 1,
+            config_revision: 1,
+            capture_enabled: true,
+            capture_proxy_id: Some(if index == 64 {
+                "proxy_capture".to_owned()
+            } else {
+                "missing_proxy".to_owned()
+            }),
+            capture_policy: policy.clone(),
+        })
+        .collect();
+    let store = CaptureStore::with_candidates(candidates);
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_capture_values(["F".repeat(292)]);
+    let (mut bundle, _services) = bundle(Arc::clone(&store), Arc::clone(&provider)).await;
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+
+    spin_until("first automatic page", || {
+        store.candidate_queries().len() == 1
+    })
+    .await;
+    assert!(store.commits().is_empty());
+    for _ in 0..128 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_secs(30)).await;
+    spin_until("second automatic page", || {
+        store.candidate_queries().len() == 2
+    })
+    .await;
+    spin_until("fair provider attempt", || {
+        provider.capture_calls().len() == 1
+    })
+    .await;
+    spin_until("fair commit started", || {
+        store.commit_calls.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    spin_until("fair candidate commit", || !store.commits().is_empty()).await;
+    let queries = store.candidate_queries();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(
+        queries[1].as_ref().map(|cursor| cursor.account_id.as_str()),
+        Some("acct_fair_063")
+    );
+    assert_eq!(store.commits(), vec!["model-064"]);
+    stop_worker(shutdown, worker).await;
+}
+
+async fn bundle(
+    store: Arc<CaptureStore>,
+    provider: Arc<FakeProviderAdmin>,
+) -> (AdminBundle, AdminServices) {
+    let proxy_events = events();
+    let bundle = AdminHarness::new()
+        .provider(provider)
+        .proxies(Arc::new(TestProxies {
+            events: Some(proxy_events.clone()),
+            capture_proxy: Some(capture_proxy()),
+            ..Default::default()
+        }))
+        .turn_state(store)
+        .build_bundle()
+        .await;
+    let services = bundle.services();
+    (bundle, services)
+}
+
+fn spawn_capture_worker(
+    bundle: &mut AdminBundle,
+) -> (
+    CancellationToken,
+    tokio::task::JoinHandle<Result<(), WorkerTaskError>>,
+) {
+    let registration = bundle
+        .take_worker_contributions()
+        .into_iter()
+        .find_map(|contribution| match contribution {
+            WorkerContribution::Registration(registration)
+                if registration.id.kind() == WorkerKind::TurnStateCapture =>
+            {
+                Some(registration)
+            }
+            _ => None,
+        })
+        .expect("turn-state capture worker");
+    let WorkerRunnable::Daemon { task, .. } = registration.runnable else {
+        panic!("capture worker must be a daemon");
+    };
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker = tokio::spawn(async move { task.run(worker_shutdown).await });
+    (shutdown, worker)
+}
+
+async fn stop_worker(
+    shutdown: CancellationToken,
+    worker: tokio::task::JoinHandle<Result<(), WorkerTaskError>>,
+) {
+    shutdown.cancel();
+    worker
+        .await
+        .expect("capture worker join")
+        .expect("capture worker");
+}
+
+async fn start(
+    services: &AdminServices,
+    account_id: &str,
+    model: &str,
+) -> gateway_admin::model::accounts::ModelTurnStateCaptureJob {
+    services
+        .accounts()
+        .start_model_turn_state_capture(
+            &ProviderAccountId::new(account_id).expect("account ID"),
+            model,
+            1,
+            1,
+            model,
+        )
+        .await
+        .expect("start capture")
+}
+
+async fn spin_until(label: &str, mut predicate: impl FnMut() -> bool) {
+    for _ in 0..10_000 {
+        if predicate() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("condition did not become true: {label}");
+}
+
+fn view(
+    account_id: &str,
+    requested_model: &str,
+    effective_model: &str,
+    capture_policy: ModelTurnStateCapturePolicy,
+) -> ModelTurnStateView {
+    ModelTurnStateView {
+        account_id: account_id.to_owned(),
+        requested_model: requested_model.to_owned(),
+        effective_model: effective_model.to_owned(),
+        identity_revision: 1,
+        config_revision: 1,
+        lock_enabled: false,
+        capture_enabled: true,
+        reuse_window_seconds: 3_600,
+        capture_proxy_id: Some("proxy_capture".to_owned()),
+        capture_proxy: None,
+        capture_policy,
+        pin: None,
+        legacy_override_enabled: false,
+        legacy_override_configured: false,
+    }
+}
+
+fn policy(
+    max_attempts: u8,
+    attempt_timeout_seconds: u16,
+    job_timeout_seconds: u16,
+    backoff_seconds: u8,
+    max_backoff_seconds: u8,
+) -> ModelTurnStateCapturePolicy {
+    ModelTurnStateCapturePolicy {
+        max_attempts,
+        attempt_timeout_seconds,
+        job_timeout_seconds,
+        backoff_seconds,
+        max_backoff_seconds,
+        cooldown_seconds: 0,
+    }
+}
+
+fn disabled_update(effective_model: &str) -> ModelTurnStateUpdate {
+    ModelTurnStateUpdate {
+        expected_identity_revision: 1,
+        expected_effective_model: effective_model.to_owned(),
+        lock_enabled: false,
+        capture_enabled: false,
+        reuse_window_seconds: 3_600,
+        capture_proxy_id: Some("proxy_capture".to_owned()),
+        max_attempts: 1,
+        attempt_timeout_seconds: 10,
+        job_timeout_seconds: 30,
+        backoff_seconds: 0,
+        max_backoff_seconds: 0,
+        cooldown_seconds: 0,
+        pin_action: ModelTurnStatePinAction::Keep,
+        value: None,
+        expected_revision: 1,
+    }
+}
+
+fn capture_proxy() -> ProxyRecord {
+    let now = Utc::now();
+    ProxyRecord {
+        id: "proxy_capture".to_owned(),
+        name: "Capture".to_owned(),
+        proxy: OutboundProxy::parse("http://127.0.0.1:8080").expect("proxy"),
+        revision: revision(1),
+        account_count: 0,
+        last_test_at: Some(now),
+        last_test: Some(ProxyTestResult {
+            success: true,
+            latency_ms: 1,
+            exit_ip: None,
+            message: "ok".to_owned(),
+        }),
+        created_at: now,
+        updated_at: now,
+    }
+}

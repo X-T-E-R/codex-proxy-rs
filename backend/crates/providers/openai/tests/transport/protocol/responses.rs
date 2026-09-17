@@ -243,6 +243,32 @@ fn structured_failure_should_preserve_empty_opaque_fields() {
 }
 
 #[test]
+fn only_structured_turn_state_target_is_an_invalidation_signal() {
+    let targeted = ResponsesSseFailure::from_event(
+        "response.failed",
+        &json!({
+            "response": {"error": {
+                "code": "invalid_encrypted_content",
+                "message": "Encrypted content could not be decrypted",
+                "param": "x-codex-turn-state"
+            }}
+        }),
+    );
+    let text_only = ResponsesSseFailure::from_event(
+        "response.failed",
+        &json!({
+            "response": {"error": {
+                "code": "invalid_encrypted_content",
+                "message": "Encrypted content could not be decrypted"
+            }}
+        }),
+    );
+
+    assert!(targeted.explicitly_targets_turn_state());
+    assert!(!text_only.explicitly_targets_turn_state());
+}
+
+#[test]
 fn semantic_output_should_ignore_the_done_control_frame() {
     assert!(!response_body_has_semantic_output(b"data: [DONE]\n\n"));
 }

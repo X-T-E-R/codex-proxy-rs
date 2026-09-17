@@ -236,9 +236,12 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "client_key_budget_windows",
             "client_key_charge_events",
             "model_requests",
+            "openai_model_turn_states",
+            "openai_turn_states",
             "ops_events",
             "outbound_proxies",
             "provider_accounts",
+            "request_turn_state_observations",
             "runtime_settings",
         ]
     );

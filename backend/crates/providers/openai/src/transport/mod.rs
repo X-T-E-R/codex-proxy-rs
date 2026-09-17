@@ -33,7 +33,8 @@ pub use self::{
         CodexAccountSelectionTelemetry, CodexBackendClient, CodexBackendJsonResponse,
         CodexBackendSseStream, CodexBackendStreamingResponse, CodexBackendTransport,
         CodexClientError, CodexClientResult, CodexRateLimitUpdates, CodexRequestContext,
-        CodexTransportDecision, CodexTransportMetrics, CodexTurnStateUpdate, build_reqwest_client,
+        CodexTransportDecision, CodexTransportMetrics, CodexTurnStateUpdate,
+        build_fresh_capture_http_client, build_reqwest_client,
     },
     diagnostics::{CodexUpstreamDiagnostics, CodexUpstreamSendPhase},
     endpoints::{
@@ -63,3 +64,5 @@ pub use self::{
         CodexWebSocketPool, CodexWebSocketPoolConfig, CodexWebSocketPoolKey, WebSocketPoolDecision,
     },
 };
+#[doc(hidden)]
+pub use client_sse::CodexTurnStateCaptureError;

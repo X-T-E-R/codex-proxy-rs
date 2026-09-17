@@ -190,6 +190,15 @@ pub(super) struct ColdResponse {
     pub(super) stream_max_retries: u32,
     pub(super) session_capture: Option<OpenAiSessionCapture>,
     pub(super) turn_state_store: Option<Arc<dyn TurnStateStore>>,
+    pub(super) model_turn_state_fence: Option<ModelTurnStatePinFence>,
+}
+
+pub(super) struct ModelTurnStatePinFence {
+    pub(super) account_id: String,
+    pub(super) identity_revision: u64,
+    pub(super) effective_model: String,
+    pub(super) config_revision: u64,
+    pub(super) sha256: String,
 }
 
 pub(super) struct ColdJsonResponse {
@@ -562,6 +571,56 @@ fn error_turn_state(error: &CodexClientError) -> Option<(CodexObservedTurnState,
     ))
 }
 
+fn client_error_explicitly_targets_turn_state(error: &CodexClientError) -> bool {
+    let CodexClientError::Upstream {
+        body, transport, ..
+    } = error
+    else {
+        return false;
+    };
+    if *transport != CodexBackendTransport::HttpSse {
+        return false;
+    }
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .is_some_and(|value| {
+            crate::transport::protocol::responses::structured_error_targets_turn_state(&value)
+        })
+}
+
+async fn invalidate_rejected_model_pin(
+    store: Option<&Arc<dyn TurnStateStore>>,
+    fence: Option<&ModelTurnStatePinFence>,
+) {
+    let (Some(store), Some(fence)) = (store, fence) else {
+        return;
+    };
+    match store
+        .invalidate_active_model_pin(
+            &fence.account_id,
+            fence.identity_revision,
+            &fence.effective_model,
+            fence.config_revision,
+            &fence.sha256,
+        )
+        .await
+    {
+        Ok(true) => tracing::info!(
+            account_id = fence.account_id,
+            effective_model = fence.effective_model,
+            config_revision = fence.config_revision,
+            "OpenAI model turn state pin was invalidated by an attributable upstream rejection"
+        ),
+        Ok(false) => {}
+        Err(_) => tracing::warn!(
+            account_id = fence.account_id,
+            effective_model = fence.effective_model,
+            config_revision = fence.config_revision,
+            "OpenAI model turn state rejection could not be fenced"
+        ),
+    }
+}
+
 fn observe_turn_state(
     store: Option<&Arc<dyn TurnStateStore>>,
     account_id: &str,
@@ -665,6 +724,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         stream_max_retries,
         mut session_capture,
         turn_state_store,
+        model_turn_state_fence,
     } = response;
     Box::pin(async_stream::try_stream! {
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
@@ -730,6 +790,15 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             _ => None,
         };
         if let Err(CodexHandshakeAttemptError::Client(error)) = &response {
+            if transport_policy == CodexProviderTransport::HttpOnly
+                && client_error_explicitly_targets_turn_state(error)
+            {
+                invalidate_rejected_model_pin(
+                    turn_state_store.as_ref(),
+                    model_turn_state_fence.as_ref(),
+                )
+                .await;
+            }
             if let (Some(store), Some((receipt, transport))) =
                 (turn_state_store.as_ref(), error_turn_state(error))
             {
@@ -1013,7 +1082,20 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             pre_commit_events.observe_chunk(chunk_len);
             let service_tier_changed = observation_state
                 .observe_upstream_service_tier(decoder.response_service_tier());
-            let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
+            let terminal_failure = if let Some((error, semantic_output_seen)) = canonical_failure {
+                if response_transport == CodexBackendTransport::HttpSse
+                    && matches!(
+                        &error,
+                        CodexCanonicalError::Upstream(failure)
+                            if failure.explicitly_targets_turn_state()
+                    )
+                {
+                    invalidate_rejected_model_pin(
+                        turn_state_store.as_ref(),
+                        model_turn_state_fence.as_ref(),
+                    )
+                    .await;
+                }
                 log_canonical_upstream_error(
                     UpstreamErrorLogContext::new(
                         &context,
@@ -1036,8 +1118,10 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 if response_cyber_policy_refusal {
                     failure.error = failure.error.with_cyber_policy_refusal();
                 }
-                (failure, atomic_upstream_failure)
-            });
+                Some((failure, atomic_upstream_failure))
+            } else {
+                None
+            };
             let timing_signals = decoder.take_timing_signals();
             let timing_changed = first_event_changed
                 || observation_state

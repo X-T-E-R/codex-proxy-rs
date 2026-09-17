@@ -98,6 +98,25 @@ pub fn build_account_http_client(
     Ok(clients.entry(cache_key).or_insert(client).clone())
 }
 
+/// 模型 Turn State 捕获每次尝试都建立独立 client，禁止复用普通请求连接池。
+#[doc(hidden)]
+pub fn build_fresh_capture_http_client(
+    proxy: &gateway_core::account::OutboundProxy,
+) -> Result<Client, CustomCaError> {
+    super::tls::ensure_rustls_provider();
+    let builder = Client::builder()
+        .use_rustls_tls()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(0)
+        .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+        .proxy(
+            reqwest::Proxy::all(proxy.expose_url())
+                .map_err(|_| CustomCaError::ProxyConfiguration)?,
+        );
+    build_reqwest_client_with_custom_ca(builder)
+}
+
 fn egress_key(account_id: &str, proxy: Option<&gateway_core::account::OutboundProxy>) -> String {
     use sha2::{Digest, Sha256};
     let mut hash = Sha256::new();

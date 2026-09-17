@@ -277,6 +277,13 @@ pub async fn initialize(
     auth.ensure_default_admin(config.default_password.expose())
         .await?;
 
+    let turn_state_capture = store.turn_state().map(|turn_state| {
+        use_case::turn_state_capture::ModelTurnStateCaptureManager::new(
+            turn_state,
+            store.proxies(),
+            Arc::clone(&openai),
+        )
+    });
     let accounts = Arc::new(
         DefaultAccountsService::new(
             store.accounts(),
@@ -285,7 +292,8 @@ pub async fn initialize(
             snapshot.clone(),
             probe.clone(),
         )
-        .with_turn_state(store.turn_state()),
+        .with_turn_state(store.turn_state())
+        .with_turn_state_capture(turn_state_capture.clone()),
     );
     let backup_ports = store.backup();
     let backups = Arc::new(DefaultBackupService::new(
@@ -343,11 +351,32 @@ pub async fn initialize(
         )),
         backups,
     };
-    let worker_contributions = backup_worker_contribution(backup_task)?;
+    let mut worker_contributions = backup_worker_contribution(backup_task)?;
+    if let Some(manager) = turn_state_capture {
+        worker_contributions.push(turn_state_capture_worker_contribution(manager)?);
+    }
     Ok(AdminBundle {
         services,
         worker_contributions,
     })
+}
+
+fn turn_state_capture_worker_contribution(
+    task: use_case::turn_state_capture::ModelTurnStateCaptureManager,
+) -> Result<WorkerContribution, AdminError> {
+    let id = WorkerId::try_new(WorkerKind::TurnStateCapture, "openai")
+        .map_err(|_| AdminError::internal("Turn State 捕获 Worker ID 不合法"))?;
+    let restart = DaemonRestartPolicy::try_new(Duration::from_secs(1), Duration::from_secs(60))
+        .map_err(|_| AdminError::internal("Turn State 捕获 Worker 重启策略不合法"))?;
+    WorkerRegistration::try_new(
+        id,
+        WorkerRunnable::Daemon {
+            restart,
+            task: Box::new(task),
+        },
+    )
+    .map(WorkerContribution::Registration)
+    .map_err(|_| AdminError::internal("Turn State 捕获 Worker 注册信息不合法"))
 }
 
 /// Backup Worker 注册：单个可取消 Daemon，owner 固定为 `backup`。

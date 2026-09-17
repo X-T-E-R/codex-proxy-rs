@@ -408,6 +408,7 @@ pub struct ResponsesSseFailure {
     pub(crate) request_id: Option<String>,
     /// 上游错误事件的原始 JSON data；只应在明确的失败审计边界读取。
     raw_body: String,
+    explicitly_targets_turn_state: bool,
 }
 
 impl fmt::Debug for ResponsesSseFailure {
@@ -420,6 +421,10 @@ impl fmt::Debug for ResponsesSseFailure {
             .field("has_upstream_type", &self.upstream_type.is_some())
             .field("explicit_status_code", &self.explicit_status_code)
             .field("retry_after_seconds", &self.retry_after_seconds)
+            .field(
+                "explicitly_targets_turn_state",
+                &self.explicitly_targets_turn_state,
+            )
             .finish()
     }
 }
@@ -442,6 +447,7 @@ impl ResponsesSseFailure {
                     value,
                 ),
             raw_body: raw_body.to_owned(),
+            explicitly_targets_turn_state: structured_error_targets_turn_state(value),
         }
     }
 
@@ -450,6 +456,30 @@ impl ResponsesSseFailure {
     pub fn raw_body(&self) -> &str {
         &self.raw_body
     }
+
+    #[must_use]
+    pub const fn explicitly_targets_turn_state(&self) -> bool {
+        self.explicitly_targets_turn_state
+    }
+}
+
+pub(crate) fn structured_error_targets_turn_state(value: &Value) -> bool {
+    [
+        "/response/error/param",
+        "/response/error/target",
+        "/error/param",
+        "/error/target",
+        "/param",
+        "/target",
+    ]
+    .into_iter()
+    .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+    .any(|target| {
+        matches!(
+            target.trim().to_ascii_lowercase().as_str(),
+            "x-codex-turn-state" | "headers.x-codex-turn-state" | "header:x-codex-turn-state"
+        )
+    })
 }
 
 fn failure_message(value: &Value) -> Option<String> {

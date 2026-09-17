@@ -71,7 +71,18 @@ mod query {
 }
 
 mod turn_state {
-    use gateway_api::admin::accounts::UpdateTurnStateRequest;
+    use chrono::{Duration, Utc};
+    use gateway_admin::model::accounts::{
+        ModelTurnStateCaptureJob, ModelTurnStateCaptureStatus, ModelTurnStateResult,
+    };
+    use gateway_api::admin::accounts::{
+        ModelTurnStateCaptureAcceptedData, ModelTurnStateData, StartModelTurnStateCaptureRequest,
+        UpdateModelTurnStateRequest, UpdateTurnStateRequest,
+    };
+    use gateway_core::provider_ports::turn_state::{
+        ModelTurnStateCapturePolicy, ModelTurnStateCaptureProxy, ModelTurnStatePin,
+        ModelTurnStateView,
+    };
     use serde_json::json;
 
     #[test]
@@ -93,6 +104,143 @@ mod turn_state {
         }))
         .expect("explicit value");
         assert_eq!(replaced.value, Some(Some("opaque".to_owned())));
+    }
+
+    #[test]
+    fn model_mutations_require_the_read_identity_and_effective_model_fence() {
+        let start: StartModelTurnStateCaptureRequest = serde_json::from_value(json!({
+            "accountId": "acct_1",
+            "model": "public-codex",
+            "expectedRevision": 7,
+            "expectedIdentityRevision": 3,
+            "expectedEffectiveModel": "upstream-codex"
+        }))
+        .expect("complete capture start fence");
+        assert_eq!(start.expected_identity_revision, 3);
+        assert_eq!(start.expected_effective_model, "upstream-codex");
+        assert!(
+            serde_json::from_value::<StartModelTurnStateCaptureRequest>(json!({
+                "accountId": "acct_1",
+                "model": "public-codex",
+                "expectedRevision": 7
+            }))
+            .is_err()
+        );
+
+        let update: UpdateModelTurnStateRequest = serde_json::from_value(json!({
+            "accountId": "acct_1",
+            "model": "public-codex",
+            "expectedRevision": 7,
+            "expectedIdentityRevision": 3,
+            "expectedEffectiveModel": "upstream-codex",
+            "lockEnabled": false,
+            "captureEnabled": false,
+            "reuseWindowSeconds": 3600,
+            "captureProxyId": null,
+            "maxAttempts": 3,
+            "attemptTimeoutSeconds": 60,
+            "jobTimeoutSeconds": 300,
+            "backoffSeconds": 1,
+            "maxBackoffSeconds": 4,
+            "cooldownSeconds": 900,
+            "pinAction": "keep"
+        }))
+        .expect("complete model update fence and timeout boundary");
+        let update = update.into_update();
+        assert_eq!(update.expected_identity_revision, 3);
+        assert_eq!(update.expected_effective_model, "upstream-codex");
+        assert_eq!(update.attempt_timeout_seconds, 60);
+        assert_eq!(update.job_timeout_seconds, 300);
+    }
+
+    #[test]
+    fn model_state_projects_proxy_legacy_and_current_capture_contract() {
+        let now = Utc::now();
+        let response = ModelTurnStateData::from(ModelTurnStateResult {
+            state: ModelTurnStateView {
+                account_id: "acct_openai".to_owned(),
+                requested_model: "codex".to_owned(),
+                effective_model: "codex-upstream".to_owned(),
+                identity_revision: 2,
+                config_revision: 7,
+                lock_enabled: true,
+                capture_enabled: true,
+                reuse_window_seconds: 3_600,
+                capture_proxy_id: Some("proxy_saved".to_owned()),
+                capture_proxy: Some(ModelTurnStateCaptureProxy {
+                    id: "proxy_saved".to_owned(),
+                    name: "Rotating".to_owned(),
+                    endpoint: "socks5://proxy.example:823".to_owned(),
+                    last_test_at: Some(now),
+                }),
+                capture_policy: ModelTurnStateCapturePolicy {
+                    max_attempts: 3,
+                    attempt_timeout_seconds: 8,
+                    job_timeout_seconds: 30,
+                    backoff_seconds: 1,
+                    max_backoff_seconds: 4,
+                    cooldown_seconds: 900,
+                },
+                pin: Some(ModelTurnStatePin {
+                    value: "P".repeat(292),
+                    encoded_bytes: 292,
+                    raw_bytes: None,
+                    ciphertext_bytes: None,
+                    token_version: None,
+                    envelope_format: None,
+                    issued_at: None,
+                    timestamp_verified: false,
+                    sha256: "digest".to_owned(),
+                    captured_at: now - Duration::hours(2),
+                    reuse_deadline: now - Duration::hours(1),
+                    source: "capture".to_owned(),
+                    compatible_transport: "http".to_owned(),
+                    invalidated: false,
+                }),
+                legacy_override_enabled: true,
+                legacy_override_configured: true,
+            },
+            capture: Some(ModelTurnStateCaptureJob {
+                job_id: "job_1".to_owned(),
+                status: ModelTurnStateCaptureStatus::Running,
+                attempts: 1,
+                reason: None,
+                created_at: now,
+                started_at: Some(now),
+                finished_at: None,
+            }),
+        });
+        let value = serde_json::to_value(response).expect("serialize model state");
+        assert_eq!(value["pin"]["status"], "aged");
+        assert_eq!(value["pin"]["encodedBytes"], 292);
+        assert_eq!(value["pin"]["timestampVerified"], false);
+        assert_eq!(
+            value["captureProxy"]["endpoint"],
+            "socks5://proxy.example:823"
+        );
+        assert_eq!(value["legacyOverride"]["configured"], true);
+        assert_eq!(
+            value["legacyOverride"]["willApplyWhenModelPinUnavailable"],
+            true
+        );
+        assert_eq!(value["capture"]["status"], "running");
+    }
+
+    #[test]
+    fn capture_start_response_is_exactly_job_id_and_status() {
+        let accepted = ModelTurnStateCaptureAcceptedData::from(ModelTurnStateCaptureJob {
+            job_id: "job_accepted".to_owned(),
+            status: ModelTurnStateCaptureStatus::Queued,
+            attempts: 0,
+            reason: None,
+            created_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+        });
+        assert_eq!(
+            serde_json::to_value(accepted).expect("serialize accepted capture"),
+            json!({"jobId": "job_accepted", "status": "queued"})
+        );
     }
 }
 

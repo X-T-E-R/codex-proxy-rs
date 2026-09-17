@@ -8,6 +8,7 @@ mod openai;
 mod proxies;
 mod settings;
 mod system;
+mod turn_state_capture;
 mod xai;
 
 use std::{
@@ -75,6 +76,7 @@ use gateway_core::{
     engine::probe::{AccountProbe, AccountProbeError, AccountProbeRequest, AccountProbeResult},
     error::{GatewayError, GatewayErrorKind},
     policy::ClientApiKeyId,
+    provider_ports::turn_state::TurnStateStore,
     routing::{ConfigRevision, ProviderKind},
     runtime::SnapshotControl,
 };
@@ -94,6 +96,7 @@ pub(super) struct AdminHarness {
     providers: Vec<Arc<dyn ProviderAdmin>>,
     probe: Arc<dyn AccountProbe>,
     system: Arc<dyn SystemOperations>,
+    turn_state: Option<Arc<dyn TurnStateStore>>,
 }
 
 impl AdminHarness {
@@ -117,6 +120,7 @@ impl AdminHarness {
             ],
             probe: Arc::new(UnavailableProbe),
             system: Arc::new(UnavailableSystem),
+            turn_state: None,
         }
     }
 
@@ -195,26 +199,39 @@ impl AdminHarness {
         self
     }
 
+    pub(super) fn turn_state(mut self, turn_state: Arc<dyn TurnStateStore>) -> Self {
+        self.turn_state = Some(turn_state);
+        self
+    }
+
     pub(super) async fn build(self) -> AdminServices {
+        self.build_bundle().await.services()
+    }
+
+    pub(super) async fn build_bundle(self) -> gateway_admin::AdminBundle {
+        let mut store = AdminStorePorts::new(
+            AdminAccountStorePorts::new(
+                self.accounts,
+                self.account_runtime,
+                self.account_groups,
+                self.proxies,
+            ),
+            self.auth,
+            self.client_keys,
+            self.observability,
+            self.settings,
+            self.backup,
+        );
+        if let Some(turn_state) = self.turn_state {
+            store = store.with_turn_state(turn_state);
+        }
         gateway_admin::initialize(
             AdminConfig {
                 session_ttl_minutes: self.session_ttl_minutes,
                 default_username: "admin".to_owned(),
                 default_password: InitialAdminPassword::new(self.default_password),
             },
-            AdminStorePorts::new(
-                AdminAccountStorePorts::new(
-                    self.accounts,
-                    self.account_runtime,
-                    self.account_groups,
-                    self.proxies,
-                ),
-                self.auth,
-                self.client_keys,
-                self.observability,
-                self.settings,
-                self.backup,
-            ),
+            store,
             self.providers,
             Arc::new(NoopSnapshot),
             (self.probe, Arc::new(proxies::TestProxies::default())),
@@ -223,7 +240,6 @@ impl AdminHarness {
         )
         .await
         .expect("initialize admin test harness")
-        .services()
     }
 }
 

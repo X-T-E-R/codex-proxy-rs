@@ -22,6 +22,23 @@ where
             "/api/admin/accounts/turn-state/use-observed",
             post(use_observed_account_turn_state::<S>),
         )
+        .route(
+            "/api/admin/accounts/turn-state/model",
+            get(account_model_turn_state::<S>),
+        )
+        .route(
+            "/api/admin/accounts/turn-state/model/update",
+            post(update_account_model_turn_state::<S>),
+        )
+        .route(
+            "/api/admin/accounts/turn-state/model/capture",
+            post(start_account_model_turn_state_capture::<S>)
+                .get(account_model_turn_state_capture::<S>),
+        )
+        .route(
+            "/api/admin/accounts/turn-state/model/capture/cancel",
+            post(cancel_account_model_turn_state_capture::<S>),
+        )
         .route("/api/admin/accounts/export", get(export_accounts::<S>))
         .route("/api/admin/accounts/import", post(import_accounts::<S>))
         .route("/api/admin/accounts/refresh", post(refresh_account::<S>))
@@ -67,6 +84,130 @@ where
             "/api/admin/accounts/oauth/complete",
             post(complete_account_authorization::<S>),
         )
+}
+
+async fn start_account_model_turn_state_capture<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<StartModelTurnStateCaptureRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let id = ProviderAccountId::new(request.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let job = state
+        .admin_services()
+        .accounts()
+        .start_model_turn_state_capture(
+            &id,
+            &request.model,
+            request.expected_revision,
+            request.expected_identity_revision,
+            &request.expected_effective_model,
+        )
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::ACCEPTED,
+        AdminEnvelope::ok(ModelTurnStateCaptureAcceptedData::from(job)),
+    ))
+}
+
+async fn account_model_turn_state_capture<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<ModelTurnStateCaptureQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    validate_job_id(&query.job_id)?;
+    let job = state
+        .admin_services()
+        .accounts()
+        .model_turn_state_capture(&query.job_id)
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(ModelTurnStateCaptureJobData::from(job)),
+    ))
+}
+
+async fn cancel_account_model_turn_state_capture<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<CancelModelTurnStateCaptureRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    validate_job_id(&request.job_id)?;
+    let job = state
+        .admin_services()
+        .accounts()
+        .cancel_model_turn_state_capture(&request.job_id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(ModelTurnStateCaptureJobData::from(job)),
+    ))
+}
+
+fn validate_job_id(job_id: &str) -> Result<(), AdminError> {
+    if job_id.is_empty() || job_id.len() > 64 || job_id.chars().any(char::is_control) {
+        return Err(map_wire_error(WireValidationError::new("jobId")));
+    }
+    Ok(())
+}
+
+async fn account_model_turn_state<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<ModelTurnStateQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    require_account_id(&query.account_id, "accountId").map_err(map_wire_error)?;
+    let id = ProviderAccountId::new(query.account_id)
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let view = state
+        .admin_services()
+        .accounts()
+        .model_turn_state(&id, &query.model)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(ModelTurnStateData::from(view)),
+    ))
+}
+
+async fn update_account_model_turn_state<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<UpdateModelTurnStateRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let id = ProviderAccountId::new(request.account_id.clone())
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let model = request.model.clone();
+    let view = state
+        .admin_services()
+        .accounts()
+        .update_model_turn_state(&id, &model, request.into_update())
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(ModelTurnStateData::from(view)),
+    ))
 }
 
 async fn account_turn_state<S>(

@@ -25,6 +25,24 @@ use crate::validation::{IdentifierError, RoutingError, validate_text};
 
 const MAX_REQUEST_ATTEMPTS: u32 = 32;
 
+/// 解析全局模型 alias；环或过长链保持原始名称，与运行时路由完全一致。
+#[must_use]
+pub fn resolve_model_mapping(mappings: &BTreeMap<String, String>, requested: &str) -> String {
+    let original = requested;
+    let mut current = original.to_owned();
+    let mut seen = BTreeSet::new();
+    for _ in 0..20 {
+        let Some(target) = mappings.get(&current).map(String::as_str) else {
+            return current;
+        };
+        if !seen.insert(current.clone()) || seen.contains(target) {
+            return original.to_owned();
+        }
+        current = target.to_owned();
+    }
+    original.to_owned()
+}
+
 /// 客户端请求中的模型名称。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicModelId(String);

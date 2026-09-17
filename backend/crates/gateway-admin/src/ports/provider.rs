@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use gateway_core::{
-    account::ProviderAccountId,
+    account::{OutboundProxy, ProviderAccountId},
     operation::Operation,
     routing::{ProviderKind, UpstreamModelId},
 };
@@ -48,6 +48,44 @@ pub struct ProviderAdminError {
     kind: ProviderAdminErrorKind,
     message: Option<String>,
     public_message: Option<&'static str>,
+}
+
+/// 控制面模型 Turn State 捕获的一次隔离 HTTP 尝试。
+#[derive(Clone)]
+pub struct ProviderTurnStateCaptureRequest {
+    pub account_id: ProviderAccountId,
+    pub identity_revision: u64,
+    pub effective_model: String,
+    pub proxy: OutboundProxy,
+}
+
+impl std::fmt::Debug for ProviderTurnStateCaptureRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderTurnStateCaptureRequest")
+            .field("account_id", &self.account_id)
+            .field("identity_revision", &self.identity_revision)
+            .field("effective_model", &self.effective_model)
+            .field("proxy", &"<redacted>")
+            .finish()
+    }
+}
+
+/// 值只在显式 Admin 模型接口与 fenced Store 提交边界内流动，不实现 `Debug`。
+pub struct ProviderTurnStateCapture {
+    value: String,
+}
+
+impl ProviderTurnStateCapture {
+    #[must_use]
+    pub fn new(value: String) -> Self {
+        Self { value }
+    }
+
+    #[must_use]
+    pub fn into_value(self) -> String {
+        self.value
+    }
 }
 
 impl std::fmt::Debug for ProviderAdminError {
@@ -134,6 +172,14 @@ pub trait ProviderAdmin: Send + Sync {
 
     /// 返回该 Provider 实际持有的 Dashboard 上游身份画像。
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile>;
+
+    /// 发起一次不进入普通请求账本、额度、冷却或连接池的诊断捕获。
+    async fn capture_turn_state(
+        &self,
+        _request: ProviderTurnStateCaptureRequest,
+    ) -> Result<ProviderTurnStateCapture, ProviderAdminError> {
+        Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported))
+    }
 
     /// 使用 Provider-owned 价格规则恢复持久请求的逐项费用。
     fn calculated_billing(

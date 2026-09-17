@@ -33,7 +33,8 @@ use gateway_core::operation::{
 };
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::turn_state::{
-    TurnStateObservation, TurnStateOverride, TurnStateStore, TurnStateStoreError, TurnStateView,
+    ActiveModelTurnStatePin, TurnStateObservation, TurnStateOverride, TurnStateStore,
+    TurnStateStoreError, TurnStateView,
 };
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ProviderKind,
@@ -79,6 +80,17 @@ const CAPTURE_COMPLETED_SSE: &str = concat!(
 struct MemoryTurnStateStore {
     overrides: Mutex<BTreeMap<String, String>>,
     observations: Mutex<Vec<CapturedTurnStateObservation>>,
+    model_pin: Mutex<Option<ActiveModelTurnStatePin>>,
+    invalidations: Mutex<Vec<CapturedModelPinInvalidation>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CapturedModelPinInvalidation {
+    account_id: String,
+    identity_revision: u64,
+    effective_model: String,
+    config_revision: u64,
+    sha256: String,
 }
 
 #[derive(Debug)]
@@ -150,6 +162,36 @@ impl TurnStateStore for MemoryTurnStateStore {
 
     fn active_override(&self, account_id: &str) -> Option<String> {
         self.overrides.lock().unwrap().get(account_id).cloned()
+    }
+
+    fn active_model_pin(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+        _effective_model: &str,
+    ) -> Option<ActiveModelTurnStatePin> {
+        self.model_pin.lock().unwrap().clone()
+    }
+
+    async fn invalidate_active_model_pin(
+        &self,
+        account_id: &str,
+        identity_revision: u64,
+        effective_model: &str,
+        expected_config_revision: u64,
+        expected_sha256: &str,
+    ) -> Result<bool, TurnStateStoreError> {
+        self.invalidations
+            .lock()
+            .unwrap()
+            .push(CapturedModelPinInvalidation {
+                account_id: account_id.to_owned(),
+                identity_revision,
+                effective_model: effective_model.to_owned(),
+                config_revision: expected_config_revision,
+                sha256: expected_sha256.to_owned(),
+            });
+        Ok(true)
     }
 }
 
@@ -4576,6 +4618,79 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
                 && observation.upstream_response_id.as_deref() == Some("resp_scope_capture")
                 && observation.client_turn_id.as_deref() == Some("client-turn")),
         "observations: {observations:?}"
+    );
+}
+
+#[tokio::test]
+async fn only_attributable_http_pin_rejection_requests_cas_invalidation() {
+    let account_id = "acct_session_affinity";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, account_id).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: "P".repeat(292),
+        sha256: "a".repeat(64),
+        config_revision: 9,
+    });
+
+    for (explicit_target, expected_invalidations) in [(true, 1), (false, 1)] {
+        let server = MockServer::start().await;
+        let mut error = json!({
+            "code": "invalid_encrypted_content",
+            "message": "Encrypted content could not be decrypted"
+        });
+        if explicit_target {
+            error["param"] = json!("x-codex-turn-state");
+        }
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .and(header("x-codex-turn-state", "P".repeat(292)))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .insert_header("content-type", "application/json")
+                    .set_body_json(json!({"error": error})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+        let mut stream = provider_with_base_url(&accounts, server.uri())
+            .with_turn_state_store(Some(turn_state_port))
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                context(
+                    if explicit_target {
+                        "req_targeted_turn_state"
+                    } else {
+                        "req_text_only_turn_state"
+                    },
+                    CancellationToken::new(),
+                ),
+            )
+            .await
+            .expect("prepare provider stream");
+        let failure = loop {
+            match stream.next().await.expect("provider terminal event") {
+                Ok(_) => {}
+                Err(error) => break error,
+            }
+        };
+        assert_ne!(failure.kind(), ProviderErrorKind::Cancelled);
+        assert_eq!(
+            turn_state.invalidations.lock().unwrap().len(),
+            expected_invalidations
+        );
+    }
+
+    assert_eq!(
+        turn_state.invalidations.lock().unwrap().as_slice(),
+        [CapturedModelPinInvalidation {
+            account_id: account_id.to_owned(),
+            identity_revision: 1,
+            effective_model: "gpt-5.4".to_owned(),
+            config_revision: 9,
+            sha256: "a".repeat(64),
+        }]
     );
 }
 

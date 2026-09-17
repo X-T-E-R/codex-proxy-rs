@@ -319,6 +319,40 @@ async fn admin_auth_failures_should_use_stable_chinese_contracts() {
     );
 }
 
+#[tokio::test]
+async fn model_turn_state_capture_routes_require_auth_and_never_cache() {
+    let fixture = AdminTestFixture::new().await;
+    let unauthenticated = app(fixture.state())
+        .oneshot(request(
+            Method::GET,
+            "/api/admin/accounts/turn-state/model/capture?jobId=job_test",
+            Body::empty(),
+        ))
+        .await
+        .expect("unauthenticated capture response");
+    assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(unauthenticated.headers()[header::CACHE_CONTROL], "no-store");
+
+    fixture.auth.insert_session("valid-session");
+    let mut cancel = request(
+        Method::POST,
+        "/api/admin/accounts/turn-state/model/capture/cancel",
+        Body::from(json!({"jobId": "job_test"}).to_string()),
+    );
+    cancel
+        .headers_mut()
+        .insert(header::COOKIE, SESSION_COOKIE.parse().unwrap());
+    cancel
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let response = app(fixture.state())
+        .oneshot(cancel)
+        .await
+        .expect("authenticated capture response");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+}
+
 mod provider {
     use std::time::SystemTime;
 

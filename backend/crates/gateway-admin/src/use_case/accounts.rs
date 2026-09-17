@@ -8,7 +8,9 @@ use futures::StreamExt as _;
 use gateway_core::{
     account::ProviderAccountId,
     engine::probe::{AccountProbe, AccountProbeRequest},
-    provider_ports::turn_state::{TurnStateStore, TurnStateStoreError, TurnStateView},
+    provider_ports::turn_state::{
+        ModelTurnStateUpdate, TurnStateStore, TurnStateStoreError, TurnStateView,
+    },
     routing::{ProviderKind, UpstreamModelId},
     runtime::SnapshotControl,
 };
@@ -19,7 +21,7 @@ use crate::{
         accounts::{
             AccountConnectionTestEvent, AccountConnectionTestEventStream, AccountListQuery,
             AccountPageItem, AccountUpdateResult, AccountUsageWindowQuery, AccountsUpdateResult,
-            BatchUpdateAccounts, UpdateAccount,
+            BatchUpdateAccounts, ModelTurnStateCaptureJob, ModelTurnStateResult, UpdateAccount,
         },
         observability::TimeRange,
         provider_credentials::{
@@ -36,6 +38,7 @@ use crate::{
     },
 };
 
+use super::turn_state_capture::ModelTurnStateCaptureManager;
 use super::{
     commit_credential_refresh, map_provider_error, map_store_error, publish_committed,
     validate_prepared_rotation,
@@ -80,6 +83,48 @@ pub trait AccountsService: Send + Sync {
         _expected_revision: u64,
     ) -> Result<TurnStateView, AdminError> {
         Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
+    async fn model_turn_state(
+        &self,
+        _account_id: &ProviderAccountId,
+        _model: &str,
+    ) -> Result<ModelTurnStateResult, AdminError> {
+        Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
+    async fn update_model_turn_state(
+        &self,
+        _account_id: &ProviderAccountId,
+        _model: &str,
+        _update: ModelTurnStateUpdate,
+    ) -> Result<ModelTurnStateResult, AdminError> {
+        Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
+    async fn start_model_turn_state_capture(
+        &self,
+        _account_id: &ProviderAccountId,
+        _model: &str,
+        _expected_revision: u64,
+        _expected_identity_revision: u64,
+        _expected_effective_model: &str,
+    ) -> Result<ModelTurnStateCaptureJob, AdminError> {
+        Err(AdminError::unavailable("Turn State 捕获服务暂不可用"))
+    }
+
+    fn model_turn_state_capture(
+        &self,
+        _job_id: &str,
+    ) -> Result<ModelTurnStateCaptureJob, AdminError> {
+        Err(AdminError::unavailable("Turn State 捕获服务暂不可用"))
+    }
+
+    async fn cancel_model_turn_state_capture(
+        &self,
+        _job_id: &str,
+    ) -> Result<ModelTurnStateCaptureJob, AdminError> {
+        Err(AdminError::unavailable("Turn State 捕获服务暂不可用"))
     }
 
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError>;
@@ -170,6 +215,7 @@ pub(crate) struct DefaultAccountsService {
     snapshot: Arc<dyn SnapshotControl>,
     probe: Arc<dyn AccountProbe>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
+    turn_state_capture: Option<ModelTurnStateCaptureManager>,
     reset_credit_locks:
         Arc<futures::lock::Mutex<BTreeMap<ProviderAccountId, Arc<futures::lock::Mutex<()>>>>>,
 }
@@ -190,12 +236,21 @@ impl DefaultAccountsService {
             snapshot,
             probe,
             turn_state: None,
+            turn_state_capture: None,
             reset_credit_locks: Arc::new(futures::lock::Mutex::new(BTreeMap::new())),
         }
     }
 
     pub(crate) fn with_turn_state(mut self, store: Option<Arc<dyn TurnStateStore>>) -> Self {
         self.turn_state = store;
+        self
+    }
+
+    pub(crate) fn with_turn_state_capture(
+        mut self,
+        manager: Option<ModelTurnStateCaptureManager>,
+    ) -> Self {
+        self.turn_state_capture = manager;
         self
     }
 
@@ -387,6 +442,101 @@ impl AccountsService for DefaultAccountsService {
             )
             .await
             .map_err(map_turn_state_error)
+    }
+
+    async fn model_turn_state(
+        &self,
+        account_id: &ProviderAccountId,
+        model: &str,
+    ) -> Result<ModelTurnStateResult, AdminError> {
+        let mut view = self
+            .turn_state
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 服务暂不可用"))?
+            .load_model_state(account_id.as_str(), model)
+            .await
+            .map_err(map_turn_state_error)?;
+        let capture = if let Some(manager) = &self.turn_state_capture {
+            view.capture_proxy = manager.capture_proxy(&view).await;
+            manager.current(&view)
+        } else {
+            None
+        };
+        Ok(ModelTurnStateResult {
+            state: view,
+            capture,
+        })
+    }
+
+    async fn update_model_turn_state(
+        &self,
+        account_id: &ProviderAccountId,
+        model: &str,
+        update: ModelTurnStateUpdate,
+    ) -> Result<ModelTurnStateResult, AdminError> {
+        let close_capture = !update.capture_enabled || !update.lock_enabled;
+        let mut view = self
+            .turn_state
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 服务暂不可用"))?
+            .update_model_state(account_id.as_str(), model, update)
+            .await
+            .map_err(map_turn_state_error)?;
+        if close_capture && let Some(manager) = &self.turn_state_capture {
+            manager.cancel_scope(&view).await;
+        }
+        let capture = if let Some(manager) = &self.turn_state_capture {
+            view.capture_proxy = manager.capture_proxy(&view).await;
+            manager.current(&view)
+        } else {
+            None
+        };
+        Ok(ModelTurnStateResult {
+            state: view,
+            capture,
+        })
+    }
+
+    async fn start_model_turn_state_capture(
+        &self,
+        account_id: &ProviderAccountId,
+        model: &str,
+        expected_revision: u64,
+        expected_identity_revision: u64,
+        expected_effective_model: &str,
+    ) -> Result<ModelTurnStateCaptureJob, AdminError> {
+        self.turn_state_capture
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 捕获服务暂不可用"))?
+            .start(
+                account_id,
+                model,
+                expected_revision,
+                expected_identity_revision,
+                expected_effective_model,
+            )
+            .await
+    }
+
+    fn model_turn_state_capture(
+        &self,
+        job_id: &str,
+    ) -> Result<ModelTurnStateCaptureJob, AdminError> {
+        self.turn_state_capture
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 捕获服务暂不可用"))?
+            .get(job_id)
+    }
+
+    async fn cancel_model_turn_state_capture(
+        &self,
+        job_id: &str,
+    ) -> Result<ModelTurnStateCaptureJob, AdminError> {
+        self.turn_state_capture
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 捕获服务暂不可用"))?
+            .cancel(job_id)
+            .await
     }
 
     async fn list(&self, query: AccountListQuery) -> Result<AccountDirectoryPage, AdminError> {
