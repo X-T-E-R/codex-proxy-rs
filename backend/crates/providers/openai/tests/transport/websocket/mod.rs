@@ -2198,6 +2198,7 @@ async fn codex_backend_client_should_use_websocket_when_previous_response_id_is_
                 account_id: Some("chatgpt-account"),
                 request_id: "req_ws_client",
                 attempt_index: None,
+                model_turn_state_observation_scope: None,
                 turn_state: None,
                 turn_metadata: None,
                 beta_features: None,

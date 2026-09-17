@@ -674,6 +674,7 @@ pub(super) fn codex_request_context<'a>(
         account_id: account.upstream_account_id(),
         request_id: attempt.request_id().as_str(),
         attempt_index: Some(attempt.attempt_index().get()),
+        model_turn_state_observation_scope: None,
         turn_state: request.turn_state.as_deref(),
         turn_metadata: request.turn_metadata.as_deref(),
         beta_features: request.beta_features.as_deref(),

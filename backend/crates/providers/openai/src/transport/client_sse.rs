@@ -6,7 +6,9 @@ use std::{
 };
 
 use futures::{StreamExt, TryStreamExt};
-use gateway_core::provider_ports::turn_state::{TurnStateObservation, TurnStateStore};
+use gateway_core::provider_ports::turn_state::{
+    ModelTurnStateObservationScope, TurnStateObservation, TurnStateStore,
+};
 use gateway_protocol::openai::{
     X_OPENAI_MEMGEN_REQUEST_HEADER,
     events::{self, retry_after_seconds_from_body},
@@ -159,22 +161,23 @@ impl CodexBackendClient {
         let diagnostics = response_meta::diagnostics(Some(status.as_u16()), response.headers());
         let turn_state = response_meta::turn_state(response.headers());
         let turn_state_observation = turn_state.clone().map(CodexObservedTurnState::new);
-        if let (Some(store), Some(account_id), Some(receipt)) = (
-            self.turn_state_store.as_ref(),
-            provider_account_id,
+        let turn_state_observer =
+            self.turn_state_store
+                .as_ref()
+                .zip(provider_account_id)
+                .map(|(store, account_id)| HttpSseTurnStateObserver {
+                    store: Arc::clone(store),
+                    account_id: account_id.to_owned(),
+                    request_id: context.attempt_index.map(|_| context.request_id.to_owned()),
+                    attempt_index: context.attempt_index,
+                    client_turn_id: context.turn_id.map(str::to_owned),
+                    model_scope: context.model_turn_state_observation_scope.cloned(),
+                });
+        if let (Some(observer), Some(receipt)) = (
+            turn_state_observer.as_ref(),
             turn_state_observation.as_ref(),
         ) {
-            store.enqueue_observation(TurnStateObservation {
-                id: receipt.id.clone(),
-                account_id: account_id.to_owned(),
-                request_id: context.attempt_index.map(|_| context.request_id.to_owned()),
-                attempt_index: context.attempt_index,
-                value: receipt.value.clone(),
-                observed_at: receipt.observed_at,
-                transport: "http".to_owned(),
-                upstream_response_id: None,
-                client_turn_id: context.turn_id.map(str::to_owned),
-            });
+            observer.observe(receipt.clone());
         }
         let set_cookie_headers = response_meta::set_cookie_headers(response.headers());
         let rate_limit_headers = response_meta::rate_limit_headers(response.headers());
@@ -254,12 +257,22 @@ impl CodexBackendClient {
                 &String::from_utf8_lossy(&raw_body),
             );
             (
-                buffered_http_sse_stream(raw_body, Arc::clone(&rate_limit_updates), trace),
+                buffered_http_sse_stream(
+                    raw_body,
+                    Arc::clone(&rate_limit_updates),
+                    turn_state_observer.clone(),
+                    trace,
+                ),
                 cyber_policy_refusal,
             )
         } else {
             (
-                http_sse_stream(response, Arc::clone(&rate_limit_updates), trace),
+                http_sse_stream(
+                    response,
+                    Arc::clone(&rate_limit_updates),
+                    turn_state_observer,
+                    trace,
+                ),
                 false,
             )
         };
@@ -703,6 +716,12 @@ impl CodexBackendClient {
 
 fn turn_state_from_sse_frame(frame: &SseFrame) -> Option<String> {
     frame.events().iter().find_map(|event| {
+        if !event.data.contains("turn_state")
+            && !event.data.contains("turnState")
+            && !event.data.contains("x-codex-turn-state")
+        {
+            return None;
+        }
         let value = serde_json::from_str::<serde_json::Value>(&event.data).ok()?;
         [
             "/x-codex-turn-state",
@@ -717,6 +736,37 @@ fn turn_state_from_sse_frame(frame: &SseFrame) -> Option<String> {
         .find_map(|pointer| value.pointer(pointer).and_then(|value| value.as_str()))
         .map(str::to_owned)
     })
+}
+
+#[derive(Clone)]
+struct HttpSseTurnStateObserver {
+    store: Arc<dyn TurnStateStore>,
+    account_id: String,
+    request_id: Option<String>,
+    attempt_index: Option<u32>,
+    client_turn_id: Option<String>,
+    model_scope: Option<ModelTurnStateObservationScope>,
+}
+
+impl HttpSseTurnStateObserver {
+    fn observe(&self, receipt: CodexObservedTurnState) {
+        self.store.enqueue_observation(TurnStateObservation {
+            id: receipt.id,
+            account_id: self.account_id.clone(),
+            request_id: self.request_id.clone(),
+            attempt_index: self.attempt_index,
+            value: receipt.value,
+            observed_at: receipt.observed_at,
+            transport: "http".to_owned(),
+            upstream_response_id: None,
+            client_turn_id: self.client_turn_id.clone(),
+            model_scope: self.model_scope.clone(),
+        });
+    }
+
+    fn observe_value(&self, value: String) {
+        self.observe(CodexObservedTurnState::new(value));
+    }
 }
 
 /// 首个可投递帧前的交付边界结果。
@@ -801,6 +851,7 @@ fn websocket_connection_profile(headers: &HeaderMap) -> String {
 fn http_sse_stream(
     response: ReqwestResponse,
     rate_limit_updates: CodexRateLimitUpdates,
+    turn_state_observer: Option<HttpSseTurnStateObserver>,
     trace: TraceContext,
 ) -> CodexBackendSseStream {
     let stream: CodexBackendSseStream =
@@ -833,12 +884,13 @@ fn http_sse_stream(
         }
         capture.finish();
     });
-    observe_http_sse_rate_limits(stream, rate_limit_updates)
+    observe_http_sse_updates(stream, rate_limit_updates, turn_state_observer)
 }
 
 fn buffered_http_sse_stream(
     body: bytes::Bytes,
     rate_limit_updates: CodexRateLimitUpdates,
+    turn_state_observer: Option<HttpSseTurnStateObserver>,
     trace: TraceContext,
 ) -> CodexBackendSseStream {
     let stream = Box::pin(futures::stream::once(async move { Ok(body) }));
@@ -853,26 +905,44 @@ fn buffered_http_sse_stream(
         }
         capture.finish();
     });
-    observe_http_sse_rate_limits(stream, rate_limit_updates)
+    observe_http_sse_updates(stream, rate_limit_updates, turn_state_observer)
 }
 
-fn observe_http_sse_rate_limits(
+fn observe_http_sse_updates(
     stream: CodexBackendSseStream,
-    updates: CodexRateLimitUpdates,
+    rate_limit_updates: CodexRateLimitUpdates,
+    turn_state_observer: Option<HttpSseTurnStateObserver>,
 ) -> CodexBackendSseStream {
     Box::pin(futures::stream::unfold(
-        (stream, SseEventDecoder::default(), updates),
-        |(mut stream, mut decoder, updates)| async move {
+        (
+            stream,
+            SseEventDecoder::default(),
+            rate_limit_updates,
+            turn_state_observer,
+        ),
+        |(mut stream, mut decoder, rate_limit_updates, turn_state_observer)| async move {
             match stream.next().await {
                 Some(chunk) => {
                     if let Ok(bytes) = &chunk {
-                        append_http_sse_rate_limit_updates(decoder.push_frames(bytes), &updates)
-                            .await;
+                        append_http_sse_updates(
+                            decoder.push_frames(bytes),
+                            &rate_limit_updates,
+                            turn_state_observer.as_ref(),
+                        )
+                        .await;
                     }
-                    Some((chunk, (stream, decoder, updates)))
+                    Some((
+                        chunk,
+                        (stream, decoder, rate_limit_updates, turn_state_observer),
+                    ))
                 }
                 None => {
-                    append_http_sse_rate_limit_updates(decoder.finish_frames(), &updates).await;
+                    append_http_sse_updates(
+                        decoder.finish_frames(),
+                        &rate_limit_updates,
+                        turn_state_observer.as_ref(),
+                    )
+                    .await;
                     None
                 }
             }
@@ -880,12 +950,18 @@ fn observe_http_sse_rate_limits(
     ))
 }
 
-async fn append_http_sse_rate_limit_updates(
+async fn append_http_sse_updates(
     frames: Vec<SseFrame>,
-    updates: &CodexRateLimitUpdates,
+    rate_limit_updates: &CodexRateLimitUpdates,
+    turn_state_observer: Option<&HttpSseTurnStateObserver>,
 ) {
     let mut observations = Vec::new();
     for frame in frames {
+        if let Some(value) = turn_state_from_sse_frame(&frame)
+            && let Some(observer) = turn_state_observer
+        {
+            observer.observe_value(value);
+        }
         for event in frame.events() {
             if event
                 .event
@@ -901,6 +977,6 @@ async fn append_http_sse_rate_limit_updates(
         }
     }
     if !observations.is_empty() {
-        updates.lock().await.extend(observations);
+        rate_limit_updates.lock().await.extend(observations);
     }
 }

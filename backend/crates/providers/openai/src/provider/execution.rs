@@ -191,6 +191,7 @@ pub(super) struct ColdResponse {
     pub(super) session_capture: Option<OpenAiSessionCapture>,
     pub(super) turn_state_store: Option<Arc<dyn TurnStateStore>>,
     pub(super) model_turn_state_fence: Option<ModelTurnStatePinFence>,
+    pub(super) model_turn_state_observation_scope: Option<ModelTurnStateObservationScope>,
 }
 
 pub(super) struct ModelTurnStatePinFence {
@@ -640,6 +641,7 @@ fn observe_turn_state(
         transport: transport.to_owned(),
         upstream_response_id: upstream_response_id.map(str::to_owned),
         client_turn_id: request.client_turn_id.map(str::to_owned),
+        model_scope: None,
     });
 }
 
@@ -725,6 +727,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         mut session_capture,
         turn_state_store,
         model_turn_state_fence,
+        model_turn_state_observation_scope,
     } = response;
     Box::pin(async_stream::try_stream! {
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
@@ -775,7 +778,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &authorization,
                 cookie_header.as_ref(),
                 account_selection,
-            ).with_trace(&trace),
+            )
+            .with_trace(&trace)
+            .with_model_turn_state_observation_scope(
+                model_turn_state_observation_scope.as_ref(),
+            ),
             active_account.id().as_str(),
             context.deadline(),
             &cancellation,

@@ -272,7 +272,7 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 模型 Turn State 值必须正好为 292 个可打印 ASCII 字节，只兼容上游 HTTP/SSE。官方客户端把该值用于
 单 turn sticky routing；跨 turn 模型锁是本网关的实验性本地策略，不代表上游提供了同等持久性保证。数据面优先级为
 未过本地复用窗口的模型锁、旧版账号覆盖、正常 continuation；AGED、显式 INVALID、空值或关闭模型锁时
-不注入模型值。`reuseWindowSeconds` 是本地最大复用窗口，不代表已知的上游 TTL。
+不注入模型值。`reuseWindowSeconds` 是本地最大复用期限，默认 7200 秒，不代表已知的上游 TTL。
 
 模型状态响应包含实际映射后的 `effectiveModel`、独立的 `identityRevision`、模型配置
 `configRevision`、脱敏的 `captureProxy`、`legacyOverride.configured` 和当前 `capture` 任务。
@@ -284,8 +284,14 @@ envelope timestamp，不是 expiry；长度或多一个 16 字节 ciphertext blo
 保留已有值并缩短 `reuseWindowSeconds` 时只收紧 deadline，不刷新 `capturedAt`；放大窗口也不延长既有
 deadline。`attemptTimeoutSeconds` 范围为 1–60，`jobTimeoutSeconds` 范围为 1–300，且前者不得大于后者。
 普通 access-token refresh 只推进 credential revision，不改变账号身份代次；真实身份替换才隔离旧模型锁。
-自动捕获只处理已启用配置的 EMPTY、AGED 或显式 INVALID 状态，并使用选定且最近 24 小时测试成功的
-已管理代理。每次尝试创建独立 HTTP 连接；收到首个 Turn State header 或 SSE event 后立即释放剩余响应。
+EMPTY、AGED 或显式 INVALID 本身不启动住宅代理任务；网关先让下一次普通 HTTP Responses 请求继续使用
+账号原出口。实际 HTTP 响应头或 SSE metadata 事件返回 292 字节可打印 ASCII 值时，
+按 account identity、effective model 和配置 revision 直接保存为 `observation` pin；只有 encoded byte length
+明确不等于 292 时，才登记一次自动捕获请求。正好 292 字节但不可打印的值只保留为 suspect，
+不保存模型锁也不消耗住宅代理。没有返回 Turn State、真正的 WebSocket 观测或通用密文错误均不登记。
+请求先尝试 WebSocket、后在发送 payload 前回退到 HTTP 时，按实际 HTTP 响应执行同一观察状态机。自动任务
+使用选定且最近 24 小时测试成功的已管理代理；每次尝试
+创建独立 HTTP 连接，收到首个 Turn State header 或 SSE event 后立即释放剩余响应。
 非 292 字节候选与其他可重试失败使用同一退避。任务在取得 commit guard 后最后检查 deadline 和取消；
 检查通过并开始 Store commit 后进入不可取消区，必须等待数据库结果与进程内 pin 发布完成。此后到达的
 取消请求属于 best-effort，job deadline 也不丢弃已开始的 commit；提交成功时任务最终返回 `succeeded`。
@@ -293,6 +299,7 @@ deadline。`attemptTimeoutSeconds` 范围为 1–60，`jobTimeoutSeconds` 范围
 普通上游失败不自动失效模型锁。只有 HTTP Responses 请求确实注入了当前模型锁，且结构化错误的
 `param`/`target` 明确指向 `x-codex-turn-state` 时，后端才按当前 pin fingerprint 与配置版本 CAS 标记
 INVALID；仅出现 `invalid_encrypted_content`、`Encrypted content could not be ...` 文本或长度变化时只保留失败事实。
+明确失效会先清除旧的自动捕获信号，回到上述普通 HTTP 观测阶段；它不会直接引发住宅代理轮换。
 
 账号列表支持以下稳定值：
 

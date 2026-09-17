@@ -104,6 +104,7 @@ impl CodexWebSocketTurnStateObserver {
             transport: "websocket".to_owned(),
             upstream_response_id: upstream_response_id.map(str::to_owned),
             client_turn_id: self.client_turn_id.clone(),
+            model_scope: None,
         });
     }
 }

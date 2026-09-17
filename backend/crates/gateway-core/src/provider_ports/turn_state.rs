@@ -5,7 +5,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use chrono::{DateTime, Utc};
 
 pub const MODEL_TURN_STATE_BYTES: usize = 292;
-pub const DEFAULT_MODEL_REUSE_WINDOW_SECONDS: u32 = 3_600;
+pub const DEFAULT_MODEL_REUSE_WINDOW_SECONDS: u32 = 7_200;
 pub const DEFAULT_CAPTURE_MAX_ATTEMPTS: u8 = 3;
 pub const DEFAULT_CAPTURE_ATTEMPT_TIMEOUT_SECONDS: u8 = 8;
 pub const DEFAULT_CAPTURE_JOB_TIMEOUT_SECONDS: u8 = 30;
@@ -190,6 +190,14 @@ pub struct ModelTurnStateCaptureCursor {
     pub effective_model: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnStateObservationScope {
+    pub account_id: String,
+    pub identity_revision: u64,
+    pub effective_model: String,
+    pub config_revision: u64,
+}
+
 impl ModelTurnStateCaptureScope {
     #[must_use]
     pub fn cursor(&self) -> ModelTurnStateCaptureCursor {
@@ -239,6 +247,8 @@ pub struct TurnStateObservation {
     pub transport: String,
     pub upstream_response_id: Option<String>,
     pub client_turn_id: Option<String>,
+    /// 仅当普通 HTTP Responses 请求没有注入有效模型锁时设置。
+    pub model_scope: Option<ModelTurnStateObservationScope>,
 }
 
 impl TurnStateObservation {
@@ -366,6 +376,16 @@ pub trait TurnStateStore: Send + Sync {
         _identity_revision: u64,
         _effective_model: &str,
     ) -> Option<ActiveModelTurnStatePin> {
+        None
+    }
+
+    /// 普通 HTTP Responses 请求在未注入模型锁时取得的 CAS scope；只读进程内快照。
+    fn model_observation_scope(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+        _effective_model: &str,
+    ) -> Option<ModelTurnStateObservationScope> {
         None
     }
 

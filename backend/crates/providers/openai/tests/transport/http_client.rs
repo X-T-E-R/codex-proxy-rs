@@ -126,6 +126,7 @@ async fn codex_backend_client_should_preserve_oversized_error_response() {
                 account_id: Some("chatgpt-account"),
                 request_id: "req_large_error",
                 attempt_index: None,
+                model_turn_state_observation_scope: None,
                 turn_state: None,
                 turn_metadata: None,
                 beta_features: None,
@@ -227,6 +228,7 @@ async fn codex_backend_client_should_parse_retry_after_from_rate_limit_error_bod
                 account_id: Some("chatgpt-account"),
                 request_id: "req_http_retry_after_body",
                 attempt_index: None,
+                model_turn_state_observation_scope: None,
                 turn_state: None,
                 turn_metadata: None,
                 beta_features: None,
@@ -291,6 +293,52 @@ async fn codex_backend_http_sse_should_preserve_success_json_cyber_refusal() {
     while let Some(chunk) = response.body.next().await {
         body.extend_from_slice(&chunk.expect("buffered body"));
     }
+    assert_eq!(body, raw.as_bytes());
+}
+
+#[tokio::test]
+async fn codex_backend_http_sse_turn_state_event_preserves_the_original_stream_bytes() {
+    let server = wiremock::MockServer::start().await;
+    let raw = concat!(
+        "event: response.metadata\n",
+        "data: {\"type\":\"response.metadata\",\"headers\":{\"x-codex-turn-state\":\"event-turn-state\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http_turn_state\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
+    );
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/codex/responses"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(raw),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        server.uri(),
+        test_wire_profile(),
+    );
+    let mut request = codex_request("gpt-5.5", "", Vec::new());
+    request.force_http_sse = true;
+
+    let mut response = client
+        .create_response_stream(
+            &request,
+            request_context("req_http_turn_state_event", Some("acct")),
+        )
+        .await
+        .expect("HTTP SSE response");
+    assert!(
+        response.turn_state_update.is_none(),
+        "SSE observation must not change the HTTP delivery contract"
+    );
+    let mut body = Vec::new();
+    while let Some(chunk) = response.body.next().await {
+        body.extend_from_slice(&chunk.expect("HTTP SSE body chunk"));
+    }
+
     assert_eq!(body, raw.as_bytes());
 }
 
@@ -450,6 +498,7 @@ async fn codex_backend_client_should_capture_forwardable_response_metadata() {
                 account_id: Some("chatgpt-account"),
                 request_id: "req_response_metadata",
                 attempt_index: None,
+                model_turn_state_observation_scope: None,
                 turn_state: None,
                 turn_metadata: None,
                 beta_features: None,

@@ -327,7 +327,7 @@ export interface AccountModelTurnStateResponse {
     sha256: string
     capturedAt: string
     reuseDeadline: string
-    source: 'manual' | 'capture'
+    source: 'manual' | 'capture' | 'observation'
     compatibleTransport: 'http'
     status: 'fresh' | 'aged'
   }

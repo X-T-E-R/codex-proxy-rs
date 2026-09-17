@@ -33,8 +33,8 @@ use gateway_core::operation::{
 };
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::turn_state::{
-    ActiveModelTurnStatePin, TurnStateObservation, TurnStateOverride, TurnStateStore,
-    TurnStateStoreError, TurnStateView,
+    ActiveModelTurnStatePin, ModelTurnStateObservationScope, TurnStateObservation,
+    TurnStateOverride, TurnStateStore, TurnStateStoreError, TurnStateView,
 };
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ProviderKind,
@@ -81,6 +81,7 @@ struct MemoryTurnStateStore {
     overrides: Mutex<BTreeMap<String, String>>,
     observations: Mutex<Vec<CapturedTurnStateObservation>>,
     model_pin: Mutex<Option<ActiveModelTurnStatePin>>,
+    model_observation_scope: Mutex<Option<ModelTurnStateObservationScope>>,
     invalidations: Mutex<Vec<CapturedModelPinInvalidation>>,
 }
 
@@ -104,6 +105,7 @@ struct CapturedTurnStateObservation {
     transport: String,
     upstream_response_id: Option<String>,
     client_turn_id: Option<String>,
+    model_scope: Option<ModelTurnStateObservationScope>,
 }
 
 #[async_trait::async_trait]
@@ -157,6 +159,7 @@ impl TurnStateStore for MemoryTurnStateStore {
                 transport: observation.transport,
                 upstream_response_id: observation.upstream_response_id,
                 client_turn_id: observation.client_turn_id,
+                model_scope: observation.model_scope,
             });
     }
 
@@ -171,6 +174,15 @@ impl TurnStateStore for MemoryTurnStateStore {
         _effective_model: &str,
     ) -> Option<ActiveModelTurnStatePin> {
         self.model_pin.lock().unwrap().clone()
+    }
+
+    fn model_observation_scope(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+        _effective_model: &str,
+    ) -> Option<ModelTurnStateObservationScope> {
+        self.model_observation_scope.lock().unwrap().clone()
     }
 
     async fn invalidate_active_model_pin(
@@ -2437,6 +2449,13 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
 
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, ACCOUNT_ID).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 11,
+    });
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind upstream listener");
@@ -2502,7 +2521,7 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
         assert!(String::from_utf8_lossy(&request).starts_with("POST /codex/responses"));
         http.write_all(
             format!(
-                "HTTP/1.1 200 OK\r\nopenai-model: gpt-reported-by-upstream\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CAPTURE_COMPLETED_SSE}",
+                "HTTP/1.1 200 OK\r\nopenai-model: gpt-reported-by-upstream\r\nx-codex-turn-state: fallback-http-state\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CAPTURE_COMPLETED_SSE}",
                 CAPTURE_COMPLETED_SSE.len()
             )
             .as_bytes(),
@@ -2512,7 +2531,9 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
         websocket.await.expect("background WebSocket server");
     });
 
-    let provider = provider_with_base_url(&store, base_url);
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let provider =
+        provider_with_base_url(&store, base_url).with_turn_state_store(Some(turn_state_port));
     let operation = |thread_id| {
         Operation::Generate(generate_with_persisted_session_context(
             ACCOUNT_ID,
@@ -2588,6 +2609,23 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
             .expect("typed response timings")
             .first_event_ms
             .is_some()
+    );
+    assert!(
+        turn_state
+            .observations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|observation| {
+                observation.value == "fallback-http-state"
+                    && observation.transport == "http"
+                    && observation.model_scope.as_ref().is_some_and(|scope| {
+                        scope.account_id == ACCOUNT_ID
+                            && scope.identity_revision == 1
+                            && scope.effective_model == "gpt-5.4"
+                            && scope.config_revision == 11
+                    })
+            })
     );
 
     preconnect_ready_rx
@@ -4527,6 +4565,12 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
     let accounts = Arc::new(MemoryAccountStore::default());
     create_account(&accounts, account_id).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        account_id: account_id.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 7,
+    });
     turn_state
         .overrides
         .lock()
@@ -4540,7 +4584,7 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
             .insert_header("content-type", "text/event-stream")
             .insert_header("x-codex-turn-state", "real-upstream")
             .set_body_string(format!(
-                "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
+                "event: response.metadata\ndata: {{\"type\":\"response.metadata\",\"headers\":{{\"x-codex-turn-state\":\"event-upstream\"}}}}\n\nevent: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
             )),
         )
         .expect(1)
@@ -4598,24 +4642,37 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
     );
     let observations = turn_state.observations.lock().unwrap();
     assert!(!observations.is_empty());
-    assert!(
-        observations
-            .iter()
-            .all(|observation| observation.value == "real-upstream")
-    );
+    assert!(observations.iter().any(|observation| {
+        observation.value == "event-upstream"
+            && observation.transport == "http"
+            && observation.model_scope.as_ref().is_some_and(|scope| {
+                scope.account_id == account_id
+                    && scope.identity_revision == 1
+                    && scope.effective_model == "gpt-5.4"
+                    && scope.config_revision == 7
+            })
+    }));
     assert!(observations.iter().all(|observation| {
         observation
             .upstream_response_id
             .as_deref()
             .is_none_or(|id| id == "resp_scope_capture")
     }));
+    assert!(observations.iter().any(
+        |observation| observation.upstream_response_id.as_deref() == Some("resp_scope_capture")
+    ));
     assert!(
         observations
             .iter()
             .any(|observation| observation.account_id == account_id
                 && observation.value == "real-upstream"
                 && observation.transport == "http"
-                && observation.upstream_response_id.as_deref() == Some("resp_scope_capture")
+                && observation.model_scope.as_ref().is_some_and(|scope| {
+                    scope.account_id == account_id
+                        && scope.identity_revision == 1
+                        && scope.effective_model == "gpt-5.4"
+                        && scope.config_revision == 7
+                })
                 && observation.client_turn_id.as_deref() == Some("client-turn")),
         "observations: {observations:?}"
     );
