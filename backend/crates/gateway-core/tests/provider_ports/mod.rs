@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 use gateway_core::account::{
     AccountRuntimeSignals, CredentialRevision, OpaqueProviderData, ProviderAccountId,
 };
+use gateway_core::provider_ports::turn_state::model_turn_state_token_metadata;
 use gateway_core::provider_ports::{
     NewOAuthPendingFlow, OAuthPendingBinding, ProviderRefreshPolicy, ProviderSchedulingState,
     ProviderSessionAffinityKey, ProviderStoreErrorKind, ProviderWebSocketPoolPolicy,
@@ -16,6 +17,68 @@ fn oauth_pending_binding_debug_redacts_raw_value() {
     let binding = OAuthPendingBinding::try_new("must-not-appear").expect("valid binding");
 
     assert_eq!(format!("{binding:?}"), "OAuthPendingBinding([REDACTED])");
+}
+
+#[test]
+fn model_turn_state_reads_only_public_fernet_envelope_metadata() {
+    let token = synthetic_fernet_candidate();
+    let metadata = model_turn_state_token_metadata(&token);
+
+    assert_eq!(metadata.encoded_bytes, 292);
+    assert_eq!(metadata.raw_bytes, Some(217));
+    assert_eq!(metadata.ciphertext_bytes, Some(160));
+    assert_eq!(metadata.envelope_format, Some("fernet_v0x80_candidate"));
+    assert_eq!(metadata.token_version, Some(0x80));
+    assert_eq!(
+        metadata.issued_at.map(|value| value.timestamp()),
+        Some(1_789_650_773)
+    );
+    assert!(!metadata.timestamp_verified);
+}
+
+fn synthetic_fernet_candidate() -> String {
+    let mut raw = Vec::with_capacity(217);
+    raw.push(0x80);
+    raw.extend_from_slice(&1_789_650_773_u64.to_be_bytes());
+    raw.extend_from_slice(&[0x11; 16]);
+    raw.extend_from_slice(&[0x22; 160]);
+    raw.extend_from_slice(&[0x33; 32]);
+    assert_eq!(raw.len(), 217);
+    url_safe_base64(&raw)
+}
+
+fn url_safe_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in &mut chunks {
+        encoded.push(char::from(ALPHABET[usize::from(chunk[0] >> 2)]));
+        encoded.push(char::from(
+            ALPHABET[usize::from((chunk[0] & 0x03) << 4 | chunk[1] >> 4)],
+        ));
+        encoded.push(char::from(
+            ALPHABET[usize::from((chunk[1] & 0x0f) << 2 | chunk[2] >> 6)],
+        ));
+        encoded.push(char::from(ALPHABET[usize::from(chunk[2] & 0x3f)]));
+    }
+    match chunks.remainder() {
+        [first] => {
+            encoded.push(char::from(ALPHABET[usize::from(*first >> 2)]));
+            encoded.push(char::from(ALPHABET[usize::from((*first & 0x03) << 4)]));
+            encoded.push_str("==");
+        }
+        [first, second] => {
+            encoded.push(char::from(ALPHABET[usize::from(*first >> 2)]));
+            encoded.push(char::from(
+                ALPHABET[usize::from((*first & 0x03) << 4 | *second >> 4)],
+            ));
+            encoded.push(char::from(ALPHABET[usize::from((*second & 0x0f) << 2)]));
+            encoded.push('=');
+        }
+        [] => {}
+        _ => unreachable!("chunks_exact remainder is shorter than three bytes"),
+    }
+    encoded
 }
 
 #[test]

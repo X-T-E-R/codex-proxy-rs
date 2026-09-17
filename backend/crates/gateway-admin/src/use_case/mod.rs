@@ -13,6 +13,7 @@ pub mod openai;
 pub mod proxies;
 pub mod settings;
 pub mod system;
+pub(crate) mod turn_state_capture;
 pub mod xai;
 
 use std::sync::Arc;

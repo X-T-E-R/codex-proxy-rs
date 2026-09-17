@@ -27,8 +27,10 @@ use gateway_admin::model::provider_credentials::{
     ProviderResetCredit, ProviderResetCreditResult, ProviderResetCredits, ProviderSubscription,
     QuotaLocalUsageAttribution,
 };
-use gateway_admin::model::quota_forecast_sampling::QuotaForecastObservation;
-use gateway_admin::ports::provider::{ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind};
+use gateway_admin::ports::provider::{
+    ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind, ProviderTurnStateCapture,
+    ProviderTurnStateCaptureRequest,
+};
 use gateway_core::account::{
     CredentialCasUpdateParts, CredentialRevision, LoadedCredential, NewProviderAccount,
     OpaqueProviderData, PlaintextCredential, ProviderAccount, ProviderAccountId,
@@ -46,6 +48,7 @@ use gateway_core::routing::{ProviderKind, UpstreamModelId};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::{Map, Number, Value};
+use uuid::Uuid;
 
 use crate::credential::{
     CodexAccountQuotaSnapshot, CodexCredentialAdmin, CodexCredentialAdminError,
@@ -60,10 +63,12 @@ use crate::credential::{
 use crate::credential::{
     CodexCredentialCodec, CodexOAuthSecret, oauth_owner_ref, parse_access_token_expiration,
 };
-use crate::transport::CodexWebSocketPool;
+use crate::transport::client::build_fresh_capture_http_client;
 use crate::transport::profile::{
     CodexDesktopReleaseSnapshot, CodexDesktopReleaseStatus, CodexWireProfile, CodexWireProfileState,
 };
+use crate::transport::protocol::responses::CodexResponsesRequest;
+use crate::transport::{CodexBackendClient, CodexRequestContext, CodexWebSocketPool};
 use crate::transport::{
     CodexProfileAvatar, CodexProfileStatistics, OpenAiBillingUsage, openai_billing_breakdown,
 };
@@ -83,6 +88,7 @@ pub(crate) struct OpenAiAdminProvider {
     catalog: Arc<CodexCredentialCatalogService>,
     websocket_pool: Arc<CodexWebSocketPool>,
     desktop_release: CodexDesktopReleaseStatus,
+    base_url: String,
 }
 
 pub(crate) struct OpenAiAdminServices {
@@ -102,6 +108,7 @@ impl OpenAiAdminProvider {
         services: OpenAiAdminServices,
         websocket_pool: Arc<CodexWebSocketPool>,
         desktop_release: CodexDesktopReleaseStatus,
+        base_url: String,
     ) -> Self {
         Self {
             provider_kind,
@@ -114,6 +121,7 @@ impl OpenAiAdminProvider {
             catalog: services.catalog,
             websocket_pool,
             desktop_release,
+            base_url,
         }
     }
 
@@ -265,85 +273,63 @@ impl ProviderAdmin for OpenAiAdminProvider {
         })
     }
 
-    fn configured_wire_profile(
+    async fn capture_turn_state(
         &self,
-        configuration: &OpaqueProviderData,
-    ) -> Option<DashboardWireProfile> {
-        use crate::transport::profile::selection::{
-            ClientKind, ClientPlatform, ClientProfileSelection, VersionMode,
-        };
-        let selection = ClientProfileSelection::parse(configuration).ok()?;
-        let profile = selection.resolve(&self.profile).ok()?;
-        let custom = selection.version_mode == VersionMode::Fixed;
-        let (checked_at, error) = self.profile.client_release_status(
-            selection.client,
-            selection.platform,
-            selection.architecture(),
+        request: ProviderTurnStateCaptureRequest,
+    ) -> Result<ProviderTurnStateCapture, ProviderAdminError> {
+        let account = self.account(&request.account_id).await?;
+        if account.identity_revision().get() != request.identity_revision {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Conflict));
+        }
+        let loaded = self
+            .accounts
+            .load_credential(account.id(), account.revision())
+            .await
+            .map_err(map_store_error)?;
+        if loaded.account != account {
+            return Err(provider_admin_error(ProviderAdminErrorKind::Conflict));
+        }
+        let credential = CodexCredentialCodec::decode(&loaded.credential)
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let authorization = credential
+            .authentication
+            .authorization_header()
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let cookie = crate::provider::build_cookie_header(&credential.cookies)
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        let client = build_fresh_capture_http_client(&request.proxy)
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Unavailable))?;
+        let backend = CodexBackendClient::new(client, self.base_url.clone(), self.profile.clone());
+        let mut body = Map::new();
+        body.insert("model".to_owned(), Value::String(request.effective_model));
+        body.insert(
+            "input".to_owned(),
+            serde_json::json!([{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Reply with exactly OK."}]
+            }]),
         );
-        let release = if custom {
-            None
-        } else if selection.client == ClientKind::Desktop
-            && selection.platform == ClientPlatform::Macos
-        {
-            Some(dashboard_desktop_release(
-                &profile,
-                self.desktop_release.snapshot(),
-            ))
-        } else {
-            Some(DashboardDesktopRelease {
-                status: if error.is_some() {
-                    DesktopReleaseStatus::Failed
-                } else if checked_at.is_some() {
-                    DesktopReleaseStatus::Current
-                } else {
-                    DesktopReleaseStatus::Unchecked
-                },
-                checked_at,
-                latest_version: Some(profile.codex_version.clone()),
-                latest_build: None,
-                published_at: None,
-                minimum_system_version: None,
-                hardware_requirements: None,
-                download_url: None,
-                download_size: None,
-                signature_present: None,
-                error,
-            })
+        body.insert("stream".to_owned(), Value::Bool(true));
+        body.insert("store".to_owned(), Value::Bool(false));
+        let upstream = CodexResponsesRequest::from_body(body);
+        let request_id = Uuid::now_v7().to_string();
+        let context = CodexRequestContext::auxiliary(
+            authorization.expose_secret(),
+            account.upstream_account_id(),
+            &request_id,
+            Some(&credential.installation_id),
+        );
+        let context = CodexRequestContext {
+            cookie_header: cookie.as_ref().map(|value| value.expose_secret()),
+            ..context
         };
-        Some(DashboardWireProfile {
-            provider: self.provider_kind.as_str().to_owned(),
-            product: profile.originator.clone(),
-            version: profile.codex_version.clone(),
-            build: None,
-            user_agent: profile.user_agent(),
-            target: DashboardWireTarget {
-                os_type: profile.os_type,
-                os_version: profile.os_version,
-                arch: profile.arch,
-                terminal: profile.terminal,
-            },
-            attributes: vec![
-                DashboardWireAttribute {
-                    label: "客户端标识".to_owned(),
-                    value: if selection.client == ClientKind::Desktop {
-                        format!("{}; {}", profile.originator, profile.desktop_version)
-                    } else {
-                        profile.originator
-                    },
-                },
-                DashboardWireAttribute {
-                    label: "版本策略".to_owned(),
-                    value: if custom {
-                        "固定自定义"
-                    } else {
-                        "自动最新"
-                    }
-                    .to_owned(),
-                },
-            ],
-            verified_at: (!custom).then_some(profile.verified_at),
-            release,
-        })
+        let value = backend
+            .capture_turn_state_http_sse(&upstream, context)
+            .await
+            .map_err(|_| provider_admin_error(ProviderAdminErrorKind::BadGateway))?
+            .ok_or_else(|| provider_admin_error(ProviderAdminErrorKind::BadGateway))?;
+        Ok(ProviderTurnStateCapture::new(value))
     }
 
     fn calculated_billing(

@@ -418,6 +418,32 @@ request / attempt / account 入队，不等待 Provider stream 被下游继续 p
 `usageRetentionDays`；过期请求先删除关联原值，再删除请求行，独立孤儿按原值时间清理。原有账号
 最近观测与手动覆盖不变，不建立状态池或自动回放。
 
+模型级 HTTP Turn State 锁另按 `账号 + identity_revision + effective model` 持久化；
+`identity_revision` 只在上游身份实际替换时推进，普通 token refresh 不废弃同一身份的模型锁。服务启动
+hydrate 模型锁到进程内快照，HTTP attempt 在最终账号与模型确定后只读该快照，不执行 SQL。有效值必须是
+292 个可打印 ASCII 字节，数据面优先级为 fresh 模型锁、旧版账号覆盖、正常 continuation；模型值不进入
+上游 WebSocket。可配置 reuse window 是保守的本地最大复用边界：到期标记 AGED 并停止注入，不声明上游
+真实 TTL。官方客户端将 Turn State 当作单 turn sticky routing；跨 turn 锁定属于本网关实验策略。
+无密钥 Fernet envelope 解析只投影 version、未认证 timestamp 与字节分类，`issuedAt` 不解释为 expiry，
+长度差异也不作为 token 质量真值。复用 deadline 取 captured/issued 两个本地上限的更早值。
+EMPTY、AGED 与显式 INVALID 在启用自动捕获时进入 Admin-owned 有界队列。
+
+捕获任务只驻留进程内，按账号与模型 singleflight、全局最多并发 2 个。每个 attempt 使用选定且最近测试
+成功的 managed proxy 创建新的无池 HTTP/SSE client，并以当前账号 credential 和 effective model 发送固定
+最小探针；首个 Turn State header/event 到达即取消剩余 body。只有精确 292 字节可打印 ASCII 值能经
+identity/model/config fence 提交；配置关闭、取消、身份或映射变化使迟到结果失效。捕获绕过普通 Core
+执行链，因此不创建 `model_requests`、usage、request/账号 Turn State observation，也不改变 quota、
+rate limit、cooldown、circuit 或 feedback。自动捕获到与现值相同的值不延长原 `capturedAt` 和 deadline。
+普通上游错误不失效 pin。只有当前 HTTP Responses attempt 确实注入模型 pin，结构化错误的 `param` 或
+`target` 明确指向 `x-codex-turn-state`，并且 fingerprint、identity、model 与 config revision 仍匹配时，
+Store 才 CAS 标记 INVALID；通用密文错误码或文本只能作为 SUSPECT，不能触发自动轮换。
+管理端 mutation 同时回传读取时的 config revision、identity revision 与 effective model；三项共同 fence
+alias 映射和身份切换。Keep 只能按新窗口收紧已有 deadline，不改变 `capturedAt` 或延长已确定的期限。
+捕获在取得 commit guard 后设置明确线性化点：点前 deadline/cancel 阻止提交；点后 Store commit 不可取消，
+必须等待数据库结果和缓存发布，再以真实结果收敛任务。非 292 候选也必须经过统一退避。
+保存某个 scope 只取消同一 identity/effective-model 的任务。自动扫描按稳定 scope cursor 每轮读取最多 64 项，
+即使当前页全部因代理、冷却或 active job 被跳过，下一轮也会继续后页并在末页后回绕。
+
 ### Client Key 限额与结算
 
 日金额、七天金额、并发和 RPM 按 Client Key 跨账号、跨 Provider 合计，零表示不限；修改限额不重置已用金额。
@@ -582,8 +608,7 @@ Worker 由各 Bundle 贡献、由 Host 统一监督：
 
 - Store：过期请求恢复、历史保留和 PostgreSQL/Redis 观测队列；
 - Core：`runtime` owner 的 RuntimeSnapshot 周期对账和 Redis change 订阅；
-- Admin：S3/R2 备份 daemon，负责调度、执行、删除收敛与保留清理；
-  以及账号冻结恢复 worker（容量熔断的自适应并发下调与到期探测解冻）；
+- Admin：S3/R2 备份 daemon，以及模型 Turn State 自动捕获与有界执行队列；
 - Provider：credential refresh、quota/catalog 健康和官方版本/etag 检查。
 
 账号容量熔断默认关闭。启用后，仅普通请求收到的明确容量拒绝（`server_is_overloaded`、`slow_down`

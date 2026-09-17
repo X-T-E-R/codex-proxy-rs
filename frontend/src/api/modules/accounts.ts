@@ -352,6 +352,75 @@ export interface AccountTurnStateResponse {
   configRevision: number
 }
 
+export type ModelTurnStateCaptureStatus
+  = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export interface ModelTurnStateCapturePolicy {
+  maxAttempts: number
+  attemptTimeoutSeconds: number
+  jobTimeoutSeconds: number
+  backoffSeconds: number
+  maxBackoffSeconds: number
+  cooldownSeconds: number
+}
+
+export interface ModelTurnStateCaptureJob {
+  jobId: string
+  status: ModelTurnStateCaptureStatus
+  attempts: number
+  reason: string | null
+  createdAt: string
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export interface ModelTurnStateCaptureAccepted {
+  jobId: string
+  status: 'queued' | 'running'
+}
+
+export interface AccountModelTurnStateResponse {
+  accountId: string
+  requestedModel: string
+  effectiveModel: string
+  identityRevision: number
+  configRevision: number
+  lockEnabled: boolean
+  captureEnabled: boolean
+  reuseWindowSeconds: number
+  captureProxyId: string | null
+  captureProxy: null | {
+    id: string
+    name: string
+    endpoint: string
+    lastTestAt: string | null
+  }
+  capturePolicy: ModelTurnStateCapturePolicy
+  pin: null | {
+    value: string
+    encodedBytes: number
+    rawBytes: number | null
+    decodedBytes: number | null
+    ciphertextBytes: number | null
+    tokenVersion: number | null
+    envelopeFormat: 'fernet_v0x80_candidate' | null
+    issuedAt: string | null
+    timestampVerified: boolean
+    sha256: string
+    capturedAt: string
+    reuseDeadline: string
+    source: 'manual' | 'capture'
+    compatibleTransport: 'http'
+    status: 'fresh' | 'aged'
+  }
+  legacyOverride: {
+    enabled: boolean
+    configured: boolean
+    willApplyWhenModelPinUnavailable: boolean
+  }
+  capture: ModelTurnStateCaptureJob | null
+}
+
 export interface AccountUpdateResponse {
   accountId: string
   configRevision: number
@@ -399,6 +468,28 @@ interface AccountTurnStateUseObservedParam extends AccountIdParam {
   observationId: string
   enabled: boolean
   expectedRevision: number
+}
+
+interface AccountModelTurnStateParam extends AccountIdParam {
+  model: string
+}
+
+interface AccountModelTurnStateUpdateParam extends AccountModelTurnStateParam {
+  expectedRevision: number
+  expectedIdentityRevision: number
+  expectedEffectiveModel: string
+  lockEnabled: boolean
+  captureEnabled: boolean
+  reuseWindowSeconds: number
+  captureProxyId: string | null
+  maxAttempts: number
+  attemptTimeoutSeconds: number
+  jobTimeoutSeconds: number
+  backoffSeconds: number
+  maxBackoffSeconds: number
+  cooldownSeconds: number
+  pinAction: 'keep' | 'replace' | 'clear' | 'invalidate'
+  value?: string
 }
 
 interface AccountResetCreditConsumeParam extends AccountIdParam {
@@ -507,6 +598,50 @@ export function updateAccountTurnState(data: AccountTurnStateUpdateParam) {
 export function useObservedAccountTurnState(data: AccountTurnStateUseObservedParam) {
   return request<AccountTurnStateResponse>({
     url: '/api/admin/accounts/turn-state/use-observed',
+    method: 'POST',
+    data,
+  })
+}
+
+export function getAccountModelTurnState(params: AccountModelTurnStateParam) {
+  return request<AccountModelTurnStateResponse>({
+    url: '/api/admin/accounts/turn-state/model',
+    method: 'GET',
+    params,
+  })
+}
+
+export function updateAccountModelTurnState(data: AccountModelTurnStateUpdateParam) {
+  return request<AccountModelTurnStateResponse>({
+    url: '/api/admin/accounts/turn-state/model/update',
+    method: 'POST',
+    data,
+  })
+}
+
+export function startAccountModelTurnStateCapture(data: AccountModelTurnStateParam & {
+  expectedRevision: number
+  expectedIdentityRevision: number
+  expectedEffectiveModel: string
+}) {
+  return request<ModelTurnStateCaptureAccepted>({
+    url: '/api/admin/accounts/turn-state/model/capture',
+    method: 'POST',
+    data,
+  })
+}
+
+export function getAccountModelTurnStateCapture(params: { jobId: string }) {
+  return request<ModelTurnStateCaptureJob>({
+    url: '/api/admin/accounts/turn-state/model/capture',
+    method: 'GET',
+    params,
+  })
+}
+
+export function cancelAccountModelTurnStateCapture(data: { jobId: string }) {
+  return request<ModelTurnStateCaptureJob>({
+    url: '/api/admin/accounts/turn-state/model/capture/cancel',
     method: 'POST',
     data,
   })

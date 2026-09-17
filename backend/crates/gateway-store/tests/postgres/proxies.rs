@@ -867,8 +867,7 @@ async fn migration_backfills_shared_proxies_without_changing_credentials() {
             .await
             .unwrap();
     }
-    // 回退到迁移前的结构，随后完整重放同一份位置迁移。
-    sqlx::raw_sql("alter table runtime_settings drop column request_location_json, drop column request_location_enabled;
+    sqlx::raw_sql("drop table openai_model_turn_states;
         alter table provider_accounts drop column outbound_proxy_id; drop table outbound_proxies;
         update provider_accounts set outbound_proxy_url = 'http://user:secret@127.0.0.1:8080/' where id <> 'acct_direct';")
         .execute(&database.pool).await.unwrap();

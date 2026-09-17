@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use chrono::{TimeDelta, Utc};
@@ -53,6 +56,7 @@ use gateway_admin::{
     ports::{
         provider::{
             ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind, ProviderAdminRegistry,
+            ProviderTurnStateCapture, ProviderTurnStateCaptureRequest,
         },
         store::{
             AccountStore, AdminStoreError, AdminStoreErrorKind, AdminStoreResult, SettingsStore,
@@ -60,6 +64,7 @@ use gateway_admin::{
     },
 };
 use serde_json::{Map, json};
+use tokio::time::Instant;
 
 pub(super) type EventLog = Arc<Mutex<Vec<&'static str>>>;
 
@@ -80,9 +85,8 @@ pub(super) struct FakeProviderAdmin {
     quota_refresh_account: Mutex<Option<(Arc<FakeAccountStore>, AccountRecord)>>,
     current_credential_revision: Mutex<Revision>,
     reset_credit_commands: Mutex<Vec<ConsumeProviderResetCredit>>,
-    profile_result: Mutex<Result<ProviderProfileStatistics, ProviderAdminErrorKind>>,
-    subscription_result: Mutex<Result<Option<ProviderSubscription>, ProviderAdminErrorKind>>,
-    personal_info_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    capture_values: Mutex<VecDeque<String>>,
+    capture_calls: Mutex<Vec<Instant>>,
 }
 
 impl FakeProviderAdmin {
@@ -104,9 +108,8 @@ impl FakeProviderAdmin {
             quota_refresh_account: Mutex::new(None),
             current_credential_revision: Mutex::new(revision(1)),
             reset_credit_commands: Mutex::new(Vec::new()),
-            profile_result: Mutex::new(Ok(empty_profile_statistics())),
-            subscription_result: Mutex::new(Ok(None)),
-            personal_info_barrier: Mutex::new(None),
+            capture_values: Mutex::new(VecDeque::new()),
+            capture_calls: Mutex::new(Vec::new()),
         })
     }
 
@@ -191,6 +194,14 @@ impl FakeProviderAdmin {
             .lock()
             .expect("provider reset-credit commands")
             .clone()
+    }
+
+    pub(super) fn set_capture_values(&self, values: impl IntoIterator<Item = String>) {
+        *self.capture_values.lock().expect("capture values") = values.into_iter().collect();
+    }
+
+    pub(super) fn capture_calls(&self) -> Vec<Instant> {
+        self.capture_calls.lock().expect("capture calls").clone()
     }
 
     pub(super) fn set_quota(&self, quota: ProviderQuota) {
@@ -324,6 +335,22 @@ impl ProviderAdmin for FakeProviderAdmin {
         &self,
     ) -> Option<gateway_admin::model::observability::DashboardWireProfile> {
         None
+    }
+
+    async fn capture_turn_state(
+        &self,
+        _: ProviderTurnStateCaptureRequest,
+    ) -> Result<ProviderTurnStateCapture, ProviderAdminError> {
+        self.capture_calls
+            .lock()
+            .expect("capture calls")
+            .push(Instant::now());
+        self.capture_values
+            .lock()
+            .expect("capture values")
+            .pop_front()
+            .map(ProviderTurnStateCapture::new)
+            .ok_or_else(|| ProviderAdminError::new(ProviderAdminErrorKind::Unavailable))
     }
 
     fn calculated_billing(

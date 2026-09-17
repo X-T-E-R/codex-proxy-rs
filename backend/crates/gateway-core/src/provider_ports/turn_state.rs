@@ -1,7 +1,17 @@
 //! OpenAI 账号的实验性出站 turn state 与上游原值观测端口。
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use chrono::{DateTime, Utc};
+
+pub const MODEL_TURN_STATE_BYTES: usize = 292;
+pub const DEFAULT_MODEL_REUSE_WINDOW_SECONDS: u32 = 3_600;
+pub const DEFAULT_CAPTURE_MAX_ATTEMPTS: u8 = 3;
+pub const DEFAULT_CAPTURE_ATTEMPT_TIMEOUT_SECONDS: u8 = 8;
+pub const DEFAULT_CAPTURE_JOB_TIMEOUT_SECONDS: u8 = 30;
+pub const DEFAULT_CAPTURE_BACKOFF_SECONDS: u8 = 1;
+pub const DEFAULT_CAPTURE_MAX_BACKOFF_SECONDS: u8 = 4;
+pub const DEFAULT_CAPTURE_COOLDOWN_SECONDS: u32 = 900;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct TurnStateObserved {
@@ -30,6 +40,183 @@ pub struct TurnStateView {
     pub observed: Option<TurnStateObserved>,
     pub override_state: TurnStateOverride,
     pub config_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTurnStatePinAction {
+    Keep,
+    Replace,
+    Clear,
+    Invalidate,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ModelTurnStateUpdate {
+    pub expected_identity_revision: u64,
+    pub expected_effective_model: String,
+    pub lock_enabled: bool,
+    pub capture_enabled: bool,
+    pub reuse_window_seconds: u32,
+    pub capture_proxy_id: Option<String>,
+    pub max_attempts: u8,
+    pub attempt_timeout_seconds: u16,
+    pub job_timeout_seconds: u16,
+    pub backoff_seconds: u8,
+    pub max_backoff_seconds: u8,
+    pub cooldown_seconds: u32,
+    pub pin_action: ModelTurnStatePinAction,
+    pub value: Option<String>,
+    pub expected_revision: u64,
+}
+
+impl std::fmt::Debug for ModelTurnStateUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelTurnStateUpdate")
+            .field(
+                "expected_identity_revision",
+                &self.expected_identity_revision,
+            )
+            .field("expected_effective_model", &self.expected_effective_model)
+            .field("lock_enabled", &self.lock_enabled)
+            .field("capture_enabled", &self.capture_enabled)
+            .field("reuse_window_seconds", &self.reuse_window_seconds)
+            .field("capture_proxy_id", &self.capture_proxy_id)
+            .field("max_attempts", &self.max_attempts)
+            .field("attempt_timeout_seconds", &self.attempt_timeout_seconds)
+            .field("job_timeout_seconds", &self.job_timeout_seconds)
+            .field("backoff_seconds", &self.backoff_seconds)
+            .field("max_backoff_seconds", &self.max_backoff_seconds)
+            .field("cooldown_seconds", &self.cooldown_seconds)
+            .field("pin_action", &self.pin_action)
+            .field("value", &self.value.as_ref().map(|_| "<redacted>"))
+            .field("expected_revision", &self.expected_revision)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ModelTurnStatePin {
+    pub value: String,
+    pub encoded_bytes: usize,
+    pub raw_bytes: Option<usize>,
+    pub ciphertext_bytes: Option<usize>,
+    pub envelope_format: Option<&'static str>,
+    pub token_version: Option<u8>,
+    pub issued_at: Option<DateTime<Utc>>,
+    pub timestamp_verified: bool,
+    pub sha256: String,
+    pub captured_at: DateTime<Utc>,
+    pub reuse_deadline: DateTime<Utc>,
+    pub source: String,
+    pub compatible_transport: String,
+    pub invalidated: bool,
+}
+
+impl std::fmt::Debug for ModelTurnStatePin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelTurnStatePin")
+            .field("value", &"<redacted>")
+            .field("encoded_bytes", &self.encoded_bytes)
+            .field("raw_bytes", &self.raw_bytes)
+            .field("ciphertext_bytes", &self.ciphertext_bytes)
+            .field("envelope_format", &self.envelope_format)
+            .field("token_version", &self.token_version)
+            .field("issued_at", &self.issued_at)
+            .field("timestamp_verified", &self.timestamp_verified)
+            .field("sha256", &self.sha256)
+            .field("captured_at", &self.captured_at)
+            .field("reuse_deadline", &self.reuse_deadline)
+            .field("source", &self.source)
+            .field("compatible_transport", &self.compatible_transport)
+            .field("invalidated", &self.invalidated)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnStateCapturePolicy {
+    pub max_attempts: u8,
+    pub attempt_timeout_seconds: u16,
+    pub job_timeout_seconds: u16,
+    pub backoff_seconds: u8,
+    pub max_backoff_seconds: u8,
+    pub cooldown_seconds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnStateView {
+    pub account_id: String,
+    pub requested_model: String,
+    pub effective_model: String,
+    pub identity_revision: u64,
+    pub config_revision: u64,
+    pub lock_enabled: bool,
+    pub capture_enabled: bool,
+    pub reuse_window_seconds: u32,
+    pub capture_proxy_id: Option<String>,
+    pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
+    pub capture_policy: ModelTurnStateCapturePolicy,
+    pub pin: Option<ModelTurnStatePin>,
+    pub legacy_override_enabled: bool,
+    pub legacy_override_configured: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnStateCaptureProxy {
+    pub id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub last_test_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnStateCaptureScope {
+    pub account_id: String,
+    pub requested_model: String,
+    pub effective_model: String,
+    pub identity_revision: u64,
+    pub config_revision: u64,
+    pub capture_enabled: bool,
+    pub capture_proxy_id: Option<String>,
+    pub capture_policy: ModelTurnStateCapturePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnStateCaptureCursor {
+    pub account_id: String,
+    pub identity_revision: u64,
+    pub effective_model: String,
+}
+
+impl ModelTurnStateCaptureScope {
+    #[must_use]
+    pub fn cursor(&self) -> ModelTurnStateCaptureCursor {
+        ModelTurnStateCaptureCursor {
+            account_id: self.account_id.clone(),
+            identity_revision: self.identity_revision,
+            effective_model: self.effective_model.clone(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ActiveModelTurnStatePin {
+    pub value: String,
+    pub sha256: String,
+    pub config_revision: u64,
+}
+
+impl std::fmt::Debug for ActiveModelTurnStatePin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActiveModelTurnStatePin")
+            .field("value", &"<redacted>")
+            .field("sha256", &self.sha256)
+            .field("config_revision", &self.config_revision)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +257,64 @@ pub fn valid_turn_state_override(value: &str) -> bool {
         && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
 }
 
+#[must_use]
+pub fn valid_model_turn_state(value: &str) -> bool {
+    value.len() == MODEL_TURN_STATE_BYTES && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelTurnStateTokenMetadata {
+    pub encoded_bytes: usize,
+    pub raw_bytes: Option<usize>,
+    pub ciphertext_bytes: Option<usize>,
+    pub envelope_format: Option<&'static str>,
+    pub token_version: Option<u8>,
+    pub issued_at: Option<DateTime<Utc>>,
+    pub timestamp_verified: bool,
+}
+
+/// 无密钥读取 Fernet envelope 的公开结构字段；不验证密文或 HMAC。
+#[must_use]
+pub fn model_turn_state_token_metadata(value: &str) -> ModelTurnStateTokenMetadata {
+    let encoded_bytes = value.len();
+    let Ok(raw) = URL_SAFE.decode(value) else {
+        return ModelTurnStateTokenMetadata {
+            encoded_bytes,
+            raw_bytes: None,
+            ciphertext_bytes: None,
+            envelope_format: None,
+            token_version: None,
+            issued_at: None,
+            timestamp_verified: false,
+        };
+    };
+    // Fernet: version(1) + timestamp(8) + IV(16) + ciphertext(16*n) + HMAC(32).
+    if raw.len() < 73 || !(raw.len() - 57).is_multiple_of(16) {
+        return ModelTurnStateTokenMetadata {
+            encoded_bytes,
+            raw_bytes: Some(raw.len()),
+            ciphertext_bytes: None,
+            envelope_format: None,
+            token_version: raw.first().copied(),
+            issued_at: None,
+            timestamp_verified: false,
+        };
+    }
+    let timestamp = u64::from_be_bytes(raw[1..9].try_into().expect("fixed timestamp slice"));
+    let issued_at = i64::try_from(timestamp)
+        .ok()
+        .and_then(|seconds| DateTime::from_timestamp(seconds, 0));
+    ModelTurnStateTokenMetadata {
+        encoded_bytes,
+        raw_bytes: Some(raw.len()),
+        ciphertext_bytes: Some(raw.len() - 57),
+        envelope_format: (raw.first() == Some(&0x80)).then_some("fernet_v0x80_candidate"),
+        token_version: raw.first().copied(),
+        issued_at,
+        timestamp_verified: false,
+    }
+}
+
 #[async_trait]
 pub trait TurnStateStore: Send + Sync {
     async fn load(&self, account_id: &str) -> Result<TurnStateView, TurnStateStoreError>;
@@ -96,4 +341,61 @@ pub trait TurnStateStore: Send + Sync {
 
     /// 读取启动时 hydrate、管理提交后同步更新的进程内快照。
     fn active_override(&self, account_id: &str) -> Option<String>;
+
+    async fn load_model_state(
+        &self,
+        _account_id: &str,
+        _requested_model: &str,
+    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    async fn update_model_state(
+        &self,
+        _account_id: &str,
+        _requested_model: &str,
+        _update: ModelTurnStateUpdate,
+    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    /// 最终账号与 effective model 已确定后读取；只访问启动 hydrate/提交发布的内存快照。
+    fn active_model_pin(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+        _effective_model: &str,
+    ) -> Option<ActiveModelTurnStatePin> {
+        None
+    }
+
+    /// 自动捕获轮询的有界候选；普通请求数据面不调用此方法。
+    async fn model_capture_candidates(
+        &self,
+        _after: Option<&ModelTurnStateCaptureCursor>,
+        _limit: u16,
+    ) -> Result<Vec<ModelTurnStateCaptureScope>, TurnStateStoreError> {
+        Ok(Vec::new())
+    }
+
+    /// 以账号身份、模型与配置 revision fence 提交一次捕获结果。
+    async fn commit_model_capture(
+        &self,
+        _scope: &ModelTurnStateCaptureScope,
+        _value: &str,
+    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    /// 仅由可归因到当前 HTTP 模型锁版本的结构化上游拒绝调用。
+    async fn invalidate_active_model_pin(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+        _effective_model: &str,
+        _expected_config_revision: u64,
+        _expected_sha256: &str,
+    ) -> Result<bool, TurnStateStoreError> {
+        Ok(false)
+    }
 }

@@ -109,9 +109,9 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         include_disabled: bool,
     ) -> StoreResult<Vec<ProviderAccountSummary>> {
         let rows = sqlx::query(
-            "select location_country, location_region, location_city, location_timezone, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
-                    upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
-                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
+            "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
+                    upstream_account_id, plan_type, authentication_kind, credential_revision, identity_revision, has_refresh_token,
+                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
                     quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
@@ -915,6 +915,11 @@ pub(crate) async fn rotate_provider_account_in_transaction(
              plan_type = case when $14 then plan_type else $6 end,
              provider_credentials_json = $7,
              credential_revision = credential_revision + 1,
+             identity_revision = identity_revision + case
+                 when $11::boolean
+                  and (upstream_user_id is distinct from $12::text
+                       or upstream_account_id is distinct from $13::text)
+                 then 1 else 0 end,
              has_refresh_token = $8,
              access_token_expires_at = $9,
              next_refresh_at = $10,

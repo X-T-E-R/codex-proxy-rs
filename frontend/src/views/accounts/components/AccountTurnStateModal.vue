@@ -15,6 +15,7 @@ import { toast } from '@/components/base/BaseToast'
 import { useCopyText } from '@/composables/useCopyText'
 import { errorMessage } from '@/utils/async'
 import { formatDateTime } from '@/utils/date'
+import AccountModelTurnStateSection from './AccountModelTurnStateSection.vue'
 
 const props = defineProps<{ account: AccountRow | null }>()
 const open = defineModel<boolean>({ required: true })
@@ -29,6 +30,7 @@ const draftValue = ref('')
 const draftEnabled = ref(false)
 const showObserved = ref(false)
 const showOverride = ref(false)
+const modelBusy = ref(false)
 let generation = 0
 
 const changed = computed(() => state.value && (
@@ -56,6 +58,7 @@ function reset() {
   draftEnabled.value = false
   showObserved.value = false
   showOverride.value = false
+  modelBusy.value = false
   loading.value = false
   saving.value = false
 }
@@ -176,9 +179,9 @@ function adoptObserved() {
   <BaseModal
     v-model="open"
     title="Turn State 实验"
-    description="不透明的同回合粘性值；手动覆盖仅供实验，不控制账号调度，也不代表模型档位。"
-    size="lg"
-    :dismissible="!saving"
+    description="查看不透明的同回合粘性值，并配置账号级实验覆盖或模型级锁定与捕获；这些设置不控制账号调度，也不代表模型档位。"
+    size="xl"
+    :dismissible="!saving && !modelBusy"
   >
     <div class="grid gap-5 text-cp">
       <p v-if="account" class="m-0 break-all text-cp-text-secondary">
@@ -194,6 +197,14 @@ function adoptObserved() {
         </BaseButton>
       </div>
       <template v-else-if="state">
+        <div>
+          <h3 class="m-0 text-cp-lg font-bold text-cp-text">
+            账号级观测与 Legacy 覆盖
+          </h3>
+          <p class="mt-1 mb-0 text-xs text-cp-text-secondary">
+            保留现有账号级观测和实验覆盖；模型值不可用时是否回退到这里，由模型设置中的 Legacy fallback 状态说明。
+          </p>
+        </div>
         <section class="grid min-w-0 gap-3 rounded-cp bg-cp-fill-quaternary p-4" aria-label="最近上游观测">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <h3 class="m-0 text-cp font-bold text-cp-text">
@@ -331,16 +342,21 @@ function adoptObserved() {
         <p v-if="actionError" role="alert" class="m-0 text-cp-error-text">
           {{ actionError }}
         </p>
+        <AccountModelTurnStateSection
+          :account-id="state.accountId"
+          :open="open"
+          @busy-change="modelBusy = $event"
+        />
       </template>
     </div>
     <template #footer>
-      <BaseButton variant="secondary" :disabled="saving" @click="open = false">
+      <BaseButton variant="secondary" :disabled="saving || modelBusy" @click="open = false">
         关闭
       </BaseButton>
-      <BaseButton variant="destructive" :disabled="!state || loading || saving || (!state.override.value && !state.override.enabled)" @click="clear">
+      <BaseButton variant="destructive" :disabled="!state || loading || saving || modelBusy || (!state.override.value && !state.override.enabled)" @click="clear">
         清空覆盖
       </BaseButton>
-      <BaseButton variant="primary" :loading="saving" :disabled="!state || loading || saving || !changed || !!validationError" @click="save">
+      <BaseButton variant="primary" :loading="saving" :disabled="!state || loading || saving || modelBusy || !changed || !!validationError" @click="save">
         保存覆盖
       </BaseButton>
     </template>

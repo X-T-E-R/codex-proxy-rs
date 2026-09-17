@@ -964,19 +964,7 @@ impl RuntimeSnapshot {
 
     #[must_use]
     pub fn mapped_model(&self, requested: &str) -> String {
-        let original = requested;
-        let mut current = original.to_owned();
-        let mut seen = BTreeSet::new();
-        for _ in 0..20 {
-            let Some(target) = self.model_mappings.get(&current).map(String::as_str) else {
-                return current;
-            };
-            if !seen.insert(current.clone()) || seen.contains(target) {
-                return original.to_owned();
-            }
-            current = target.to_owned();
-        }
-        original.to_owned()
+        super::resolve_model_mapping(&self.model_mappings, requested)
     }
 
     pub fn client_policies(&self) -> impl Iterator<Item = &ClientPolicy> {

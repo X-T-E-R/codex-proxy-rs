@@ -3,7 +3,8 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::provider_ports::turn_state::{
-    TurnStateObservation, TurnStateStore, TurnStateStoreError,
+    ModelTurnStatePinAction, ModelTurnStateUpdate, TurnStateObservation, TurnStateStore,
+    TurnStateStoreError,
 };
 use gateway_core::task::DaemonTask;
 use gateway_store::postgres::{PgTurnStateStore, TurnStateObservationWriter};
@@ -86,6 +87,411 @@ async fn turn_state_override_is_versioned_validated_clearable_and_account_scoped
         "late enabled update must not replace the rev3 tombstone"
     );
     database.close().await;
+}
+
+#[tokio::test]
+async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests() {
+    let Some(database) = TestDatabase::create("model_turn_state").await else {
+        return;
+    };
+    seed_account(&database.pool, "acct_model_state", "openai").await;
+    sqlx::query(
+        "insert into outbound_proxies
+           (id, name, proxy_url, last_test_at, last_test_success, last_test_latency_ms,
+            last_test_message)
+         values ('proxy_capture', 'Capture', 'socks5://127.0.0.1:823', now(), true, 1, 'ok')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed capture proxy");
+    sqlx::query(
+        "update runtime_settings
+            set model_mappings_json = '{\"public-codex\":\"upstream-codex\"}'::jsonb
+          where id = 1",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed model mapping");
+    let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize model store");
+    let initial = store
+        .load_model_state("acct_model_state", "public-codex")
+        .await
+        .expect("load model state");
+    assert_eq!(initial.effective_model, "upstream-codex");
+    assert_eq!(initial.reuse_window_seconds, 3_600);
+    assert_eq!(initial.capture_policy.max_attempts, 3);
+    assert_eq!(initial.capture_policy.attempt_timeout_seconds, 8);
+    assert_eq!(initial.capture_policy.job_timeout_seconds, 30);
+    assert_eq!(initial.capture_policy.backoff_seconds, 1);
+    assert_eq!(initial.capture_policy.max_backoff_seconds, 4);
+    assert_eq!(initial.capture_policy.cooldown_seconds, 900);
+
+    let value = synthetic_fernet_candidate();
+    let locked = store
+        .update_model_state(
+            "acct_model_state",
+            "public-codex",
+            ModelTurnStateUpdate {
+                expected_identity_revision: initial.identity_revision,
+                expected_effective_model: initial.effective_model.clone(),
+                lock_enabled: true,
+                capture_enabled: true,
+                reuse_window_seconds: 86_400,
+                capture_proxy_id: Some("proxy_capture".to_owned()),
+                max_attempts: 3,
+                attempt_timeout_seconds: 60,
+                job_timeout_seconds: 300,
+                backoff_seconds: 1,
+                max_backoff_seconds: 4,
+                cooldown_seconds: 900,
+                pin_action: ModelTurnStatePinAction::Replace,
+                value: Some(value.clone()),
+                expected_revision: initial.config_revision,
+            },
+        )
+        .await
+        .expect("lock model pin");
+    assert_eq!(locked.capture_policy.attempt_timeout_seconds, 60);
+    assert_eq!(locked.capture_policy.job_timeout_seconds, 300);
+    assert_eq!(
+        store
+            .active_model_pin("acct_model_state", 1, "upstream-codex")
+            .map(|pin| pin.value),
+        Some(value.clone())
+    );
+    let original = locked.pin.expect("manual pin");
+    assert_eq!(original.encoded_bytes, 292);
+    assert_eq!(original.raw_bytes, Some(217));
+    assert_eq!(original.ciphertext_bytes, Some(160));
+    assert_eq!(original.token_version, Some(0x80));
+    assert_eq!(
+        original.issued_at.map(|value| value.timestamp()),
+        Some(1_789_650_773)
+    );
+    assert!(!original.timestamp_verified);
+    let shortened = store
+        .update_model_state(
+            "acct_model_state",
+            "public-codex",
+            ModelTurnStateUpdate {
+                expected_identity_revision: locked.identity_revision,
+                expected_effective_model: locked.effective_model.clone(),
+                lock_enabled: true,
+                capture_enabled: true,
+                reuse_window_seconds: 60,
+                capture_proxy_id: Some("proxy_capture".to_owned()),
+                max_attempts: 3,
+                attempt_timeout_seconds: 60,
+                job_timeout_seconds: 300,
+                backoff_seconds: 1,
+                max_backoff_seconds: 4,
+                cooldown_seconds: 900,
+                pin_action: ModelTurnStatePinAction::Keep,
+                value: None,
+                expected_revision: locked.config_revision,
+            },
+        )
+        .await
+        .expect("shorten model pin reuse window");
+    let shortened_pin = shortened.pin.as_ref().expect("shortened pin");
+    let expected_short_deadline = original.reuse_deadline.min(
+        (original.captured_at + Duration::seconds(60)).min(
+            original
+                .issued_at
+                .map_or(original.captured_at + Duration::seconds(60), |issued_at| {
+                    issued_at + Duration::seconds(60)
+                }),
+        ),
+    );
+    assert_eq!(shortened_pin.captured_at, original.captured_at);
+    assert_eq!(shortened_pin.reuse_deadline, expected_short_deadline);
+    let mut invalid_attempt_timeout = disabled_model_update(&shortened);
+    invalid_attempt_timeout.attempt_timeout_seconds = 61;
+    assert!(matches!(
+        store
+            .update_model_state("acct_model_state", "public-codex", invalid_attempt_timeout,)
+            .await,
+        Err(TurnStateStoreError::Invalid)
+    ));
+    let mut invalid_job_timeout = disabled_model_update(&shortened);
+    invalid_job_timeout.job_timeout_seconds = 301;
+    assert!(matches!(
+        store
+            .update_model_state("acct_model_state", "public-codex", invalid_job_timeout,)
+            .await,
+        Err(TurnStateStoreError::Invalid)
+    ));
+    sqlx::query(
+        "update openai_model_turn_states
+            set pin_reuse_deadline = now() - interval '1 second'
+          where account_id = 'acct_model_state'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("age pin");
+    let (aged_store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("hydrate aged model store");
+    assert_eq!(
+        aged_store.active_model_pin("acct_model_state", 1, "upstream-codex"),
+        None,
+        "AGED pins stop HTTP injection and fall back to legacy/normal continuation"
+    );
+    let candidates = aged_store
+        .model_capture_candidates(None, 8)
+        .await
+        .expect("load automatic candidates");
+    assert_eq!(candidates.len(), 1);
+    let candidate = &candidates[0];
+    sqlx::query(
+        "update provider_accounts set credential_revision = credential_revision + 1
+          where id = 'acct_model_state'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("refresh access token revision");
+    let captured = aged_store
+        .commit_model_capture(candidate, &value)
+        .await
+        .expect("ordinary token refresh does not invalidate identity scope");
+    let captured_pin = captured.pin.expect("captured pin");
+    assert_eq!(captured_pin.captured_at, original.captured_at);
+    assert!(captured_pin.reuse_deadline < Utc::now());
+    assert_eq!(captured_pin.source, "capture");
+    let request_count: i64 = sqlx::query_scalar("select count(*) from model_requests")
+        .fetch_one(&database.pool)
+        .await
+        .expect("count ordinary requests");
+    assert_eq!(
+        request_count, 0,
+        "capture store path does not create requests"
+    );
+
+    let next_candidates = aged_store
+        .model_capture_candidates(None, 8)
+        .await
+        .expect("same aged value remains an automatic candidate");
+    assert_eq!(next_candidates.len(), 1);
+    assert!(
+        aged_store
+            .invalidate_active_model_pin(
+                "acct_model_state",
+                1,
+                "upstream-codex",
+                captured.config_revision,
+                &captured_pin.sha256,
+            )
+            .await
+            .expect("invalidate attributable pin")
+    );
+    assert!(
+        !aged_store
+            .invalidate_active_model_pin(
+                "acct_model_state",
+                1,
+                "upstream-codex",
+                captured.config_revision,
+                &captured_pin.sha256,
+            )
+            .await
+            .expect("stale invalidation is fenced")
+    );
+    let invalid_candidates = aged_store
+        .model_capture_candidates(None, 8)
+        .await
+        .expect("explicit invalidation is an automatic candidate");
+    assert_eq!(invalid_candidates.len(), 1);
+    sqlx::query(
+        "update provider_accounts set identity_revision = identity_revision + 1
+          where id = 'acct_model_state'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("rotate identity");
+    assert!(matches!(
+        aged_store
+            .commit_model_capture(&invalid_candidates[0], &"B".repeat(292))
+            .await,
+        Err(TurnStateStoreError::Conflict)
+    ));
+    database.close().await;
+}
+
+#[tokio::test]
+async fn model_update_rejects_stale_identity_and_effective_model_even_at_same_revision() {
+    let Some(database) = TestDatabase::create("model_turn_state_scope_cas").await else {
+        return;
+    };
+    seed_account(&database.pool, "acct_scope_cas", "openai").await;
+    sqlx::query(
+        "update runtime_settings
+            set model_mappings_json = '{\"public-codex\":\"upstream-a\"}'::jsonb
+          where id = 1",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed first mapping");
+    let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize model store");
+    let read = store
+        .load_model_state("acct_scope_cas", "public-codex")
+        .await
+        .expect("read initial scope");
+
+    sqlx::query(
+        "update runtime_settings
+            set model_mappings_json = '{\"public-codex\":\"upstream-b\"}'::jsonb
+          where id = 1",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("switch mapping without changing model config revision");
+    assert!(matches!(
+        store
+            .update_model_state(
+                "acct_scope_cas",
+                "public-codex",
+                disabled_model_update(&read),
+            )
+            .await,
+        Err(TurnStateStoreError::Conflict)
+    ));
+
+    sqlx::raw_sql(
+        "update runtime_settings
+            set model_mappings_json = '{\"public-codex\":\"upstream-a\"}'::jsonb;
+         update provider_accounts
+            set identity_revision = identity_revision + 1
+          where id = 'acct_scope_cas'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("switch identity without changing old model config revision");
+    assert!(matches!(
+        store
+            .update_model_state(
+                "acct_scope_cas",
+                "public-codex",
+                disabled_model_update(&read),
+            )
+            .await,
+        Err(TurnStateStoreError::Conflict)
+    ));
+    database.close().await;
+}
+
+#[tokio::test]
+async fn automatic_capture_candidates_page_past_the_first_sixty_four_scopes() {
+    let Some(database) = TestDatabase::create("model_turn_state_candidate_cursor").await else {
+        return;
+    };
+    seed_account(&database.pool, "acct_candidate_cursor", "openai").await;
+    sqlx::query(
+        "insert into outbound_proxies
+           (id, name, proxy_url, last_test_at, last_test_success, last_test_latency_ms,
+            last_test_message)
+         values ('proxy_cursor', 'Cursor', 'http://127.0.0.1:8080', now(), true, 1, 'ok')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed candidate proxy");
+    for index in 0..65 {
+        sqlx::query(
+            "insert into openai_model_turn_states
+               (account_id, identity_revision, effective_model, capture_enabled, capture_proxy_id)
+             values ('acct_candidate_cursor', 1, $1, true, 'proxy_cursor')",
+        )
+        .bind(format!("model-{index:03}"))
+        .execute(&database.pool)
+        .await
+        .expect("seed automatic capture candidate");
+    }
+    let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize model store");
+    let first = store
+        .model_capture_candidates(None, 64)
+        .await
+        .expect("load first bounded candidate page");
+    assert_eq!(first.len(), 64);
+    let cursor = first.last().expect("first page tail").cursor();
+    let second = store
+        .model_capture_candidates(Some(&cursor), 64)
+        .await
+        .expect("load next bounded candidate page");
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].effective_model, "model-064");
+    database.close().await;
+}
+
+fn disabled_model_update(
+    view: &gateway_core::provider_ports::turn_state::ModelTurnStateView,
+) -> ModelTurnStateUpdate {
+    ModelTurnStateUpdate {
+        expected_identity_revision: view.identity_revision,
+        expected_effective_model: view.effective_model.clone(),
+        lock_enabled: false,
+        capture_enabled: false,
+        reuse_window_seconds: view.reuse_window_seconds,
+        capture_proxy_id: None,
+        max_attempts: view.capture_policy.max_attempts,
+        attempt_timeout_seconds: view.capture_policy.attempt_timeout_seconds,
+        job_timeout_seconds: view.capture_policy.job_timeout_seconds,
+        backoff_seconds: view.capture_policy.backoff_seconds,
+        max_backoff_seconds: view.capture_policy.max_backoff_seconds,
+        cooldown_seconds: view.capture_policy.cooldown_seconds,
+        pin_action: ModelTurnStatePinAction::Keep,
+        value: None,
+        expected_revision: view.config_revision,
+    }
+}
+
+fn synthetic_fernet_candidate() -> String {
+    let mut raw = Vec::with_capacity(217);
+    raw.push(0x80);
+    raw.extend_from_slice(&1_789_650_773_u64.to_be_bytes());
+    raw.extend_from_slice(&[0x11; 16]);
+    raw.extend_from_slice(&[0x22; 160]);
+    raw.extend_from_slice(&[0x33; 32]);
+    assert_eq!(raw.len(), 217);
+    url_safe_base64(&raw)
+}
+
+fn url_safe_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in &mut chunks {
+        encoded.push(char::from(ALPHABET[usize::from(chunk[0] >> 2)]));
+        encoded.push(char::from(
+            ALPHABET[usize::from((chunk[0] & 0x03) << 4 | chunk[1] >> 4)],
+        ));
+        encoded.push(char::from(
+            ALPHABET[usize::from((chunk[1] & 0x0f) << 2 | chunk[2] >> 6)],
+        ));
+        encoded.push(char::from(ALPHABET[usize::from(chunk[2] & 0x3f)]));
+    }
+    match chunks.remainder() {
+        [first] => {
+            encoded.push(char::from(ALPHABET[usize::from(*first >> 2)]));
+            encoded.push(char::from(ALPHABET[usize::from((*first & 0x03) << 4)]));
+            encoded.push_str("==");
+        }
+        [first, second] => {
+            encoded.push(char::from(ALPHABET[usize::from(*first >> 2)]));
+            encoded.push(char::from(
+                ALPHABET[usize::from((*first & 0x03) << 4 | *second >> 4)],
+            ));
+            encoded.push(char::from(ALPHABET[usize::from((*second & 0x0f) << 2)]));
+            encoded.push('=');
+        }
+        [] => {}
+        _ => unreachable!("chunks_exact remainder is shorter than three bytes"),
+    }
+    encoded
 }
 
 #[tokio::test]

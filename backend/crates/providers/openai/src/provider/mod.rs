@@ -107,6 +107,7 @@ use execution::*;
 #[doc(hidden)]
 pub use failure::openai_failure_affects_account_score;
 use failure::*;
+pub(crate) use observation::build_cookie_header;
 use observation::*;
 pub(crate) use workers::worker_contributions;
 
@@ -622,11 +623,32 @@ impl Provider for CodexProvider {
             requested_transport
         };
         apply_transport(&mut upstream_request, transport);
-        if let Some(store) = &self.turn_state_store
-            && let Some(value) = store.active_override(lease.account_id().as_str())
-        {
+        let model_pin = self.turn_state_store.as_ref().and_then(|store| {
+            (transport == CodexProviderTransport::HttpOnly)
+                .then(|| {
+                    store.active_model_pin(
+                        lease.account_id().as_str(),
+                        lease.account().identity_revision().get(),
+                        upstream_model.as_str(),
+                    )
+                })
+                .flatten()
+        });
+        let model_turn_state_fence = model_pin.as_ref().map(|pin| ModelTurnStatePinFence {
+            account_id: lease.account_id().as_str().to_owned(),
+            identity_revision: lease.account().identity_revision().get(),
+            effective_model: upstream_model.as_str().to_owned(),
+            config_revision: pin.config_revision,
+            sha256: pin.sha256.clone(),
+        });
+        let turn_state = model_pin.map(|pin| pin.value).or_else(|| {
+            self.turn_state_store
+                .as_ref()
+                .and_then(|store| store.active_override(lease.account_id().as_str()))
+        });
+        if let Some(value) = turn_state {
             upstream_request.turn_state = Some(value);
-            // 手动覆盖是最终账号级出站决策；客户端透传的同名多值头不能再次覆盖它。
+            // HTTP 模型锁优先于账号级覆盖；二者都不能再被客户端透传多值头覆盖。
             upstream_request
                 .passthrough_headers
                 .remove("x-codex-turn-state");
@@ -692,6 +714,7 @@ impl Provider for CodexProvider {
             stream_max_retries: self.stream_max_retries,
             session_capture,
             turn_state_store: self.turn_state_store.clone(),
+            model_turn_state_fence,
         });
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {

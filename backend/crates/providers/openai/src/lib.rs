@@ -240,6 +240,7 @@ pub async fn initialize(
         },
         Arc::clone(&websocket_pool),
         desktop_release_status,
+        config.base_url().to_owned(),
     ));
     let worker_contributions = provider::worker_contributions(
         refresh,
