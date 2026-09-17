@@ -8,6 +8,7 @@ use std::{pin::Pin, sync::Arc};
 
 use bytes::Bytes;
 use futures::Stream;
+use gateway_core::provider_ports::turn_state::{TurnStateObservation, TurnStateStore};
 use gateway_protocol::openai::events::ParsedRateLimits;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -43,7 +44,6 @@ pub struct CodexWebSocketStreamingExchange {
     /// 上游内部 metadata 事件里的首个动态 turn state。
     pub turn_state_update: CodexWebSocketTurnStateUpdate,
     pub turn_state_observations: CodexWebSocketTurnStateObservations,
-    pub(crate) turn_state_response_id: CodexWebSocketTurnStateResponseId,
     /// WebSocket 连接池决策。
     pub pool_decision: Option<WebSocketPoolDecision>,
     /// terminal completed 后该 socket 是否会保留 connection-local continuation。
@@ -62,7 +62,51 @@ pub type CodexWebSocketRateLimitUpdates = Arc<Mutex<Vec<ParsedRateLimits>>>;
 /// live 流中的 turn state 动态更新。
 pub type CodexWebSocketTurnStateUpdate = Arc<Mutex<Option<String>>>;
 pub type CodexWebSocketTurnStateObservations = Arc<Mutex<Vec<CodexObservedTurnState>>>;
-pub(crate) type CodexWebSocketTurnStateResponseId = Arc<Mutex<Option<String>>>;
+
+#[derive(Clone)]
+pub(crate) struct CodexWebSocketTurnStateObserver {
+    store: Arc<dyn TurnStateStore>,
+    account_id: String,
+    request_id: String,
+    attempt_index: u32,
+    client_turn_id: Option<String>,
+}
+
+impl CodexWebSocketTurnStateObserver {
+    pub(crate) fn new(
+        store: Arc<dyn TurnStateStore>,
+        account_id: &str,
+        request_id: &str,
+        attempt_index: u32,
+        client_turn_id: Option<&str>,
+    ) -> Self {
+        Self {
+            store,
+            account_id: account_id.to_owned(),
+            request_id: request_id.to_owned(),
+            attempt_index,
+            client_turn_id: client_turn_id.map(str::to_owned),
+        }
+    }
+
+    pub(crate) fn observe(
+        &self,
+        receipt: &CodexObservedTurnState,
+        upstream_response_id: Option<&str>,
+    ) {
+        self.store.enqueue_observation(TurnStateObservation {
+            id: receipt.id.clone(),
+            account_id: self.account_id.clone(),
+            request_id: Some(self.request_id.clone()),
+            attempt_index: Some(self.attempt_index),
+            value: receipt.value.clone(),
+            observed_at: receipt.observed_at,
+            transport: "websocket".to_owned(),
+            upstream_response_id: upstream_response_id.map(str::to_owned),
+            client_turn_id: self.client_turn_id.clone(),
+        });
+    }
+}
 
 pub(super) fn reusable_websocket_metadata(
     mut metadata: CodexWebSocketConnectionMetadata,

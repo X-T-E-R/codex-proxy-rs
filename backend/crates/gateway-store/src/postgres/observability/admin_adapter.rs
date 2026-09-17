@@ -248,11 +248,19 @@ impl ObservabilityRepository for PgObservabilityRepository {
                 provider_observations(&self.pool, range, &filter),
             )
             .await?;
+        let turn_state = self
+            .query_budget
+            .run(
+                "load request turn state summary",
+                turn_state_counts(&self.pool, range, &filter),
+            )
+            .await?;
         Ok(UsageOverview {
             range,
             requests,
             attempts,
             providers,
+            turn_state,
         })
     }
 

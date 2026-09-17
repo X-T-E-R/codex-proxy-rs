@@ -197,8 +197,20 @@ async fn persist_observation(pool: &PgPool, observation: TurnStateObservation) {
 }
 
 async fn persist_observation_inner(pool: &PgPool, observation: TurnStateObservation) -> Result<()> {
-    if observation.value.is_empty() || observation.value.len() > 16 * 1024 {
+    if observation.value.len() > 16 * 1024 {
         return Err(TurnStateStoreError::Invalid);
+    }
+    if let (Some(request_id), Some(attempt_index)) =
+        (&observation.request_id, observation.attempt_index)
+        && let Err(error) =
+            persist_request_observation(pool, request_id, attempt_index, &observation).await
+    {
+        tracing::warn!(request_id, attempt_index, error_kind = ?error,
+            "OpenAI request turn state observation write failed");
+    }
+    if observation.value.is_empty() {
+        // 账号最近值保持既有的非空语义；请求级 0 B 观测仍是一次真实上游返回。
+        return Ok(());
     }
     sqlx::query(
         "insert into openai_turn_states(
@@ -238,6 +250,76 @@ async fn persist_observation_inner(pool: &PgPool, observation: TurnStateObservat
     .bind(&observation.transport)
     .bind(observation.upstream_response_id.as_deref())
     .bind(observation.client_turn_id.as_deref())
+    .execute(pool)
+    .await
+    .map_err(unavailable)?;
+    Ok(())
+}
+
+async fn persist_request_observation(
+    pool: &PgPool,
+    request_id: &str,
+    attempt_index: u32,
+    observation: &TurnStateObservation,
+) -> Result<()> {
+    let attempt_index = i32::try_from(attempt_index).map_err(|_| TurnStateStoreError::Invalid)?;
+    // 执行观测和账号观测是两个异步队列：此处不依赖请求行先落库。
+    // 历史保留期在写入时再次检查，避免迟到写入重新生成已清理的敏感原值。
+    sqlx::query(
+        "insert into request_turn_state_observations
+           (request_id, attempt_index, observation_id, value, observed_at, source,
+            upstream_response_id)
+         select $1, $2, $3, $4, $5, $6, $7
+          from runtime_settings settings
+          where settings.id = 1
+            and (
+              exists (
+                select 1 from model_requests request
+                 where request.id = $1
+                   and (request.outcome = 'running'
+                        or request.completed_at >= now()
+                           - (settings.usage_retention_days * interval '1 day'))
+              )
+              or (
+                not exists (select 1 from model_requests request where request.id = $1)
+                and $5 >= now() - (settings.usage_retention_days * interval '1 day')
+              )
+            )
+         on conflict (request_id, attempt_index) do update
+           set changed = request_turn_state_observations.changed
+                         or request_turn_state_observations.value <> excluded.value,
+               observation_id = case when (excluded.observed_at, excluded.observation_id)
+                                     >= (request_turn_state_observations.observed_at,
+                                         request_turn_state_observations.observation_id)
+                                     then excluded.observation_id
+                                     else request_turn_state_observations.observation_id end,
+               value = case when (excluded.observed_at, excluded.observation_id)
+                              >= (request_turn_state_observations.observed_at,
+                                  request_turn_state_observations.observation_id)
+                              then excluded.value else request_turn_state_observations.value end,
+               observed_at = greatest(request_turn_state_observations.observed_at,
+                                      excluded.observed_at),
+               source = case when (excluded.observed_at, excluded.observation_id)
+                               >= (request_turn_state_observations.observed_at,
+                                   request_turn_state_observations.observation_id)
+                               then excluded.source else request_turn_state_observations.source end,
+               upstream_response_id = case
+                 when excluded.observation_id = request_turn_state_observations.observation_id
+                   then coalesce(excluded.upstream_response_id,
+                                 request_turn_state_observations.upstream_response_id)
+                 when (excluded.observed_at, excluded.observation_id)
+                       > (request_turn_state_observations.observed_at,
+                          request_turn_state_observations.observation_id)
+                   then excluded.upstream_response_id
+                 else request_turn_state_observations.upstream_response_id end",
+    )
+    .bind(request_id)
+    .bind(attempt_index)
+    .bind(&observation.id)
+    .bind(&observation.value)
+    .bind(observation.observed_at)
+    .bind(&observation.transport)
+    .bind(observation.upstream_response_id.as_deref())
     .execute(pool)
     .await
     .map_err(unavailable)?;

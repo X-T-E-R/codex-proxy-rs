@@ -88,6 +88,7 @@ pub struct ImageBillingView {
 pub struct UsageListRecordView {
     pub client_api_key_name: Option<String>,
     pub id: String,
+    pub turn_state: TurnStateSummaryView,
     pub provider: Option<String>,
     pub authentication_kind: Option<String>,
     pub account_id: Option<String>,
@@ -267,9 +268,42 @@ pub struct UsageRecordDetailView {
     pub related_requests: Vec<serde_json::Value>,
     #[serde(flatten)]
     pub request: UsageRecordView,
+    pub turn_state: TurnStateDetailView,
     pub attempts: Vec<UsageAttemptView>,
     /// 尝试列表是否完整；best-effort 下恒为 false。
     pub attempts_complete: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateSummaryView {
+    pub classification: String,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateDetailView {
+    pub classification: String,
+    pub bytes: Option<u64>,
+    pub value: Option<String>,
+    pub sha256: Option<String>,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub source: Option<String>,
+    pub upstream_response_id: Option<String>,
+    pub attempt_index: Option<u32>,
+    pub changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateCountsView {
+    pub observed292: u64,
+    pub observed_other: u64,
+    pub unobserved: u64,
+    pub not_collected: u64,
+    pub hit_rate: Option<f64>,
+    pub coverage_rate: Option<f64>,
 }
 
 /// Dashboard 趋势数据。
@@ -583,6 +617,7 @@ pub struct DashboardDataView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummaryView {
+    pub turn_state: TurnStateCountsView,
     pub total_requests: String,
     pub input_tokens: String,
     pub output_tokens: String,

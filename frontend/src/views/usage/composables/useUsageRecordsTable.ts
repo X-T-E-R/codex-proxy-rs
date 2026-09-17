@@ -30,6 +30,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   const analyticsLoading = shallowRef(true)
   const records = shallowRef<UsageDisplayRecord[]>([])
   const summary = shallowRef(emptySummary())
+  const summaryLoadError = shallowRef('')
   const insights = shallowRef(emptyInsights())
   const currentPage = shallowRef(1)
   const pageSize = shallowRef(10)
@@ -120,6 +121,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     const requestOptions = { signal: analyticsController.signal }
     const dimension = diagnosticDimension.value
     analyticsLoading.value = !background
+    summaryLoadError.value = ''
     try {
       const [nextSummary, overview, diagnostics] = await Promise.all([
         getUsageRecordSummary(globalParams, requestOptions),
@@ -141,7 +143,12 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
             : insights.value.diagnostics,
       }
     }
-    catch {}
+    catch (error: unknown) {
+      if (requestId !== analyticsRequestId)
+        return
+      summaryLoadError.value = errorMessage(error, '使用概览加载失败')
+      toast.error(errorMessage(error, '加载失败'))
+    }
     finally {
       if (requestId === analyticsRequestId) {
         analyticsLoading.value = false
@@ -258,6 +265,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     analyticsLoading,
     records,
     summary,
+    summaryLoadError,
     insights,
     refreshingList,
     diagnosticDimension,
@@ -277,6 +285,14 @@ function emptySummary() {
     cacheWriteTokens: '0',
     totalTokens: '0',
     averageLatencyMs: '0 ms',
+    turnState: {
+      observed292: 0,
+      observedOther: 0,
+      unobserved: 0,
+      notCollected: 0,
+      hitRate: null,
+      coverageRate: null,
+    },
   }
   return summary
 }

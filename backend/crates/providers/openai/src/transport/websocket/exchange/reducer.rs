@@ -79,12 +79,25 @@ pub(super) fn reduce_websocket_event(
     });
 
     let event = websocket_event_type(&value);
-    let upstream_response_id = websocket_response_completed_id(&value);
+    let completed_response_id = websocket_response_completed_id(&value);
     if event == Some("response.completed")
-        && let Some(response_id) = upstream_response_id.as_deref()
+        && let Some(response_id) = completed_response_id.as_deref()
     {
         continuation.record_completed(response_id.to_owned());
     }
+    let upstream_response_id = match event {
+        Some(
+            "response.created"
+            | "response.in_progress"
+            | "response.completed"
+            | "response.incomplete"
+            | "response.failed",
+        ) => value
+            .pointer("/response/id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        _ => None,
+    };
 
     let terminal = match event {
         Some("response.completed") => Some(WebSocketTerminalKind::Completed),

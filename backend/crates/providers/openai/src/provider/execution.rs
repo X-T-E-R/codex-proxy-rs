@@ -562,17 +562,19 @@ fn observe_turn_state(
     receipt: &CodexObservedTurnState,
     transport: &str,
     upstream_response_id: Option<&str>,
-    client_turn_id: Option<&str>,
+    request: TurnStateRequestContext<'_>,
 ) {
     let Some(store) = store else { return };
     store.enqueue_observation(TurnStateObservation {
         id: receipt.id.clone(),
         account_id: account_id.to_owned(),
+        request_id: Some(request.request_id.to_owned()),
+        attempt_index: Some(request.attempt_index),
         value: receipt.value.clone(),
         observed_at: receipt.observed_at,
         transport: transport.to_owned(),
         upstream_response_id: upstream_response_id.map(str::to_owned),
-        client_turn_id: client_turn_id.map(str::to_owned),
+        client_turn_id: request.client_turn_id.map(str::to_owned),
     });
 }
 
@@ -582,7 +584,7 @@ fn observe_received_turn_state(
     account_id: &str,
     receipt: Option<&CodexObservedTurnState>,
     upstream_response_id: Option<&str>,
-    client_turn_id: Option<&str>,
+    request: TurnStateRequestContext<'_>,
 ) {
     if let Some(receipt) = receipt {
         observe_turn_state(
@@ -594,78 +596,16 @@ fn observe_received_turn_state(
                 _ => "http",
             },
             upstream_response_id,
-            client_turn_id,
+            request,
         );
     }
 }
 
-async fn take_turn_state_observations(
-    updates: Option<&CodexWebSocketTurnStateObservations>,
-) -> Vec<CodexObservedTurnState> {
-    let Some(updates) = updates else {
-        return Vec::new();
-    };
-    std::mem::take(&mut *updates.lock().await)
-}
-
-async fn current_turn_state_response_id(
-    decoder_response_id: Option<&str>,
-    websocket_response_id: Option<&CodexWebSocketTurnStateResponseId>,
-) -> Option<String> {
-    if let Some(response_id) = decoder_response_id {
-        return Some(response_id.to_owned());
-    }
-    let response_id = websocket_response_id?;
-    response_id.lock().await.clone()
-}
-
-async fn drain_turn_state_observations(
-    updates: Option<&CodexWebSocketTurnStateObservations>,
-    received: &mut VecDeque<CodexObservedTurnState>,
-    store: Option<&Arc<dyn TurnStateStore>>,
-    account_id: &str,
-    decoder_response_id: Option<&str>,
-    websocket_response_id: Option<&CodexWebSocketTurnStateResponseId>,
-    client_turn_id: Option<&str>,
-) {
-    let upstream_response_id =
-        current_turn_state_response_id(decoder_response_id, websocket_response_id).await;
-    for receipt in take_turn_state_observations(updates).await {
-        observe_turn_state(
-            store,
-            account_id,
-            &receipt,
-            "websocket",
-            upstream_response_id.as_deref(),
-            client_turn_id,
-        );
-        if upstream_response_id.is_none() {
-            if received.len() == MAX_PENDING_TURN_STATE_RECEIPTS {
-                received.pop_front();
-            }
-            received.push_back(receipt);
-        }
-    }
-}
-
-fn enrich_turn_state_observations(
-    received: &VecDeque<CodexObservedTurnState>,
-    store: Option<&Arc<dyn TurnStateStore>>,
-    account_id: &str,
-    transport: CodexBackendTransport,
-    upstream_response_id: &str,
-    client_turn_id: Option<&str>,
-) {
-    for receipt in received {
-        observe_received_turn_state(
-            store,
-            transport,
-            account_id,
-            Some(receipt),
-            Some(upstream_response_id),
-            client_turn_id,
-        );
-    }
+#[derive(Clone, Copy)]
+struct TurnStateRequestContext<'a> {
+    request_id: &'a str,
+    attempt_index: u32,
+    client_turn_id: Option<&'a str>,
 }
 
 fn image_response_metering(
@@ -753,13 +693,18 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             lease.account_switch(),
         );
         let request_transport_requirement = transport_requirement(&request);
+        let turn_state_request = TurnStateRequestContext {
+            request_id: &request_id,
+            attempt_index: context.attempt_index().get(),
+            client_turn_id: request.client_turn_id.as_deref(),
+        };
         let trace = context.trace();
         let response = create_response_attempt(
             &client,
             &request,
             codex_request_context(
                 &request,
-                &request_id,
+                &context,
                 &active_account,
                 lease.installation_id(),
                 &authorization,
@@ -789,7 +734,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     &receipt,
                     transport,
                     None,
-                    request.client_turn_id.as_deref(),
+                    turn_state_request,
                 );
             }
             log_client_upstream_error(
@@ -831,15 +776,17 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 return;
             }
         };
-        let initial_turn_state_observation = response.turn_state_observation.clone();
-        observe_received_turn_state(
-            turn_state_store.as_ref(),
-            response.transport,
-            active_account.id().as_str(),
-            initial_turn_state_observation.as_ref(),
-            None,
-            request.client_turn_id.as_deref(),
-        );
+        let mut pending_initial_turn_state_observation = response.turn_state_observation.clone();
+        if response.transport == CodexBackendTransport::WebSocket {
+            observe_received_turn_state(
+                turn_state_store.as_ref(),
+                response.transport,
+                active_account.id().as_str(),
+                pending_initial_turn_state_observation.as_ref(),
+                None,
+                turn_state_request,
+            );
+        }
         if !accepts_backend_transport(transport_policy, response.transport) {
             let failure = MappedProviderFailure::plain(provider_error(
                 ProviderErrorKind::Protocol,
@@ -907,12 +854,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             OpenAiPassiveQuotaObservation::new(response.rate_limit_headers);
         let rate_limit_updates = response.rate_limit_updates;
         let turn_state_updates = response.turn_state_update;
-        let turn_state_observation_updates = response.turn_state_observations;
-        let turn_state_response_id = response.turn_state_response_id;
-        let mut received_turn_state_observations = initial_turn_state_observation
-            .into_iter()
-            .collect::<VecDeque<_>>();
-        let mut turn_state_observations_enriched = false;
         // OpenAI 线路为透明代理：HTTP SSE 与 WebSocket 两条上游均启用 raw 透传，
         // 下游按字节转发上游原文，避免 serde 往返改写数值/精度（大整数→f64、logprobs 等）。
         // WS 帧由 reducer 以 encode_sse_event(&event, raw) 逐字节内嵌上游原始 JSON
@@ -926,16 +867,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let mut pre_commit_events = PreCommitClientEvents::new();
         loop {
             let Some(stream_deadline) = remaining(context.deadline()) else {
-                drain_turn_state_observations(
-                    turn_state_observation_updates.as_ref(),
-                    &mut received_turn_state_observations,
-                    turn_state_store.as_ref(),
-                    active_account.id().as_str(),
-                    decoder.response_id(),
-                    turn_state_response_id.as_ref(),
-                    request.client_turn_id.as_deref(),
-                )
-                .await;
                 if allows_account_state_mutation {
                     synchronize_passive_quota(
                         &quota,
@@ -984,16 +915,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     continue;
                 }
                 Err(mut failure) => {
-                    drain_turn_state_observations(
-                        turn_state_observation_updates.as_ref(),
-                        &mut received_turn_state_observations,
-                        turn_state_store.as_ref(),
-                        active_account.id().as_str(),
-                        decoder.response_id(),
-                        turn_state_response_id.as_ref(),
-                        request.client_turn_id.as_deref(),
-                    )
-                    .await;
                     let updates = take_rate_limit_updates(rate_limit_updates.as_ref()).await;
                     let rate_limits_changed = if updates.is_empty() {
                         false
@@ -1066,16 +987,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 passive_quota_observation.observe(&updates);
                 observation_state.merge_rate_limit_headers(&rate_limit_update_headers(&updates))
             };
-            drain_turn_state_observations(
-                turn_state_observation_updates.as_ref(),
-                &mut received_turn_state_observations,
-                turn_state_store.as_ref(),
-                active_account.id().as_str(),
-                decoder.response_id(),
-                turn_state_response_id.as_ref(),
-                request.client_turn_id.as_deref(),
-            )
-            .await;
             let turn_state_merge = merge_turn_state_update(
                 turn_state_updates.as_ref(),
                 &mut session_capture,
@@ -1093,24 +1004,17 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     (events, Some((error, semantic_output_seen)))
                 }
             };
-            let observed_response_id = current_turn_state_response_id(
-                decoder.response_id(),
-                turn_state_response_id.as_ref(),
-            )
-            .await;
-            if !turn_state_observations_enriched
-                && let Some(response_id) = observed_response_id.as_deref()
+            if let Some(response_id) = decoder.response_id()
+                && let Some(receipt) = pending_initial_turn_state_observation.take()
             {
-                enrich_turn_state_observations(
-                    &received_turn_state_observations,
+                observe_received_turn_state(
                     turn_state_store.as_ref(),
-                    active_account.id().as_str(),
                     response_transport,
-                    response_id,
-                    request.client_turn_id.as_deref(),
+                    active_account.id().as_str(),
+                    Some(&receipt),
+                    Some(response_id),
+                    turn_state_request,
                 );
-                received_turn_state_observations.clear();
-                turn_state_observations_enriched = true;
             }
             pre_commit_events.observe_chunk(chunk_len);
             let response_model_changed = observation_state
@@ -1232,6 +1136,18 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 (events, Some((error, semantic_output_seen)))
             }
         };
+        if let Some(response_id) = decoder.response_id()
+            && let Some(receipt) = pending_initial_turn_state_observation.take()
+        {
+            observe_received_turn_state(
+                turn_state_store.as_ref(),
+                response_transport,
+                active_account.id().as_str(),
+                Some(&receipt),
+                Some(response_id),
+                turn_state_request,
+            );
+        }
         let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {
             log_canonical_upstream_error(
                 UpstreamErrorLogContext::new(
@@ -1271,34 +1187,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             passive_quota_observation.observe(&updates);
             observation_state.merge_rate_limit_headers(&rate_limit_update_headers(&updates))
         };
-        drain_turn_state_observations(
-            turn_state_observation_updates.as_ref(),
-            &mut received_turn_state_observations,
-            turn_state_store.as_ref(),
-            active_account.id().as_str(),
-            decoder.response_id(),
-            turn_state_response_id.as_ref(),
-            request.client_turn_id.as_deref(),
-        )
-        .await;
-        let observed_response_id = current_turn_state_response_id(
-            decoder.response_id(),
-            turn_state_response_id.as_ref(),
-        )
-        .await;
-        if !turn_state_observations_enriched
-            && let Some(response_id) = observed_response_id.as_deref()
-        {
-            enrich_turn_state_observations(
-                &received_turn_state_observations,
-                turn_state_store.as_ref(),
-                active_account.id().as_str(),
-                response_transport,
-                response_id,
-                request.client_turn_id.as_deref(),
-            );
-            received_turn_state_observations.clear();
-        }
         if allows_account_state_mutation {
             synchronize_passive_quota(
                 &quota,

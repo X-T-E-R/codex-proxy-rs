@@ -433,6 +433,7 @@ fn context() -> CodexRequestContext<'static> {
         authorization: "Bearer oauth-access",
         account_id: Some("acct_123"),
         request_id: "req_catalog",
+        attempt_index: None,
         turn_state: None,
         turn_metadata: None,
         beta_features: None,

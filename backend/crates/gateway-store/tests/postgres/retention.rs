@@ -37,7 +37,7 @@ async fn retention_cycle_should_stop_at_the_batch_budget() {
     .await
     .expect("seed expired audit events");
 
-    let budget = RetentionCycleBudget::try_new(2, 3, Duration::from_secs(1), Duration::ZERO)
+    let budget = RetentionCycleBudget::try_new(2, 5, Duration::from_secs(1), Duration::ZERO)
         .expect("retention cycle budget");
     let repository = PgRetentionRepository::with_cycle_budget(database.pool.clone(), budget);
     let report = repository
@@ -55,7 +55,7 @@ async fn retention_cycle_should_stop_at_the_batch_budget() {
     assert_eq!(report.model_requests, 0);
     assert_eq!(report.ops_events, 0);
     assert_eq!(report.admin_audit_events, 2);
-    assert_eq!(report.batches, 3);
+    assert_eq!(report.batches, 5);
     assert!(report.budget_exhausted);
     let remaining: i64 =
         sqlx::query_scalar("select count(*) from admin_audit_events where id like 'retention-%'")

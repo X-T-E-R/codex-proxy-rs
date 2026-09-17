@@ -30,10 +30,15 @@ import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
 import UsageStatusCodeBadge from './UsageStatusCodeBadge.vue'
+import UsageTurnStatePanel from './UsageTurnStatePanel.vue'
 
 const props = defineProps<{
   record: UsageViewModel | null
+  loading?: boolean
+  error?: string
 }>()
+
+const emit = defineEmits<{ retry: [] }>()
 
 const open = defineModel<boolean>({ default: false })
 
@@ -287,6 +292,15 @@ const tokenDonutOption = computed<EChartsOption>(() => {
     tone="info"
     size="xl"
   >
+    <p v-if="loading" role="status" class="m-0 text-cp-text-secondary">
+      正在加载使用记录详情…
+    </p>
+    <div v-else-if="error" role="alert" class="grid gap-3 rounded-cp bg-cp-error-container p-4 text-cp-error-on-container">
+      <span>{{ error }}</span>
+      <BaseButton size="sm" class="justify-self-start" @click="emit('retry')">
+        重试
+      </BaseButton>
+    </div>
     <div v-if="record" class="grid min-w-0 gap-3">
       <section :class="panelClass">
         <dl
@@ -368,6 +382,8 @@ const tokenDonutOption = computed<EChartsOption>(() => {
         </h3>
         <UsageDetailFieldGrid :items="identifierItems" />
       </section>
+
+      <UsageTurnStatePanel :state="record.turnState" />
 
       <section class="grid min-w-0 gap-3 lg:grid-cols-2">
         <section class="flex min-h-0 flex-col" :class="panelClass">

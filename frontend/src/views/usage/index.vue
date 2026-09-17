@@ -40,6 +40,7 @@ const {
   analyticsLoading,
   records,
   summary,
+  summaryLoadError,
   insights,
   refreshingList,
   diagnosticDimension,
@@ -53,7 +54,7 @@ const {
   active: computed(() => recordView.value === 'success'),
 })
 
-const { showDetailModal, selectedUsageRecord, handleViewDetail } = useUsageRecordDetail()
+const { showDetailModal, selectedUsageRecord, detailLoading, detailError, handleViewDetail, loadDetail } = useUsageRecordDetail()
 
 watch(timeRange, () => {
   refreshTimeRangeEnd()
@@ -75,7 +76,7 @@ watch(timeRange, () => {
       </template>
     </BasePageHeader>
 
-    <UsageSummaryCards :summary="summary" />
+    <UsageSummaryCards :summary="summary" :loading="analyticsLoading" :error="summaryLoadError" />
     <UsageInsightsGrid
       v-model:diagnostic-dimension="diagnosticDimension"
       :overview="insights.overview"
@@ -164,6 +165,6 @@ watch(timeRange, () => {
       </template>
     </BaseCard>
 
-    <UsageRecordDetailModal v-model="showDetailModal" :record="selectedUsageRecord" />
+    <UsageRecordDetailModal v-model="showDetailModal" :record="selectedUsageRecord" :loading="detailLoading" :error="detailError" @retry="loadDetail" />
   </div>
 </template>

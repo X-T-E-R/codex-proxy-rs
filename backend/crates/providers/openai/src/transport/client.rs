@@ -459,6 +459,8 @@ pub struct CodexRequestContext<'a> {
     pub account_id: Option<&'a str>,
     /// 代理请求 ID。
     pub request_id: &'a str,
+    /// 请求内的实际上游 attempt 序号；独立客户端测试可省略。
+    pub attempt_index: Option<u32>,
     /// 当前账号同一 turn 内的 opaque sticky-routing 状态。
     pub turn_state: Option<&'a str>,
     /// 客户端 turn metadata；其中 installation ID 已按当前账号处理。
@@ -502,6 +504,7 @@ impl<'a> CodexRequestContext<'a> {
             authorization,
             account_id,
             request_id,
+            attempt_index: None,
             turn_state: None,
             turn_metadata: None,
             beta_features: None,
@@ -649,7 +652,6 @@ pub struct CodexBackendStreamingResponse {
     /// WS 每次 metadata 实际值；独立于 continuation 的首值语义。
     #[doc(hidden)]
     pub turn_state_observations: Option<CodexWebSocketTurnStateObservations>,
-    pub(crate) turn_state_response_id: Option<super::websocket::CodexWebSocketTurnStateResponseId>,
     /// WebSocket 连接池决策。
     pub websocket_pool_decision: Option<WebSocketPoolDecision>,
     /// 上游诊断元数据。

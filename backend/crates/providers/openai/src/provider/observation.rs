@@ -673,7 +673,7 @@ pub(super) const fn accepts_backend_transport(
 
 pub(super) fn codex_request_context<'a>(
     request: &'a CodexResponsesRequest,
-    request_id: &'a str,
+    attempt: &'a AttemptContext,
     account: &'a ProviderAccount,
     installation_id: &'a str,
     authorization: &'a SecretString,
@@ -684,7 +684,8 @@ pub(super) fn codex_request_context<'a>(
         trace: None,
         authorization: authorization.expose_secret(),
         account_id: account.upstream_account_id(),
-        request_id,
+        request_id: attempt.request_id().as_str(),
+        attempt_index: Some(attempt.attempt_index().get()),
         turn_state: request.turn_state.as_deref(),
         turn_metadata: request.turn_metadata.as_deref(),
         beta_features: request.beta_features.as_deref(),

@@ -146,6 +146,7 @@ fn request_context<'a>(
         authorization: "Bearer access-token",
         account_id,
         request_id,
+        attempt_index: None,
         turn_state: None,
         turn_metadata: None,
         beta_features: None,

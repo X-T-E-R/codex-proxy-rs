@@ -498,6 +498,8 @@ struct MemoryTurnStateStore {
 struct CapturedTurnStateObservation {
     id: String,
     account_id: String,
+    request_id: Option<String>,
+    attempt_index: Option<u32>,
     value: String,
     observed_at: chrono::DateTime<Utc>,
     transport: String,
@@ -549,6 +551,8 @@ impl TurnStateStore for MemoryTurnStateStore {
             .push(CapturedTurnStateObservation {
                 id: observation.id,
                 account_id: observation.account_id,
+                request_id: observation.request_id,
+                attempt_index: observation.attempt_index,
                 value: observation.value,
                 observed_at: observation.observed_at,
                 transport: observation.transport,
@@ -4277,6 +4281,10 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
     );
     assert_eq!(session_turn_state.as_deref(), Some("handshake-state"));
     let observations = turn_state.observations.lock().unwrap();
+    assert!(observations.iter().all(|observation| {
+        observation.request_id.as_deref() == Some("req_websocket_turn_state")
+            && observation.attempt_index == Some(1)
+    }));
     for value in ["handshake-state", "stress-turn-39"] {
         assert!(
             observations
@@ -4296,6 +4304,178 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
     assert_eq!(enriched.len(), 32);
     assert!(!enriched.contains("stress-turn-0"));
     assert!(enriched.contains("stress-turn-39"));
+}
+
+#[tokio::test]
+async fn websocket_handshake_turn_state_is_enriched_with_response_id() {
+    const ACCOUNT_ID: &str = "acct_websocket_turn_state";
+    const REQUEST_ID: &str = "req_websocket_handshake_turn_state";
+    const RESPONSE_ID: &str = "resp_websocket_handshake_turn_state";
+
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket_with(stream, |_request, response| {
+            response
+                .headers_mut()
+                .insert("x-codex-turn-state", "handshake-only".parse().unwrap());
+        })
+        .await;
+        websocket.next().await.unwrap().unwrap();
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "model": "gpt-5.4",
+                        "status": "in_progress"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": RESPONSE_ID,
+                        "model": "gpt-5.4",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2
+                        }
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        websocket.close(None).await.unwrap();
+    });
+
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", generate_operation()),
+            context(REQUEST_ID, CancellationToken::new()),
+        )
+        .await
+        .expect("prepare WebSocket stream");
+    while let Some(event) = stream.next().await {
+        event.expect("WebSocket response");
+    }
+    server.await.unwrap();
+
+    let observations = turn_state.observations.lock().unwrap();
+    assert_eq!(observations.len(), 2, "observations: {observations:?}");
+    assert!(observations.iter().all(|observation| {
+        observation.account_id == ACCOUNT_ID
+            && observation.request_id.as_deref() == Some(REQUEST_ID)
+            && observation.attempt_index == Some(1)
+            && observation.value == "handshake-only"
+            && observation.transport == "websocket"
+    }));
+    assert_eq!(observations[0].id, observations[1].id);
+    assert_eq!(observations[0].upstream_response_id, None);
+    assert_eq!(
+        observations[1].upstream_response_id.as_deref(),
+        Some(RESPONSE_ID)
+    );
+}
+
+#[tokio::test]
+async fn websocket_turn_state_is_observed_at_receive_boundary_before_cancellation() {
+    const ACCOUNT_ID: &str = "acct_websocket_turn_state";
+    const REQUEST_ID: &str = "req_websocket_receive_boundary";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (metadata_sent, metadata_received) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket.next().await.unwrap().unwrap();
+        for value in
+            std::iter::once("state-a".to_owned()).chain((0..32).map(|_| "state-b".to_owned()))
+        {
+            websocket
+                .send(Message::Text(
+                    json!({
+                        "type": "response.metadata",
+                        "headers": {"x-codex-turn-state": value}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+        metadata_sent.send(()).unwrap();
+        let _ = websocket.next().await;
+    });
+    let cancellation = CancellationToken::new();
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", generate_operation()),
+            context(REQUEST_ID, cancellation.clone()),
+        )
+        .await
+        .expect("prepare WebSocket stream");
+    let next = stream.next();
+    tokio::pin!(next);
+    tokio::select! {
+        result = &mut next => panic!("metadata-only stream should remain pending: {result:?}"),
+        result = metadata_received => result.expect("metadata sent"),
+    }
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let ready = {
+                let observations = turn_state.observations.lock().unwrap();
+                let received = observations
+                    .iter()
+                    .filter(|observation| observation.request_id.as_deref() == Some(REQUEST_ID))
+                    .collect::<Vec<_>>();
+                if received.len() >= 33 {
+                    assert_eq!(received[0].value, "state-a");
+                    assert!(received[1..].iter().all(|item| item.value == "state-b"));
+                    true
+                } else {
+                    false
+                }
+            };
+            if ready {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("receive-boundary observations");
+    cancellation.cancel();
+    let error = next
+        .await
+        .expect("cancelled stream result")
+        .expect_err("cancelled request");
+    assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
+    drop(stream);
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -5072,6 +5252,59 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
 }
 
 #[tokio::test]
+async fn http_header_turn_state_is_enriched_by_final_unterminated_sse_frame() {
+    const ACCOUNT_ID: &str = "acct_session_affinity";
+    const REQUEST_ID: &str = "req_final_sse_turn_state";
+    const RESPONSE_ID: &str = "resp_final_sse_turn_state";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", "final-frame-state")
+                .set_body_string(format!(
+                    "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"{RESPONSE_ID}\",\"model\":\"gpt-5.4\"}}}}\n"
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context(REQUEST_ID, CancellationToken::new()),
+        )
+        .await
+        .expect("prepare HTTP stream");
+    while let Some(event) = stream.next().await {
+        event.expect("HTTP response");
+    }
+
+    let observations = turn_state.observations.lock().unwrap();
+    assert_eq!(observations.len(), 2, "observations: {observations:?}");
+    assert!(observations.iter().all(|observation| {
+        observation.account_id == ACCOUNT_ID
+            && observation.request_id.as_deref() == Some(REQUEST_ID)
+            && observation.attempt_index == Some(1)
+            && observation.value == "final-frame-state"
+            && observation.transport == "http"
+    }));
+    assert_eq!(observations[0].id, observations[1].id);
+    assert_eq!(observations[0].upstream_response_id, None);
+    assert_eq!(
+        observations[1].upstream_response_id.as_deref(),
+        Some(RESPONSE_ID)
+    );
+}
+
+#[tokio::test]
 async fn http_turn_state_is_enqueued_at_headers_before_stream_cancellation() {
     let account_id = "acct_session_affinity";
     let accounts = Arc::new(MemoryAccountStore::default());
@@ -5103,6 +5336,8 @@ async fn http_turn_state_is_enqueued_at_headers_before_stream_cancellation() {
     let observations = turn_state.observations.lock().unwrap();
     assert!(observations.iter().any(|observation| {
         observation.account_id == account_id
+            && observation.request_id.as_deref() == Some("req_turn_state_cancel")
+            && observation.attempt_index == Some(1)
             && observation.value == "received-before-cancel"
             && observation.transport == "http"
     }));

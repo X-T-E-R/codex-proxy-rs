@@ -9,6 +9,7 @@ import type {
   UsageListRecord,
   UsageRecordDetail,
   UsageTokenDetails,
+  UsageTurnStateDetail,
 } from '@/api'
 
 import { isRecord } from '@/utils/object'
@@ -17,6 +18,7 @@ import { formatDuration } from './format'
 // Usage 记录的规范化 view model：组件只消费这个形状。
 export interface UsageViewModel {
   id: string
+  turnState: UsageTurnStateDetail
   requestId: string
   clientApiKeyId: string | null
   kind: string
@@ -85,6 +87,7 @@ export function normalizeUsageRecord(record: UsageRecordDetail): UsageViewModel 
 
   return {
     id: record.id,
+    turnState: record.turnState,
     requestId: record.requestId,
     clientApiKeyId: record.clientApiKeyId,
     kind: record.kind,

@@ -451,6 +451,7 @@ pub(crate) fn admin_usage_list_record(
     Ok(admin_observability::UsageListRecord {
         client_api_key_name: record.client_api_key_name,
         id: record.id,
+        turn_state: admin_turn_state_summary(record.turn_state),
         endpoint: record.endpoint,
         client_transport: record.client_transport,
         requested_model_id: record.requested_model_id,
@@ -521,6 +522,7 @@ pub(crate) fn admin_usage_record(
     let billing = restore_billing_snapshot(billing, record.billing_snapshot_json.as_ref());
     Ok(admin_observability::UsageRecord {
         id: record.id,
+        turn_state: admin_turn_state_summary(record.turn_state),
         client_api_key_ref: record.client_api_key_ref,
         config_revision: record.config_revision,
         routing_scope: record.routing_scope,
@@ -614,6 +616,16 @@ pub(crate) fn admin_usage_detail(
         trace: detail.trace,
         related_requests: detail.related_requests,
         request: admin_usage_record(detail.request)?,
+        turn_state: admin_observability::TurnStateDetail {
+            summary: admin_turn_state_summary(detail.turn_state.summary),
+            value: detail.turn_state.value,
+            sha256: detail.turn_state.sha256,
+            observed_at: detail.turn_state.observed_at,
+            source: detail.turn_state.source,
+            upstream_response_id: detail.turn_state.upstream_response_id,
+            attempt_index: detail.turn_state.attempt_index,
+            changed: detail.turn_state.changed,
+        },
         attempts: detail
             .attempts
             .into_iter()
@@ -668,12 +680,25 @@ pub(crate) fn admin_usage_overview(
         range: admin_range(overview.range),
         requests: admin_request_metrics(overview.requests)?,
         attempts: admin_attempt_metrics(overview.attempts)?,
+        turn_state: admin_observability::TurnStateCounts {
+            observed_292: overview.turn_state.observed_292,
+            observed_other: overview.turn_state.observed_other,
+            unobserved: overview.turn_state.unobserved,
+            not_collected: overview.turn_state.not_collected,
+        },
         providers: overview
             .providers
             .into_iter()
             .map(admin_provider_observation)
             .collect(),
     })
+}
+
+fn admin_turn_state_summary(state: TurnStateSummary) -> admin_observability::TurnStateSummary {
+    admin_observability::TurnStateSummary {
+        classification: state.classification,
+        bytes: state.bytes,
+    }
 }
 
 pub(crate) fn admin_provider_observation(
@@ -783,6 +808,7 @@ pub(crate) fn usage_list_record_from_row(
         client_api_key_name: get(row, "client_api_key_name")?,
         billing_snapshot_json: get(row, "billing_snapshot_json")?,
         id: get(row, "id")?,
+        turn_state: turn_state_summary_from_row(row)?,
         endpoint: get(row, "endpoint")?,
         client_transport: get(row, "client_transport")?,
         requested_model_id: get(row, "requested_model_id")?,
@@ -834,6 +860,7 @@ pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<
     Ok(UsageRecord {
         billing_snapshot_json: get(row, "billing_snapshot_json")?,
         id: get(row, "id")?,
+        turn_state: turn_state_summary_from_row(row)?,
         client_api_key_ref: get(row, "client_api_key_ref")?,
         config_revision: unsigned(row, "config_revision")?,
         routing_scope: get(row, "routing_scope")?,
@@ -912,6 +939,13 @@ pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<
         started_at: get(row, "started_at")?,
         deadline_at: get(row, "deadline_at")?,
         completed_at: get(row, "completed_at")?,
+    })
+}
+
+fn turn_state_summary_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<TurnStateSummary> {
+    Ok(TurnStateSummary {
+        classification: get(row, "turn_state_classification")?,
+        bytes: optional_unsigned(row, "turn_state_bytes")?,
     })
 }
 

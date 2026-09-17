@@ -433,8 +433,9 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 
 ### OpenAI 账号 Turn State
 
-三条接口只支持已有 OpenAI 账号，使用管理员鉴权及 `Cache-Control: no-store`；明文只在这组显式
-接口返回，账号列表、普通请求日志和审计不包含该值。成功响应使用普通管理信封，`data` 形状如下：
+三条接口只支持已有 OpenAI 账号，使用管理员鉴权及 `Cache-Control: no-store`；账号最近观测的
+明文在这组显式接口返回，请求所属观测的明文只在已认证的请求详情接口返回。账号列表、普通请求
+日志、请求列表、汇总和审计不包含该值。成功响应使用普通管理信封，`data` 形状如下：
 
 ```json
 {
@@ -1365,7 +1366,51 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 请求 ID 读取审计详情，响应中的额度观测仍可用于预测配对。此分类以实际 `generate` 字段为准，
 不能仅凭客户端的同名 metadata 或输出 Token 为零排除普通推理；其他 Provider 不套用该规则。
 
-详情接口按 `id` 可读取成功、失败或未完成请求，返回 `trace`（未采集记录为 `null`）和
+OpenAI 请求的 `turnState` 是**最终 attempt 实际收到的上游值**，不会借用其他 attempt、账号最新
+观测或手动发送的覆盖值。HTTP/SSE 响应头和 WebSocket 当前请求的 metadata 在成功、失败和取消时
+均可形成观测。每个 attempt 保留最后一次有效值；`changed` 表示期间曾收到不同值。WebSocket 复用
+连接的旧握手值不会归给后续请求。`bytes` 为解析后的原值 UTF-8 字节数，292 bytes 只是暂定观察规则，
+不代表模型身份或回答质量。
+
+请求列表中的每个 item 只增加摘要 `turnState: { classification, bytes }`，不包含明文、hash 或原始
+metadata。列表沿用现有“完整交付成功且有用量证据”的筛选语义；失败、取消或未完成请求可按 ID 查看
+详情。详情的顶层 `turnState` 在摘要之外增加 `value`、`sha256`、`observedAt`、`source`
+（`http` 或 `websocket`）、`upstreamResponseId`、`attemptIndex` 和 `changed`：
+
+```json
+{
+  "classification": "observed292", "bytes": 292,
+  "value": "upstream-value", "sha256": "lowercase-hex-sha256",
+  "observedAt": "2026-09-16T12:00:00Z", "source": "http",
+  "upstreamResponseId": null, "attemptIndex": 2, "changed": false
+}
+```
+
+`classification` 为 `observed292`、`observedOther`、`unobserved`、`notCollected`、
+`pending` 或 `notApplicable`。前四种分别代表 292 bytes、其他长度、本版已采集但最终 attempt 未观测、
+升级前的历史记录未采集；`pending` 为 OpenAI Responses 请求仍运行，`notApplicable` 为非 OpenAI
+Responses 请求或尚无已确认 Provider 归属的请求。无值时 `bytes`、`value`、`sha256`、`observedAt`、
+`source`、`upstreamResponseId`、
+`attemptIndex` 均为 `null`，`changed` 为 `false`。
+
+`GET /api/admin/usage/records/summary` 以相同时间和筛选范围增加：
+
+```json
+{
+  "turnState": {
+    "observed292": 12, "observedOther": 3, "unobserved": 5,
+    "notCollected": 7, "hitRate": 0.8, "coverageRate": 0.75
+  }
+}
+```
+
+只统计已终结的 OpenAI 逻辑请求，每个请求一次；`pending` 与 `notApplicable` 不计。
+`hitRate = observed292 / (observed292 + observedOther)`，
+`coverageRate = (observed292 + observedOther) / (observed292 + observedOther + unobserved)`；
+历史 `notCollected` 不入比率分母，任一分母为零时该比率为 `null`。请求级明文随
+`usageRetentionDays` 的请求历史清理，普通诊断导出仍不包含它；账号最近观测保持独立的覆盖和保留语义。
+
+详情接口按 `id` 可读取成功、失败或未完成请求。新增 `trace`（历史未采集记录为 `null`）和
 `relatedRequests[]`（`requestId / relation / outcome / completedAt`）；`relation` 为 `recovered_by` 或
 `recovers`。`trace` 是执行终态时的有界脱敏时间线，包含 request、attempt 和 exchange 关联、阶段、
 事件摘要及淘汰计数；普通用量列表不携带此字段。

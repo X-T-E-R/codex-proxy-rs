@@ -1,6 +1,6 @@
 //! Codex 的 `gateway-core` Provider adapter。
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -88,9 +88,6 @@ use crate::transport::request::{
 use crate::transport::session::CodexSessionIdentity;
 use crate::transport::usage::normalize_service_tier;
 use crate::transport::websocket::{CodexWebSocketExchangeError, PreviousResponseUnavailableReason};
-use crate::transport::websocket::{
-    CodexWebSocketTurnStateObservations, CodexWebSocketTurnStateResponseId,
-};
 use crate::transport::{
     CODEX_ALPHA_SEARCH_PATH, CODEX_IMAGE_EDITS_PATH, CODEX_IMAGE_GENERATIONS_PATH,
     CODEX_RESPONSES_PATH, CodexAccountSelectionTelemetry, CodexBackendClient,
@@ -121,7 +118,6 @@ const MAX_COOKIE_HEADER_BYTES: usize = 16 * 1024;
 /// 提交边界前最多保留 64 KiB 原始上游 chunk；达到阈值后结束无感换号窗口，
 /// 但不会把上游数据改写成协议失败。
 const MAX_STREAM_PREFETCH_BYTES: usize = 64 * 1024;
-const MAX_PENDING_TURN_STATE_RECEIPTS: usize = 32;
 /// 短暂保留 response.created 等结构事件，让随后到达的明确拒绝可以无感换号；
 /// 到期即放行，避免模型长时间思考时让客户端一直收不到首事件。
 const STREAM_REPLAY_GRACE: Duration = Duration::from_millis(1_200);

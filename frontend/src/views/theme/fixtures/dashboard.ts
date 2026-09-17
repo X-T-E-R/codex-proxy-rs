@@ -111,7 +111,9 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
 
   return {
     id: options.id,
-    clientApiKeyName: '演示 Key',
+    turnState: options.provider === 'openai'
+      ? { classification: 'observed292', bytes: 292 }
+      : { classification: 'notApplicable', bytes: null },
     provider: options.provider,
     authenticationKind: options.authenticationKind,
     accountId: `account_${options.id}`,

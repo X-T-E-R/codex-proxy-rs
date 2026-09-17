@@ -2,9 +2,20 @@
 
 use super::super::*;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const MODEL_DIAGNOSTIC_DIMENSION_SQL: &str =
     "coalesce(mr.upstream_model_id, mr.requested_model_id)";
+
+// 只读取最终 attempt；历史行在迁移前没有采集位，不能把空值解释成未观测。
+const TURN_STATE_CLASSIFICATION_SQL: &str =
+    "case when mr.provider_kind is distinct from 'openai' or mr.operation <> 'generate'
+            then 'notApplicable'
+          when mr.outcome = 'running' then 'pending'
+          when not mr.turn_state_collection_enabled then 'notCollected'
+          when ts.value is null then 'unobserved'
+          when octet_length(ts.value) = 292 then 'observed292'
+          else 'observedOther' end";
 
 pub(crate) fn push_usage_filter(
     query: &mut QueryBuilder<Postgres>,
@@ -123,8 +134,45 @@ pub(crate) fn literal_prefix_pattern(value: &str) -> String {
     )
 }
 
-pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
-    "select mr.id, client_key.name as client_api_key_name, mr.endpoint, mr.client_transport, mr.requested_model_id,
+pub(crate) async fn turn_state_counts(
+    pool: &PgPool,
+    range: ObservabilityRange,
+    filter: &UsageRecordFilter,
+) -> StoreResult<TurnStateCounts> {
+    filter.validate()?;
+    let mut statement = QueryBuilder::<Postgres>::new(format!(
+        "select count(*) filter (where classification = 'observed292')::bigint as observed_292,
+                count(*) filter (where classification = 'observedOther')::bigint as observed_other,
+                count(*) filter (where classification = 'unobserved')::bigint as unobserved,
+                count(*) filter (where classification = 'notCollected')::bigint as not_collected
+           from (select {TURN_STATE_CLASSIFICATION_SQL} as classification
+                   from model_requests mr
+                   left join request_turn_state_observations ts
+                     on ts.request_id = mr.id and ts.attempt_index = mr.attempt_count
+                  where mr.started_at >= "
+    ));
+    statement.push_bind(range.start);
+    statement.push(" and mr.started_at < ");
+    statement.push_bind(range.end);
+    push_unrecovered_request_filter(&mut statement, "mr");
+    push_usage_filter(&mut statement, filter, "mr");
+    statement.push(") classified");
+    let row = statement
+        .build()
+        .fetch_one(pool)
+        .await
+        .map_err(|_| postgres_unavailable("load request turn state summary"))?;
+    Ok(TurnStateCounts {
+        observed_292: unsigned(&row, "observed_292")?,
+        observed_other: unsigned(&row, "observed_other")?,
+        unobserved: unsigned(&row, "unobserved")?,
+        not_collected: unsigned(&row, "not_collected")?,
+    })
+}
+
+fn usage_list_record_select() -> String {
+    format!(
+        "select mr.id, mr.endpoint, mr.client_transport, mr.requested_model_id,
             mr.provider_kind, mr.provider_account_ref,
             mr.provider_account_name_snapshot as provider_account_name,
             mr.provider_account_email_snapshot as provider_account_email,
@@ -141,13 +189,18 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             mr.account_selection_wait_ms, mr.capacity_used_slots, mr.capacity_total_slots,
             host(mr.client_ip) as client_ip, mr.user_agent,
             mr.reasoning_effort, mr.reasoning_preset, mr.subagent_kind, mr.compact,
-            mr.started_at
+            mr.started_at,
+            {TURN_STATE_CLASSIFICATION_SQL} as turn_state_classification,
+            octet_length(ts.value)::bigint as turn_state_bytes
      from model_requests mr
-     left join client_api_keys client_key on client_key.id = mr.client_api_key_ref
-     left join provider_accounts account on account.id = mr.provider_account_ref";
+     left join request_turn_state_observations ts
+       on ts.request_id = mr.id and ts.attempt_index = mr.attempt_count"
+    )
+}
 
-pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
-    "select mr.id, mr.client_api_key_ref, mr.config_revision,
+fn usage_record_detail_select() -> String {
+    format!(
+        "select mr.id, mr.client_api_key_ref, mr.config_revision,
             mr.routing_scope, mr.routing_group_refs, mr.routing_group_names_snapshot,
             mr.protocol, mr.operation,
             mr.endpoint, mr.client_transport, mr.requested_model_id,
@@ -172,8 +225,18 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             host(mr.client_ip) as client_ip,
             mr.user_agent, mr.reasoning_effort, mr.reasoning_preset, mr.request_kind,
             mr.subagent_kind, mr.compact, mr.image_generation_requested,
-            mr.image_generation_succeeded, mr.started_at, mr.deadline_at, mr.completed_at
-     from model_requests mr";
+            mr.image_generation_succeeded, mr.started_at, mr.deadline_at, mr.completed_at,
+            {TURN_STATE_CLASSIFICATION_SQL} as turn_state_classification,
+            octet_length(ts.value)::bigint as turn_state_bytes,
+            ts.value as turn_state_value, ts.observed_at as turn_state_observed_at,
+            ts.source as turn_state_source,
+            ts.upstream_response_id as turn_state_upstream_response_id,
+            ts.attempt_index as turn_state_attempt_index, ts.changed as turn_state_changed
+     from model_requests mr
+     left join request_turn_state_observations ts
+       on ts.request_id = mr.id and ts.attempt_index = mr.attempt_count"
+    )
+}
 
 pub(crate) async fn list_usage_records(
     pool: &PgPool,
@@ -196,7 +259,7 @@ pub(crate) async fn list_usage_record_items(
 ) -> StoreResult<Vec<UsageListRecord>> {
     query.filter.validate()?;
     let offset = observability_page_offset(query.current_page, query.page_size)?;
-    let mut statement = QueryBuilder::<Postgres>::new(USAGE_LIST_RECORD_SELECT);
+    let mut statement = QueryBuilder::<Postgres>::new(usage_list_record_select());
     statement.push(" where mr.started_at >= ");
     statement.push_bind(query.range.start);
     statement.push(" and mr.started_at < ");
@@ -246,7 +309,7 @@ pub(crate) async fn usage_record_detail(
 ) -> StoreResult<UsageRecordDetail> {
     require_nonempty("model request", "id", request_id)?;
     validate_text(request_id, MAX_FILTER_BYTES, "request ID")?;
-    let mut statement = QueryBuilder::<Postgres>::new(USAGE_RECORD_DETAIL_SELECT);
+    let mut statement = QueryBuilder::<Postgres>::new(usage_record_detail_select());
     statement.push(" where mr.id = ");
     statement.push_bind(request_id.to_owned());
     let row = statement
@@ -259,6 +322,30 @@ pub(crate) async fn usage_record_detail(
             id: request_id.to_owned(),
         })?;
     let request = usage_record_from_row(&row)?;
+    let value: Option<String> = get(&row, "turn_state_value")?;
+    let turn_state = if let Some(value) = value {
+        TurnStateDetail {
+            summary: request.turn_state.clone(),
+            sha256: Some(hex::encode(Sha256::digest(value.as_bytes()))),
+            value: Some(value),
+            observed_at: Some(get(&row, "turn_state_observed_at")?),
+            source: Some(get(&row, "turn_state_source")?),
+            upstream_response_id: get(&row, "turn_state_upstream_response_id")?,
+            attempt_index: Some(to_u32(get(&row, "turn_state_attempt_index")?)?),
+            changed: get(&row, "turn_state_changed")?,
+        }
+    } else {
+        TurnStateDetail {
+            summary: request.turn_state.clone(),
+            value: None,
+            sha256: None,
+            observed_at: None,
+            source: None,
+            upstream_response_id: None,
+            attempt_index: None,
+            changed: false,
+        }
+    };
     let rows = sqlx::query(
         "select id, attempt_index, component, operation,
                 provider_kind, provider_account_ref,
@@ -297,6 +384,7 @@ pub(crate) async fn usage_record_detail(
         .map_err(|_| postgres_unavailable("load related recovery requests"))?;
     Ok(UsageRecordDetail {
         request,
+        turn_state,
         attempts,
         trace,
         related_requests,
