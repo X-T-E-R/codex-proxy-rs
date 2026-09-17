@@ -45,6 +45,8 @@ pub enum TurnStateStoreError {
 pub struct TurnStateObservation {
     pub id: String,
     pub account_id: String,
+    pub request_id: Option<String>,
+    pub attempt_index: Option<u32>,
     pub value: String,
     pub observed_at: DateTime<Utc>,
     pub transport: String,

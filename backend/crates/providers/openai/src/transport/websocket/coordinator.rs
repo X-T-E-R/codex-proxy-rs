@@ -17,7 +17,8 @@ use super::{
     },
     error::CodexWebSocketExchangeError,
     exchange::{
-        CodexWebSocketStreamingExchange, WebSocketStreamPoolReturn, stream_websocket_response,
+        CodexWebSocketStreamingExchange, CodexWebSocketTurnStateObserver,
+        WebSocketStreamPoolReturn, stream_websocket_response,
     },
     handshake::{connect_pumped_websocket, send_websocket_request, websocket_connection_metadata},
     model::{
@@ -575,6 +576,7 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
     request: &CodexWebSocketRequest,
     prepared: PreparedWebSocket,
     trace: gateway_core::diagnostics::TraceContext,
+    turn_state_observer: Option<CodexWebSocketTurnStateObserver>,
 ) -> Result<CodexWebSocketStreamingExchange, CodexWebSocketExchangeError> {
     let PreparedWebSocket {
         connection,
@@ -631,6 +633,7 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
         reused,
         stream_idle_timeout,
         trace,
+        turn_state_observer,
     );
     exchange.pool_decision = pool_decision;
     exchange.connection_local_continuation = connection_local_available;

@@ -66,8 +66,26 @@ export interface UsageRecordMetadata {
   [key: string]: unknown
 }
 
+export type UsageTurnStateClassification = 'observed292' | 'observedOther' | 'unobserved' | 'notCollected' | 'pending' | 'notApplicable'
+
+export interface UsageTurnStateSummary {
+  classification: UsageTurnStateClassification
+  bytes: number | null
+}
+
+export interface UsageTurnStateDetail extends UsageTurnStateSummary {
+  value: string | null
+  sha256: string | null
+  observedAt: string | null
+  source: 'http' | 'websocket' | null
+  upstreamResponseId: string | null
+  attemptIndex: number | null
+  changed: boolean
+}
+
 export interface UsageListRecord {
   id: string
+  turnState: UsageTurnStateSummary
   provider: string | null
   authenticationKind: string | null
   accountId: string | null
@@ -217,6 +235,7 @@ export interface RelatedRequest {
 }
 
 export type UsageRecordDetail = UsageRecord & {
+  turnState: UsageTurnStateDetail
   trace: RequestTrace | null
   relatedRequests: RelatedRequest[]
   attempts: UsageAttempt[]
@@ -307,6 +326,14 @@ export interface UsageSummaryResponse {
   cacheWriteTokens: string
   totalTokens: string
   averageLatencyMs: string
+  turnState: {
+    observed292: number
+    observedOther: number
+    unobserved: number
+    notCollected: number
+    hitRate: number | null
+    coverageRate: number | null
+  }
 }
 
 export interface UsageOverviewHealthPoint {

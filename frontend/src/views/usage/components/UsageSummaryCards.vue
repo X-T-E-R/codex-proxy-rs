@@ -8,7 +8,13 @@ import BaseMotionIcon from '@/components/base/BaseMotionIcon.vue'
 
 const props = defineProps<{
   summary: Awaited<ReturnType<typeof getUsageRecordSummary>>
+  loading?: boolean
+  error?: string
 }>()
+
+function rateDisplay(value: number | null) {
+  return value === null ? '无数据' : `${(value * 100).toFixed(1)}%`
+}
 
 function averageLatencyDisplay(value: string) {
   return !value || value === '—' || value === '-' ? '0 ms' : value
@@ -48,10 +54,19 @@ const items = computed(() => [
     tone: 'bg-cp-cyan-container text-cp-cyan-on-container',
   },
 ])
+
+const turnStateItems = computed<{ label: string, value: string, hint?: string }[]>(() => [
+  { label: '292 B 命中', value: props.summary.turnState.observed292.toLocaleString('zh-CN') },
+  { label: '其他长度', value: props.summary.turnState.observedOther.toLocaleString('zh-CN') },
+  { label: '未观测', value: props.summary.turnState.unobserved.toLocaleString('zh-CN') },
+  { label: '历史未采集', value: props.summary.turnState.notCollected.toLocaleString('zh-CN') },
+  { label: '命中率', value: rateDisplay(props.summary.turnState.hitRate), hint: '292 B 命中 ÷（292 B 命中 + 其他长度）；分母为 0 时显示无数据' },
+  { label: '覆盖率', value: rateDisplay(props.summary.turnState.coverageRate), hint: '（292 B 命中 + 其他长度）÷（二者 + 未观测）；只含已启用请求级采集的请求，历史未采集不计入。分母为 0 时显示无数据' },
+])
 </script>
 
 <template>
-  <section class="mt-5 grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="使用概览">
+  <section v-if="!loading && !error" class="mt-5 grid shrink-0 grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="使用概览">
     <BaseCard
       v-for="item in items"
       :key="item.key"
@@ -74,5 +89,30 @@ const items = computed(() => [
         </span>
       </div>
     </BaseCard>
+  </section>
+  <section class="rounded-cp-card bg-cp-bg-container p-4 shadow-cp-card" :class="loading || error ? 'mt-5' : 'mt-3'" aria-label="请求级 Turn State 统计">
+    <h2 class="m-0 text-cp font-heavy text-cp-text">
+      请求级 Turn State
+    </h2>
+    <p class="mt-1 mb-3 text-cp-sm text-cp-text-secondary">
+      仅统计筛选范围内已结束的 OpenAI 请求；292 B 是 UTF-8 字节长度的暂定观察规则，不代表模型质量或档位。
+    </p>
+    <p v-if="loading" role="status" class="m-0 text-cp-sm text-cp-text-secondary">
+      正在加载观测统计…
+    </p>
+    <p v-else-if="error" role="alert" class="m-0 text-cp-sm text-cp-error-text">
+      {{ error }}
+    </p>
+    <div v-else class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+      <div v-for="item in turnStateItems" :key="item.label" class="min-w-0 rounded-cp bg-cp-fill-quaternary px-3 py-2">
+        <div class="text-cp-xs font-bold text-cp-text-secondary">
+          {{ item.label }}
+        </div>
+        <strong class="mt-1 block font-mono text-lg tabular-nums text-cp-text">{{ item.value }}</strong>
+        <p v-if="item.hint" class="mt-1 mb-0 text-cp-xs text-cp-text-secondary">
+          {{ item.hint }}
+        </p>
+      </div>
+    </div>
   </section>
 </template>

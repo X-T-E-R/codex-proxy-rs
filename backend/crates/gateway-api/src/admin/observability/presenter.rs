@@ -258,6 +258,10 @@ pub(crate) fn usage_list_record_view(record: domain::UsageListRecord) -> UsageLi
         .or_else(|| record.requested_model_id.clone());
     UsageListRecordView {
         id: record.id,
+        turn_state: TurnStateSummaryView {
+            classification: record.turn_state.classification,
+            bytes: record.turn_state.bytes,
+        },
         provider: record.provider_kind,
         authentication_kind: record.provider_account_authentication_kind,
         account_id: record.provider_account_ref,
@@ -512,6 +516,17 @@ pub(crate) fn usage_detail_view(detail: domain::UsageDetail) -> UsageRecordDetai
         trace: detail.trace,
         related_requests: detail.related_requests,
         request: usage_record_view(detail.request),
+        turn_state: TurnStateDetailView {
+            classification: detail.turn_state.summary.classification,
+            bytes: detail.turn_state.summary.bytes,
+            value: detail.turn_state.value,
+            sha256: detail.turn_state.sha256,
+            observed_at: detail.turn_state.observed_at,
+            source: detail.turn_state.source,
+            upstream_response_id: detail.turn_state.upstream_response_id,
+            attempt_index: detail.turn_state.attempt_index,
+            changed: detail.turn_state.changed,
+        },
         attempts: detail
             .attempts
             .into_iter()
@@ -993,6 +1008,7 @@ pub(crate) fn dashboard_view(
 pub(crate) fn usage_summary_view(summary: domain::UsageSummary) -> UsageSummaryView {
     let overview = summary.overview;
     UsageSummaryView {
+        turn_state: turn_state_counts_view(overview.turn_state),
         total_requests: format_compact_number(overview.requests.request_count),
         input_tokens: format_compact_number(overview.requests.input_tokens),
         output_tokens: format_compact_number(overview.requests.output_tokens),
@@ -1002,6 +1018,20 @@ pub(crate) fn usage_summary_view(summary: domain::UsageSummary) -> UsageSummaryV
         average_latency_ms: display_duration(summary.average_latency_ms),
         logical_requests: request_metrics_view(&overview.requests),
         attempts: attempt_metrics_view(&overview.attempts),
+    }
+}
+
+#[must_use]
+pub fn turn_state_counts_view(state: domain::TurnStateCounts) -> TurnStateCountsView {
+    let observed = state.observed_292.saturating_add(state.observed_other);
+    let eligible = observed.saturating_add(state.unobserved);
+    TurnStateCountsView {
+        observed292: state.observed_292,
+        observed_other: state.observed_other,
+        unobserved: state.unobserved,
+        not_collected: state.not_collected,
+        hit_rate: (observed != 0).then(|| state.observed_292 as f64 / observed as f64),
+        coverage_rate: (eligible != 0).then(|| observed as f64 / eligible as f64),
     }
 }
 

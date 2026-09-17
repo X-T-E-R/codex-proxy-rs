@@ -23,7 +23,7 @@ use super::io::{next_websocket_message, reused_stream_receive_error};
 use super::reducer::{ExchangeAction, WebSocketTerminalKind, reduce_websocket_event};
 use super::{
     CodexWebSocketExchangeError, CodexWebSocketRateLimitUpdates, CodexWebSocketStreamingExchange,
-    CodexWebSocketTurnStateObservations, CodexWebSocketTurnStateResponseId,
+    CodexWebSocketTurnStateObservations, CodexWebSocketTurnStateObserver,
     CodexWebSocketTurnStateUpdate, WEBSOCKET_STREAM_BUFFER,
     WEBSOCKET_TURN_STATE_OBSERVATION_BUFFER, reusable_websocket_metadata,
 };
@@ -68,6 +68,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
     reused_connection: bool,
     stream_idle_timeout: Option<Duration>,
     trace: TraceContext,
+    turn_state_observer: Option<CodexWebSocketTurnStateObserver>,
 ) -> CodexWebSocketStreamingExchange {
     let websocket_connection_id = websocket.connection_id();
     let response_metadata = metadata.clone();
@@ -78,8 +79,6 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
     let turn_state_update_for_task = Arc::clone(&turn_state_update);
     let turn_state_observations = Arc::new(Mutex::new(Vec::new()));
     let turn_state_observations_for_task = Arc::clone(&turn_state_observations);
-    let turn_state_response_id = Arc::new(Mutex::new(None));
-    let turn_state_response_id_for_task = Arc::clone(&turn_state_response_id);
     let (tx, rx) = mpsc::channel(WEBSOCKET_STREAM_BUFFER);
     let (task_tracker, shutdown) = pool_return
         .as_ref()
@@ -100,7 +99,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
             rate_limit_updates: rate_limit_updates_for_task,
             turn_state_update: turn_state_update_for_task,
             turn_state_observations: turn_state_observations_for_task,
-            turn_state_response_id: turn_state_response_id_for_task,
+            turn_state_observer,
             tx,
         })
         .await;
@@ -125,7 +124,6 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
         rate_limit_updates,
         turn_state_update,
         turn_state_observations,
-        turn_state_response_id,
         pool_decision: None,
         connection_local_continuation: false,
         diagnostics: response_metadata.diagnostics,
@@ -144,7 +142,7 @@ struct WebSocketStreamForwardState {
     rate_limit_updates: CodexWebSocketRateLimitUpdates,
     turn_state_update: CodexWebSocketTurnStateUpdate,
     turn_state_observations: CodexWebSocketTurnStateObservations,
-    turn_state_response_id: CodexWebSocketTurnStateResponseId,
+    turn_state_observer: Option<CodexWebSocketTurnStateObserver>,
     tx: mpsc::Sender<Result<Bytes, CodexWebSocketExchangeError>>,
 }
 
@@ -160,7 +158,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         rate_limit_updates,
         turn_state_update,
         turn_state_observations,
-        turn_state_response_id,
+        turn_state_observer,
         tx,
     } = state;
     let mut pool_return = pool_return;
@@ -169,6 +167,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         .map(|pool_return| std::mem::take(&mut pool_return.continuation))
         .unwrap_or_default();
     let mut last_event_type = None;
+    let mut turn_state_response_id = None;
     // 官方 run_websocket_response_stream 按响应消费 metadata 事件；它们不属于握手头。
     // 复用连接时恢复握手快照，避免上一轮模型信息及普通响应头随每次请求累积。
     let opening_response_metadata = metadata.response_metadata.clone();
@@ -322,14 +321,29 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             }
         }
         if let Some(turn_state) = reduced.turn_state_observation {
+            let receipt = CodexObservedTurnState::new(turn_state);
+            if let Some(observer) = &turn_state_observer {
+                observer.observe(
+                    &receipt,
+                    reduced
+                        .upstream_response_id
+                        .as_deref()
+                        .or(turn_state_response_id.as_deref()),
+                );
+            }
             let mut observations = turn_state_observations.lock().await;
             if observations.len() == WEBSOCKET_TURN_STATE_OBSERVATION_BUFFER {
                 observations.remove(0);
             }
-            observations.push(CodexObservedTurnState::new(turn_state));
+            observations.push(receipt);
         }
         if let Some(response_id) = reduced.upstream_response_id {
-            *turn_state_response_id.lock().await = Some(response_id);
+            turn_state_response_id = Some(response_id.clone());
+            if let Some(observer) = &turn_state_observer {
+                for receipt in turn_state_observations.lock().await.iter() {
+                    observer.observe(receipt, Some(&response_id));
+                }
+            }
         }
         let (frame, terminal) = match reduced.action {
             ExchangeAction::RateLimits(rate_limits) => {

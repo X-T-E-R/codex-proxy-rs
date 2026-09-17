@@ -480,6 +480,7 @@ pub struct DashboardObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
     pub id: String,
+    pub turn_state: TurnStateSummary,
     pub endpoint: String,
     pub client_transport: String,
     pub requested_model_id: Option<String>,
@@ -527,6 +528,7 @@ pub struct UsageListRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
     pub id: String,
+    pub turn_state: TurnStateSummary,
     pub client_api_key_ref: String,
     pub config_revision: u64,
     pub routing_scope: String,
@@ -648,7 +650,50 @@ pub struct UsageRecordDetail {
     pub trace: Option<serde_json::Value>,
     pub related_requests: Vec<serde_json::Value>,
     pub request: UsageRecord,
+    pub turn_state: TurnStateDetail,
     pub attempts: Vec<UsageAttemptObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnStateSummary {
+    pub classification: String,
+    pub bytes: Option<u64>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct TurnStateDetail {
+    pub summary: TurnStateSummary,
+    pub value: Option<String>,
+    pub sha256: Option<String>,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub source: Option<String>,
+    pub upstream_response_id: Option<String>,
+    pub attempt_index: Option<u32>,
+    pub changed: bool,
+}
+
+impl std::fmt::Debug for TurnStateDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnStateDetail")
+            .field("summary", &self.summary)
+            .field("value", &self.value.as_ref().map(|_| "[REDACTED]"))
+            .field("sha256", &self.sha256)
+            .field("observed_at", &self.observed_at)
+            .field("source", &self.source)
+            .field("upstream_response_id", &self.upstream_response_id)
+            .field("attempt_index", &self.attempt_index)
+            .field("changed", &self.changed)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TurnStateCounts {
+    pub observed_292: u64,
+    pub observed_other: u64,
+    pub unobserved: u64,
+    pub not_collected: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -666,6 +711,7 @@ pub struct UsageOverview {
     pub requests: RequestMetrics,
     pub attempts: AttemptMetrics,
     pub providers: Vec<ProviderObservation>,
+    pub turn_state: TurnStateCounts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

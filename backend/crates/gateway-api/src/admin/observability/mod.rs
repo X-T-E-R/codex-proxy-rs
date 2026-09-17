@@ -19,6 +19,7 @@ mod query;
 mod routes;
 mod wire;
 
+pub use presenter::turn_state_counts_view;
 pub(crate) use presenter::*;
 pub use query::*;
 pub use routes::*;

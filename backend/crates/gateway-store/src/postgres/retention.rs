@@ -133,6 +133,18 @@ impl RetentionRepository for PgRetentionRepository {
         // 各表轮转执行单批独立事务；行数、批数和 wall-clock 同时有界。
         let mut targets = [
             RetentionTarget::new(
+                "delete from request_turn_state_observations
+                 where ctid in (
+                   select observation.ctid from request_turn_state_observations observation
+                   join model_requests request on request.id = observation.request_id
+                    where request.outcome <> 'running'
+                      and request.completed_at < $1 - ($2 * interval '1 day')
+                    limit $3
+                 )",
+                settings.usage_retention_days,
+                "delete request turn state before expired request",
+            ),
+            RetentionTarget::new(
                 "delete from model_requests
                  where ctid in (
                    select ctid from model_requests
@@ -142,6 +154,18 @@ impl RetentionRepository for PgRetentionRepository {
                  )",
                 settings.usage_retention_days,
                 "delete expired model requests",
+            ),
+            RetentionTarget::new(
+                "delete from request_turn_state_observations
+                 where ctid in (
+                   select observation.ctid from request_turn_state_observations observation
+                    where observation.observed_at < $1 - ($2 * interval '1 day')
+                      and not exists (select 1 from model_requests request
+                                       where request.id = observation.request_id)
+                    limit $3
+                 )",
+                settings.usage_retention_days,
+                "delete orphaned request turn state observations",
             ),
             RetentionTarget::new(
                 "delete from ops_events
@@ -197,9 +221,9 @@ impl RetentionRepository for PgRetentionRepository {
             }
         }
         Ok(RetentionReport {
-            model_requests: targets[0].deleted,
-            ops_events: targets[1].deleted,
-            admin_audit_events: targets[2].deleted,
+            model_requests: targets[1].deleted,
+            ops_events: targets[3].deleted,
+            admin_audit_events: targets[4].deleted,
             batches,
             budget_exhausted: targets.iter().any(|target| !target.complete),
         })

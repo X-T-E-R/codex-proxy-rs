@@ -157,6 +157,8 @@ impl CodexBackendClient {
             store.enqueue_observation(TurnStateObservation {
                 id: receipt.id.clone(),
                 account_id: account_id.to_owned(),
+                request_id: context.attempt_index.map(|_| context.request_id.to_owned()),
+                attempt_index: context.attempt_index,
                 value: receipt.value.clone(),
                 observed_at: receipt.observed_at,
                 transport: "http".to_owned(),
@@ -262,7 +264,6 @@ impl CodexBackendClient {
             rate_limit_updates: Some(rate_limit_updates),
             turn_state_update: None,
             turn_state_observations: None,
-            turn_state_response_id: None,
             websocket_pool_decision: None,
             diagnostics,
             response_metadata,
@@ -507,6 +508,20 @@ impl CodexBackendClient {
                     request: websocket_request,
                     prepared,
                 } = *route;
+                let turn_state_observer = self
+                    .turn_state_store
+                    .as_ref()
+                    .zip(provider_account_id.as_deref())
+                    .zip(context.attempt_index)
+                    .map(|((store, account_id), attempt_index)| {
+                        super::websocket::CodexWebSocketTurnStateObserver::new(
+                            Arc::clone(store),
+                            account_id,
+                            context.request_id,
+                            attempt_index,
+                            context.turn_id,
+                        )
+                    });
                 let mut exchange = execute_prepared_response_create_request_stream(
                     &websocket_request,
                     prepared,
@@ -515,6 +530,7 @@ impl CodexBackendClient {
                         .cloned()
                         .unwrap_or_default()
                         .exchange("websocket"),
+                    turn_state_observer,
                 )
                 .await
                 .map_err(websocket_exchange_error_to_client_error)?;
@@ -549,7 +565,6 @@ impl CodexBackendClient {
                     rate_limit_updates: Some(exchange.rate_limit_updates),
                     turn_state_update: Some(exchange.turn_state_update),
                     turn_state_observations: Some(exchange.turn_state_observations),
-                    turn_state_response_id: Some(exchange.turn_state_response_id),
                     websocket_pool_decision: exchange.pool_decision,
                     diagnostics: exchange.diagnostics,
                     response_metadata: exchange.response_metadata,

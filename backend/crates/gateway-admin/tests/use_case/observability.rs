@@ -359,6 +359,7 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
             ..AttemptMetrics::default()
         },
         providers: Vec::new(),
+        turn_state: Default::default(),
     });
     store.replace_trend(vec![RequestMetricPoint {
         bucket_start: quarter_hour_start(now),
@@ -590,6 +591,7 @@ impl FixtureObservabilityStore {
                 requests: RequestMetrics::default(),
                 attempts: AttemptMetrics::default(),
                 providers: Vec::new(),
+                turn_state: Default::default(),
             }),
             calculated_billing_facts: Mutex::new(Vec::new()),
             billing_stream_fails: AtomicBool::new(false),
@@ -852,6 +854,10 @@ fn total_record(
 ) -> UsageListRecord {
     UsageListRecord {
         id: id.to_owned(),
+        turn_state: gateway_admin::model::observability::TurnStateSummary {
+            classification: "notApplicable".to_owned(),
+            bytes: None,
+        },
         endpoint: "/v1/responses".to_owned(),
         client_transport: "http_sse".to_owned(),
         requested_model_id: Some("gpt-5.5".to_owned()),

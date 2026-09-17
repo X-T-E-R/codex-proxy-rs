@@ -434,6 +434,19 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
         .replace(UsageDetail {
             trace: None,
             related_requests: Vec::new(),
+            turn_state: gateway_admin::model::observability::TurnStateDetail {
+                summary: gateway_admin::model::observability::TurnStateSummary {
+                    classification: "observedOther".to_owned(),
+                    bytes: Some(10),
+                },
+                value: Some("state-only".to_owned()),
+                sha256: Some("digest".to_owned()),
+                observed_at: Some(now),
+                source: Some("websocket".to_owned()),
+                upstream_response_id: Some("resp-detail".to_owned()),
+                attempt_index: Some(2),
+                changed: true,
+            },
             request: usage_record_with_account(
                 "req_detail",
                 "acct_snap_a",
@@ -477,6 +490,33 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
                 occurred_at: now,
             }],
         });
+    {
+        let detail = fixture.usage_detail.lock().unwrap();
+        let detail = detail.as_ref().unwrap();
+        for debug in [format!("{:?}", detail.turn_state), format!("{detail:?}")] {
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains("state-only"));
+        }
+    }
+    let unauthorized = observability::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/usage/records/detail?id=req_detail")
+                .body(Body::empty())
+                .expect("unauthorized detail request"),
+        )
+        .await
+        .expect("unauthorized detail response");
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let unauthorized_body = to_bytes(unauthorized.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        !unauthorized_body
+            .windows(b"state-only".len())
+            .any(|part| part == b"state-only")
+    );
     let response = observability::router::<AdminTestState>()
         .with_state(fixture.state())
         .oneshot(
@@ -494,6 +534,8 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
         .await
         .expect("usage detail body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("usage detail JSON");
+    assert_eq!(value["data"]["turnState"]["value"], "state-only");
+    assert_eq!(value["data"]["turnState"]["attemptIndex"], 2);
     assert_eq!(
         serde_json::json!({
             "accountId": value["data"]["accountId"],
@@ -568,6 +610,7 @@ async fn zero_attempt_failure_detail_keeps_missing_upstream_facts_and_preparatio
     });
     fixture.usage_detail.lock().unwrap().replace(UsageDetail {
         request: record,
+        turn_state: empty_turn_state_detail(),
         attempts: Vec::new(),
         trace: Some(trace.clone()),
         related_requests: Vec::new(),
@@ -584,8 +627,9 @@ async fn zero_attempt_failure_detail_keeps_missing_upstream_facts_and_preparatio
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
     let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let data = &value["data"];
     assert_eq!(data["requestId"], "req_early");
@@ -823,6 +867,10 @@ fn usage_record_with_account(
 
     UsageRecord {
         id: id.to_owned(),
+        turn_state: gateway_admin::model::observability::TurnStateSummary {
+            classification: "unobserved".to_owned(),
+            bytes: None,
+        },
         client_api_key_ref: "key_detail".to_owned(),
         config_revision: 1,
         routing_scope: "all".to_owned(),
@@ -897,6 +945,49 @@ fn usage_record_with_account(
     }
 }
 
+fn empty_turn_state_detail() -> gateway_admin::model::observability::TurnStateDetail {
+    use gateway_admin::model::observability::{TurnStateDetail, TurnStateSummary};
+    TurnStateDetail {
+        summary: TurnStateSummary {
+            classification: "unobserved".to_owned(),
+            bytes: None,
+        },
+        value: None,
+        sha256: None,
+        observed_at: None,
+        source: None,
+        upstream_response_id: None,
+        attempt_index: None,
+        changed: false,
+    }
+}
+
+#[test]
+fn usage_summary_turn_state_rates_exclude_historical_and_have_null_empty_denominators() {
+    use gateway_admin::model::observability::TurnStateCounts;
+    use gateway_api::admin::observability::turn_state_counts_view;
+
+    let value = serde_json::to_value(turn_state_counts_view(TurnStateCounts {
+        observed_292: 3,
+        observed_other: 1,
+        unobserved: 2,
+        not_collected: 11,
+    }))
+    .unwrap();
+    assert_eq!(value["hitRate"], 0.75);
+    assert_eq!(value["coverageRate"], 4.0 / 6.0);
+    assert_eq!(value["notCollected"], 11);
+    assert!(!value.to_string().contains("upstream-value"));
+
+    let value = serde_json::to_value(turn_state_counts_view(TurnStateCounts {
+        not_collected: 11,
+        ..TurnStateCounts::default()
+    }))
+    .unwrap();
+    assert!(value["hitRate"].is_null());
+    assert!(value["coverageRate"].is_null());
+}
+
 #[tokio::test]
 async fn usage_route_should_forward_a_bounded_unknown_outcome_filter() {
     use axum::{
@@ -955,6 +1046,10 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .expect("usage records")
         .push(UsageListRecord {
             id: "request_endpoint".to_owned(),
+            turn_state: gateway_admin::model::observability::TurnStateSummary {
+                classification: "notApplicable".to_owned(),
+                bytes: None,
+            },
             endpoint: "/v1/responses".to_owned(),
             client_transport: "websocket".to_owned(),
             requested_model_id: Some("grok-4.5".to_owned()),
@@ -1127,6 +1222,15 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         })
     );
     assert!(value["data"]["items"][0].get("metadata").is_none());
+    assert_eq!(
+        value["data"]["items"][0]["turnState"],
+        json!({"classification": "notApplicable", "bytes": null})
+    );
+    assert!(
+        value["data"]["items"][0]["turnState"]
+            .get("value")
+            .is_none()
+    );
     assert_eq!(
         value["data"]["items"][1]["billing"]["totalAmountDisplay"],
         "≈ $0.007"

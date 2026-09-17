@@ -29,6 +29,7 @@ fn request_context_debug_should_redact_all_identity_material() {
         authorization: "Bearer access-secret-marker",
         account_id: Some("account-secret-marker"),
         request_id: "req_safe",
+        attempt_index: None,
         turn_state: Some("turn-secret-marker"),
         turn_metadata: Some("metadata-secret-marker"),
         beta_features: None,

@@ -40,6 +40,6 @@ pub(crate) use self::{
         PreparedWebSocket, WebSocketFastPath, execute_prepared_response_create_request_stream,
         post_send_ambiguous, prepare_response_create_request_with_pool,
     },
-    exchange::CodexWebSocketTurnStateResponseId,
+    exchange::CodexWebSocketTurnStateObserver,
     pool::{DEFAULT_FAST_PATH_BUDGET_MS, DEFAULT_STREAM_IDLE_TIMEOUT},
 };

@@ -334,9 +334,20 @@ metadata 单独记录为该账号最近观测，不把手动出站值当成上�
 上游值在 HTTP headers、WebSocket 握手或每个 metadata 帧的实际接收边界生成 UUIDv7 与观测时间。
 同一观测随后取得 response ID 时以相同观测 ID 补充关联；PostgreSQL 只接受时间/ID 更新的观测或同 ID
 补充，旧长流的迟到写入不能覆盖新请求。WebSocket 的全量观测通道独立于 continuation 的首值通道，
-连接复用仍在每轮清空连接级 metadata；单次 WS exchange 的待消费观测最多保留最新 32 项。数据面只向
-容量 512 的进程内队列执行非阻塞入队；满载或关闭时
+连接复用仍在每轮清空连接级 metadata。WS 接收任务在解析每个归属明确的 metadata 时直接携带冻结的
+request / attempt / account 入队，不等待 Provider stream 被下游继续 poll；用于响应投影的单次 exchange
+缓存仍只保留最新 32 项，不参与请求末值或 `changed` 的正确性。数据面只向容量 512 的进程内队列执行
+非阻塞入队；满载或关闭时
 丢弃并记录不含原值的告警，Store daemon 串行写 PostgreSQL，关闭时最多排空 2 秒。
+
+请求级 Turn State 另以模型请求 ID 和实际上游 attempt 序号保存每个 attempt 最后的原值；请求详情
+只读取 `model_requests.attempt_count` 指向的最终 attempt，旧 attempt 和账号最近值不补缺失值。请求
+创建/终态与账号观测由独立有界队列写入，所以请求级观测按归属键和接收时间/ID 合并，不依赖落库
+顺序；当前请求行尚未落库的观测允许先保存，未关联成功的孤儿在保留清理中淘汰。请求创建时标记
+采集代次，升级前历史行缺失值显示“未采集”，新请求缺失值显示“未观测”。仅已认证请求详情读取
+明文与 hash，列表只读取长度和分类，汇总只聚合分类。请求级原值的有效期不超过
+`usageRetentionDays`；过期请求先删除关联原值，再删除请求行，独立孤儿按原值时间清理。原有账号
+最近观测与手动覆盖不变，不建立状态池或自动回放。
 
 ### Client Key 限额与结算
 
