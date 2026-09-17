@@ -46,6 +46,7 @@ const emit = defineEmits<{
 const ACTIVE_CAPTURE_STATUSES: ModelTurnStateCaptureStatus[] = ['queued', 'running']
 const POLL_INTERVAL_MS = 2_000
 const MAX_POLL_FAILURES = 3
+const CAPTURE_PROXY_TEST_MAX_AGE_MS = 24 * 60 * 60 * 1_000
 
 const copyText = useCopyText()
 const models = ref<Array<{ id: string, label: string }>>([])
@@ -71,7 +72,7 @@ const captureConfirmOpen = ref(false)
 
 const draftLockEnabled = ref(false)
 const draftCaptureEnabled = ref(false)
-const draftReuseWindowSeconds = ref(3_600)
+const draftReuseWindowSeconds = ref(7_200)
 const draftCaptureProxyId = ref('')
 const draftMaxAttempts = ref(3)
 const draftAttemptTimeoutSeconds = ref(8)
@@ -99,12 +100,18 @@ const modelOptions = computed(() => models.value.map(model => ({
   value: model.id,
   description: model.id === model.label ? undefined : model.id,
 })))
+function proxyReady(proxy: OutboundProxyRecord) {
+  if (proxy.lastTest?.success !== true || !proxy.lastTestAt)
+    return false
+  const testedAt = Date.parse(proxy.lastTestAt)
+  return Number.isFinite(testedAt) && testedAt >= Date.now() - CAPTURE_PROXY_TEST_MAX_AGE_MS
+}
 const proxyOptions = computed(() => {
   const options = proxies.value.map(proxy => ({
-    label: `${proxy.name}${proxy.lastTest?.success ? '' : proxy.lastTest ? '（测试失败）' : '（未测试）'}`,
+    label: `${proxy.name}${proxyReady(proxy) ? '' : proxy.lastTest?.success ? '（测试已过期）' : proxy.lastTest ? '（测试失败）' : '（未测试）'}`,
     value: proxy.id,
     description: proxy.endpoint,
-    disabled: proxy.lastTest?.success !== true,
+    disabled: !proxyReady(proxy),
   }))
   const current = modelState.value?.captureProxy
   if (current && !options.some(option => option.value === current.id)) {
@@ -124,7 +131,7 @@ const selectedProxyReady = computed(() => {
   if (!draftCaptureProxyId.value)
     return false
   const proxy = proxies.value.find(item => item.id === draftCaptureProxyId.value)
-  return proxy?.lastTest?.success === true
+  return proxy !== undefined && proxyReady(proxy)
 })
 const modelChanged = computed(() => {
   const current = modelState.value
@@ -664,7 +671,7 @@ onBeforeUnmount(() => {
                 模型锁定
               </p>
               <p class="mt-1 mb-0 text-xs leading-relaxed text-cp-text-secondary">
-                实验性地跨 turn 注入当前可用值；aged 值已停止注入。
+                实验性地跨 turn 注入当前可用值；本地期限到期或明确失效后先等待普通 HTTP 请求重新观测。
               </p>
             </div>
             <BaseSwitch v-model="draftLockEnabled" label="启用模型 Turn State 锁定" :disabled="busy || captureEditingLocked" active-text="启用" inactive-text="停用" />
@@ -675,7 +682,7 @@ onBeforeUnmount(() => {
                 自动捕获
               </p>
               <p class="mt-1 mb-0 text-xs leading-relaxed text-cp-text-secondary">
-                按下方策略通过已测试代理获取值。
+                普通 HTTP 请求明确返回非 292 字节值后，按下方策略通过已测试代理轮换；正好 292 字节但不可打印的值不会触发。也可手动获取。
               </p>
             </div>
             <BaseSwitch v-model="draftCaptureEnabled" label="启用模型 Turn State 自动捕获" :disabled="busy || captureEditingLocked" active-text="启用" inactive-text="停用" />
@@ -683,13 +690,13 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="grid gap-4 sm:grid-cols-2">
-          <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用窗口" description="这是网关允许复用保存值的本地上限，不是上游公布或保证的真实 TTL。">
-            <BaseNumberInput id="model-turn-state-reuse-window" v-model="draftReuseWindowSeconds" aria-describedby="model-turn-state-reuse-window-description" label="本地最大复用窗口" :min="1" :max="86400" unit="秒" :disabled="busy || captureEditingLocked" />
+          <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用期限" description="默认 7200 秒。到期后停止注入并等待普通 HTTP 请求重新观测；Fernet 内嵌时间是未验签签发时间，不是过期时间。">
+            <BaseNumberInput id="model-turn-state-reuse-window" v-model="draftReuseWindowSeconds" aria-describedby="model-turn-state-reuse-window-description" label="本地最大复用期限" :min="1" :max="86400" unit="秒" :disabled="busy || captureEditingLocked" />
           </BaseFormItem>
           <BaseFormItem
             label="捕获代理"
-            description="选择已管理且测试成功的代理。DataImpulse 等服务可先把 rotating URL 添加为代理并完成测试。"
-            :error="draftCaptureEnabled && !proxiesLoading && !selectedProxyReady ? '自动捕获需要测试成功的代理' : undefined"
+            description="选择已管理且在最近 24 小时测试成功的代理。DataImpulse 等服务可先把 rotating URL 添加为代理并完成测试。"
+            :error="draftCaptureEnabled && !proxiesLoading && !selectedProxyReady ? '自动捕获需要最近 24 小时测试成功的代理' : undefined"
           >
             <BaseSelect
               v-model="draftCaptureProxyId"
@@ -750,7 +757,7 @@ onBeforeUnmount(() => {
                 <dt class="text-cp-text-quaternary">
                   来源
                 </dt><dd class="m-0 text-cp-text">
-                  {{ modelState.pin.source === 'manual' ? '手动保存' : '捕获任务' }}
+                  {{ modelState.pin.source === 'manual' ? '手动保存' : modelState.pin.source === 'capture' ? '住宅代理捕获' : '普通请求观测' }}
                 </dd>
               </div>
               <div>
@@ -870,7 +877,7 @@ onBeforeUnmount(() => {
             保存后会删除这个模型的当前值。
           </p>
           <p v-if="modelState.pin?.status === 'aged'" role="status" class="m-0 text-xs text-cp-warning-text">
-            这个值已停止注入。可以启用自动捕获或使用“手动获取”触发刷新，也可以手动替换。
+            这个值已停止注入。下一次普通 HTTP 请求返回 292 字节可打印 ASCII 值时会直接采用；明确返回非 292 字节值时才会触发已配置的住宅代理捕获。也可以手动获取或替换。
           </p>
         </section>
 

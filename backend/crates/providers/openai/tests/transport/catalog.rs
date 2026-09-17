@@ -434,6 +434,7 @@ fn context() -> CodexRequestContext<'static> {
         account_id: Some("acct_123"),
         request_id: "req_catalog",
         attempt_index: None,
+        model_turn_state_observation_scope: None,
         turn_state: None,
         turn_metadata: None,
         beta_features: None,

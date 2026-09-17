@@ -32,7 +32,9 @@ use gateway_core::operation::{
     ProviderSessionState, StandaloneSearchRequest,
 };
 use gateway_core::provider_ports::ProviderSessionAffinityKey;
-use gateway_core::provider_ports::turn_state::{TurnStateObservation, TurnStateStore};
+use gateway_core::provider_ports::turn_state::{
+    ModelTurnStateObservationScope, TurnStateObservation, TurnStateStore,
+};
 use gateway_core::routing::{
     ModelCapabilities, ModelPresentation, ProviderCandidate, ProviderCatalogGeneration,
     ProviderKind, ProviderModelCapabilities, UpstreamModelId,
@@ -641,6 +643,18 @@ impl Provider for CodexProvider {
             config_revision: pin.config_revision,
             sha256: pin.sha256.clone(),
         });
+        let model_turn_state_observation_scope = self.turn_state_store.as_ref().and_then(|store| {
+            model_pin
+                .is_none()
+                .then(|| {
+                    store.model_observation_scope(
+                        lease.account_id().as_str(),
+                        lease.account().identity_revision().get(),
+                        upstream_model.as_str(),
+                    )
+                })
+                .flatten()
+        });
         let turn_state = model_pin.map(|pin| pin.value).or_else(|| {
             self.turn_state_store
                 .as_ref()
@@ -715,6 +729,7 @@ impl Provider for CodexProvider {
             session_capture,
             turn_state_store: self.turn_state_store.clone(),
             model_turn_state_fence,
+            model_turn_state_observation_scope,
         });
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {

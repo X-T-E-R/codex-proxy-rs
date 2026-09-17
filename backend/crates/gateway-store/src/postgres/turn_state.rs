@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::provider_ports::turn_state::{
-    ActiveModelTurnStatePin, ModelTurnStateCaptureCursor, ModelTurnStateCapturePolicy,
-    ModelTurnStateCaptureScope, ModelTurnStatePin, ModelTurnStatePinAction, ModelTurnStateUpdate,
-    ModelTurnStateView, TurnStateObservation, TurnStateObserved, TurnStateOverride, TurnStateStore,
+    ActiveModelTurnStatePin, MODEL_TURN_STATE_BYTES, ModelTurnStateCaptureCursor,
+    ModelTurnStateCapturePolicy, ModelTurnStateCaptureScope, ModelTurnStateObservationScope,
+    ModelTurnStatePin, ModelTurnStatePinAction, ModelTurnStateUpdate, ModelTurnStateView,
+    TurnStateObservation, TurnStateObserved, TurnStateOverride, TurnStateStore,
     TurnStateStoreError, TurnStateView, model_turn_state_token_metadata, valid_model_turn_state,
     valid_turn_state_override,
 };
@@ -43,6 +44,7 @@ struct ModelPinKey {
 struct CachedModelPin {
     config_revision: u64,
     lock_enabled: bool,
+    capture_enabled: bool,
     value: Option<String>,
     reuse_deadline: Option<DateTime<Utc>>,
     invalidated: bool,
@@ -103,7 +105,7 @@ impl PgTurnStateStore {
         let overrides = Arc::new(RwLock::new(overrides));
         let model_rows = sqlx::query(
             "select account_id, identity_revision, effective_model, config_revision,
-                    lock_enabled, pin_value, pin_reuse_deadline, pin_invalidated_at
+                    lock_enabled, capture_enabled, pin_value, pin_reuse_deadline, pin_invalidated_at
                from openai_model_turn_states
               order by account_id, identity_revision, effective_model
               limit $1",
@@ -157,6 +159,7 @@ impl PgTurnStateStore {
                 CachedModelPin {
                     config_revision,
                     lock_enabled: row.get("lock_enabled"),
+                    capture_enabled: row.get("capture_enabled"),
                     value,
                     reuse_deadline: row.get("pin_reuse_deadline"),
                     invalidated: row
@@ -166,6 +169,7 @@ impl PgTurnStateStore {
             );
         }
         let model_pins = Arc::new(RwLock::new(model_pins));
+        let writer_model_pins = Arc::clone(&model_pins);
         let (sender, receiver) = mpsc::channel(OBSERVATION_QUEUE_CAPACITY);
         Ok((
             Self {
@@ -176,6 +180,7 @@ impl PgTurnStateStore {
             },
             TurnStateObservationWriter {
                 pool,
+                model_pins: writer_model_pins,
                 receiver: Mutex::new(receiver),
             },
         ))
@@ -218,39 +223,47 @@ impl PgTurnStateStore {
     }
 
     fn publish_cached_model(&self, view: &ModelTurnStateView) -> Result<()> {
-        let mut model_pins = self
-            .model_pins
-            .write()
-            .map_err(|_| TurnStateStoreError::Unavailable)?;
-        let key = ModelPinKey {
-            account_id: view.account_id.clone(),
-            identity_revision: view.identity_revision,
-            effective_model: view.effective_model.clone(),
-        };
-        let next = CachedModelPin {
-            config_revision: view.config_revision,
-            lock_enabled: view.lock_enabled,
-            value: view.pin.as_ref().map(|pin| pin.value.clone()),
-            reuse_deadline: view.pin.as_ref().map(|pin| pin.reuse_deadline),
-            invalidated: view.pin.as_ref().is_some_and(|pin| pin.invalidated),
-        };
-        match model_pins.entry(key) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(next);
-            }
-            std::collections::hash_map::Entry::Occupied(mut entry)
-                if view.config_revision > entry.get().config_revision =>
-            {
-                entry.insert(next);
-            }
-            std::collections::hash_map::Entry::Occupied(_) => {}
-        }
-        Ok(())
+        publish_cached_model_snapshot(&self.model_pins, view)
     }
+}
+
+fn publish_cached_model_snapshot(
+    snapshot: &RwLock<HashMap<ModelPinKey, CachedModelPin>>,
+    view: &ModelTurnStateView,
+) -> Result<()> {
+    let mut model_pins = snapshot
+        .write()
+        .map_err(|_| TurnStateStoreError::Unavailable)?;
+    let key = ModelPinKey {
+        account_id: view.account_id.clone(),
+        identity_revision: view.identity_revision,
+        effective_model: view.effective_model.clone(),
+    };
+    let next = CachedModelPin {
+        config_revision: view.config_revision,
+        lock_enabled: view.lock_enabled,
+        capture_enabled: view.capture_enabled,
+        value: view.pin.as_ref().map(|pin| pin.value.clone()),
+        reuse_deadline: view.pin.as_ref().map(|pin| pin.reuse_deadline),
+        invalidated: view.pin.as_ref().is_some_and(|pin| pin.invalidated),
+    };
+    match model_pins.entry(key) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(next);
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry)
+            if view.config_revision > entry.get().config_revision =>
+        {
+            entry.insert(next);
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {}
+    }
+    Ok(())
 }
 
 pub struct TurnStateObservationWriter {
     pool: PgPool,
+    model_pins: Arc<RwLock<HashMap<ModelPinKey, CachedModelPin>>>,
     receiver: Mutex<mpsc::Receiver<TurnStateObservation>>,
 }
 
@@ -264,7 +277,7 @@ impl DaemonTask for TurnStateObservationWriter {
             loop {
                 let observation = tokio::select! {
                     () = cancellation.cancelled() => {
-                        drain_observations(&self.pool, &mut receiver).await;
+                        drain_observations(&self.pool, &self.model_pins, &mut receiver).await;
                         return Ok(());
                     }
                     observation = receiver.recv() => observation,
@@ -272,21 +285,28 @@ impl DaemonTask for TurnStateObservationWriter {
                 let Some(observation) = observation else {
                     return Err(WorkerTaskError::safe("turn state observation queue closed"));
                 };
-                persist_observation(&self.pool, observation).await;
+                persist_observation(&self.pool, &self.model_pins, observation).await;
             }
         })
     }
 }
 
-async fn drain_observations(pool: &PgPool, receiver: &mut mpsc::Receiver<TurnStateObservation>) {
+async fn drain_observations(
+    pool: &PgPool,
+    model_pins: &RwLock<HashMap<ModelPinKey, CachedModelPin>>,
+    receiver: &mut mpsc::Receiver<TurnStateObservation>,
+) {
     receiver.close();
     let started = Instant::now();
     while let Some(observation) = receiver.recv().await {
         let remaining = SHUTDOWN_DRAIN_TIMEOUT.saturating_sub(started.elapsed());
         if remaining.is_zero()
-            || tokio::time::timeout(remaining, persist_observation(pool, observation))
-                .await
-                .is_err()
+            || tokio::time::timeout(
+                remaining,
+                persist_observation(pool, model_pins, observation),
+            )
+            .await
+            .is_err()
         {
             break;
         }
@@ -300,10 +320,14 @@ async fn drain_observations(pool: &PgPool, receiver: &mut mpsc::Receiver<TurnSta
     }
 }
 
-async fn persist_observation(pool: &PgPool, observation: TurnStateObservation) {
+async fn persist_observation(
+    pool: &PgPool,
+    model_pins: &RwLock<HashMap<ModelPinKey, CachedModelPin>>,
+    observation: TurnStateObservation,
+) {
     let account_id = observation.account_id.clone();
     let observation_id = observation.id.clone();
-    if let Err(error) = persist_observation_inner(pool, observation).await {
+    if let Err(error) = persist_observation_inner(pool, &observation).await {
         tracing::warn!(
             account_id,
             observation_id,
@@ -311,16 +335,30 @@ async fn persist_observation(pool: &PgPool, observation: TurnStateObservation) {
             "OpenAI turn state observation write failed"
         );
     }
+    if let Some(scope) = observation.model_scope.as_ref()
+        && let Err(error) = apply_model_observation(pool, model_pins, scope, &observation).await
+    {
+        tracing::warn!(
+            account_id,
+            observation_id,
+            effective_model = scope.effective_model,
+            error_kind = ?error,
+            "OpenAI model turn state observation could not advance capture state"
+        );
+    }
 }
 
-async fn persist_observation_inner(pool: &PgPool, observation: TurnStateObservation) -> Result<()> {
+async fn persist_observation_inner(
+    pool: &PgPool,
+    observation: &TurnStateObservation,
+) -> Result<()> {
     if observation.value.len() > 16 * 1024 {
         return Err(TurnStateStoreError::Invalid);
     }
     if let (Some(request_id), Some(attempt_index)) =
         (&observation.request_id, observation.attempt_index)
         && let Err(error) =
-            persist_request_observation(pool, request_id, attempt_index, &observation).await
+            persist_request_observation(pool, request_id, attempt_index, observation).await
     {
         tracing::warn!(request_id, attempt_index, error_kind = ?error,
             "OpenAI request turn state observation write failed");
@@ -370,6 +408,123 @@ async fn persist_observation_inner(pool: &PgPool, observation: TurnStateObservat
     .execute(pool)
     .await
     .map_err(unavailable)?;
+    Ok(())
+}
+
+async fn apply_model_observation(
+    pool: &PgPool,
+    model_pins: &RwLock<HashMap<ModelPinKey, CachedModelPin>>,
+    scope: &ModelTurnStateObservationScope,
+    observation: &TurnStateObservation,
+) -> Result<()> {
+    if observation.transport != "http" || observation.account_id != scope.account_id {
+        return Err(TurnStateStoreError::Invalid);
+    }
+    let mut tx = pool.begin().await.map_err(unavailable)?;
+    let row = sqlx::query(
+        "select s.capture_enabled, s.reuse_window_seconds, s.pin_value,
+                s.pin_reuse_deadline, s.pin_invalidated_at, s.config_revision
+           from openai_model_turn_states s
+           join provider_accounts a on a.id = s.account_id
+            and a.provider_kind = 'openai'
+            and a.identity_revision = s.identity_revision
+          where s.account_id = $1 and s.identity_revision = $2 and s.effective_model = $3
+          for update",
+    )
+    .bind(&scope.account_id)
+    .bind(i64::try_from(scope.identity_revision).map_err(|_| TurnStateStoreError::Invalid)?)
+    .bind(&scope.effective_model)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(unavailable)?;
+    let Some(row) = row else {
+        tx.rollback().await.map_err(unavailable)?;
+        return Ok(());
+    };
+    let config_revision = u64::try_from(row.get::<i64, _>("config_revision"))
+        .map_err(|_| TurnStateStoreError::Unavailable)?;
+    let active = row.get::<Option<String>, _>("pin_value").is_some()
+        && row
+            .get::<Option<DateTime<Utc>>, _>("pin_invalidated_at")
+            .is_none()
+        && row
+            .get::<Option<DateTime<Utc>>, _>("pin_reuse_deadline")
+            .is_some_and(|deadline| deadline > Utc::now());
+    if !row.get::<bool, _>("capture_enabled") || config_revision != scope.config_revision || active
+    {
+        tx.rollback().await.map_err(unavailable)?;
+        return Ok(());
+    }
+
+    let encoded_bytes = observation.value.len();
+    if valid_model_turn_state(&observation.value) {
+        let metadata = model_turn_state_token_metadata(&observation.value);
+        let reuse_window_seconds = u32::try_from(row.get::<i32, _>("reuse_window_seconds"))
+            .map_err(|_| TurnStateStoreError::Unavailable)?;
+        let reuse_deadline = model_reuse_deadline(observation.observed_at, reuse_window_seconds);
+        let updated = sqlx::query(
+            "update openai_model_turn_states
+                set pin_value = $4, pin_source = 'observation',
+                    pin_compatible_transport = 'http', pin_token_version = $5,
+                    pin_issued_at = $6, pin_raw_bytes = $7, pin_captured_at = $8,
+                    pin_reuse_deadline = $9, pin_invalidated_at = null,
+                    capture_requested_at = null,
+                    config_revision = config_revision + 1, updated_at = now()
+              where account_id = $1 and identity_revision = $2 and effective_model = $3
+                and config_revision = $10",
+        )
+        .bind(&scope.account_id)
+        .bind(i64::try_from(scope.identity_revision).map_err(|_| TurnStateStoreError::Invalid)?)
+        .bind(&scope.effective_model)
+        .bind(&observation.value)
+        .bind(metadata.token_version.map(i16::from))
+        .bind(metadata.issued_at)
+        .bind(
+            metadata
+                .raw_bytes
+                .and_then(|value| i32::try_from(value).ok()),
+        )
+        .bind(observation.observed_at)
+        .bind(reuse_deadline)
+        .bind(i64::try_from(scope.config_revision).map_err(|_| TurnStateStoreError::Invalid)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(unavailable)?;
+        if updated.rows_affected() != 1 {
+            tx.rollback().await.map_err(unavailable)?;
+            return Ok(());
+        }
+        let view = model_view_in(
+            &mut tx,
+            &scope.account_id,
+            &scope.effective_model,
+            scope.identity_revision,
+            &scope.effective_model,
+        )
+        .await?;
+        tx.commit().await.map_err(unavailable)?;
+        publish_cached_model_snapshot(model_pins, &view)?;
+    } else if encoded_bytes != MODEL_TURN_STATE_BYTES {
+        sqlx::query(
+            "update openai_model_turn_states
+                set capture_requested_at = coalesce(capture_requested_at, $4), updated_at = now()
+              where account_id = $1 and identity_revision = $2 and effective_model = $3
+                and config_revision = $5",
+        )
+        .bind(&scope.account_id)
+        .bind(i64::try_from(scope.identity_revision).map_err(|_| TurnStateStoreError::Invalid)?)
+        .bind(&scope.effective_model)
+        .bind(observation.observed_at)
+        .bind(i64::try_from(scope.config_revision).map_err(|_| TurnStateStoreError::Invalid)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(unavailable)?;
+        tx.commit().await.map_err(unavailable)?;
+    } else {
+        // 292B 但不可打印的值只作为可疑观测保留，
+        // 不能据此消耗住宅代理或覆盖当前模型锁。
+        tx.rollback().await.map_err(unavailable)?;
+    }
     Ok(())
 }
 
@@ -656,16 +811,8 @@ async fn model_view_in(
     })
 }
 
-fn model_reuse_deadline(
-    captured_at: DateTime<Utc>,
-    issued_at: Option<DateTime<Utc>>,
-    reuse_window_seconds: u32,
-) -> DateTime<Utc> {
-    let window = chrono::Duration::seconds(i64::from(reuse_window_seconds));
-    let captured_deadline = captured_at + window;
-    issued_at.map_or(captured_deadline, |issued_at| {
-        captured_deadline.min(issued_at + window)
-    })
+fn model_reuse_deadline(captured_at: DateTime<Utc>, reuse_window_seconds: u32) -> DateTime<Utc> {
+    captured_at + chrono::Duration::seconds(i64::from(reuse_window_seconds))
 }
 
 #[async_trait]
@@ -888,7 +1035,6 @@ impl TurnStateStore for PgTurnStateStore {
                             Some(pin.captured_at),
                             Some(pin.reuse_deadline.min(model_reuse_deadline(
                                 pin.captured_at,
-                                pin.issued_at,
                                 update.reuse_window_seconds,
                             ))),
                             pin.invalidated.then_some(pin.captured_at),
@@ -907,11 +1053,7 @@ impl TurnStateStore for PgTurnStateStore {
                         metadata.raw_bytes,
                         Some("manual".to_owned()),
                         Some(now),
-                        Some(model_reuse_deadline(
-                            now,
-                            metadata.issued_at,
-                            update.reuse_window_seconds,
-                        )),
+                        Some(model_reuse_deadline(now, update.reuse_window_seconds)),
                         None,
                     )
                 }
@@ -935,6 +1077,8 @@ impl TurnStateStore for PgTurnStateStore {
         if update.lock_enabled && pin_value.is_none() {
             return Err(TurnStateStoreError::Invalid);
         }
+        let clear_capture_request =
+            !update.capture_enabled || !matches!(update.pin_action, ModelTurnStatePinAction::Keep);
         sqlx::query(
             "update openai_model_turn_states
                 set lock_enabled = $4, capture_enabled = $5, reuse_window_seconds = $6,
@@ -944,6 +1088,7 @@ impl TurnStateStore for PgTurnStateStore {
                     pin_token_version = $15, pin_issued_at = $16, pin_raw_bytes = $17,
                     pin_source = $18, pin_compatible_transport = case when $14::text is null then null else 'http' end,
                     pin_captured_at = $19, pin_reuse_deadline = $20, pin_invalidated_at = $21,
+                    capture_requested_at = case when $22 then null else capture_requested_at end,
                     config_revision = config_revision + 1, updated_at = now()
               where account_id = $1 and identity_revision = $2 and effective_model = $3",
         )
@@ -968,6 +1113,7 @@ impl TurnStateStore for PgTurnStateStore {
         .bind(captured_at)
         .bind(reuse_deadline)
         .bind(invalidated_at)
+        .bind(clear_capture_request)
         .execute(&mut *tx)
         .await
         .map_err(unavailable)?;
@@ -996,7 +1142,7 @@ impl TurnStateStore for PgTurnStateStore {
             identity_revision,
             effective_model: effective_model.to_owned(),
         })?;
-        // 本地窗口是保守的最大复用边界；AGED 触发后台重捕获，不再注入旧值。
+        // 本地窗口是保守的最大复用边界；AGED 先回到普通 HTTP 观测，不再注入旧值。
         if !pin.lock_enabled
             || pin.invalidated
             || pin
@@ -1008,6 +1154,31 @@ impl TurnStateStore for PgTurnStateStore {
         Some(ActiveModelTurnStatePin {
             value: pin.value.clone()?,
             sha256: digest(pin.value.as_deref()?),
+            config_revision: pin.config_revision,
+        })
+    }
+
+    fn model_observation_scope(
+        &self,
+        account_id: &str,
+        identity_revision: u64,
+        effective_model: &str,
+    ) -> Option<ModelTurnStateObservationScope> {
+        let pins = self.model_pins.read().ok()?;
+        let pin = pins.get(&ModelPinKey {
+            account_id: account_id.to_owned(),
+            identity_revision,
+            effective_model: effective_model.to_owned(),
+        })?;
+        let active = pin.value.is_some()
+            && !pin.invalidated
+            && pin
+                .reuse_deadline
+                .is_some_and(|deadline| deadline > Utc::now());
+        (!active && pin.capture_enabled).then(|| ModelTurnStateObservationScope {
+            account_id: account_id.to_owned(),
+            identity_revision,
+            effective_model: effective_model.to_owned(),
             config_revision: pin.config_revision,
         })
     }
@@ -1030,6 +1201,7 @@ impl TurnStateStore for PgTurnStateStore {
                 and a.provider_kind = 'openai'
                 and a.identity_revision = s.identity_revision
               where s.capture_enabled = true
+                and s.capture_requested_at is not null
                 and (s.pin_value is null or s.pin_invalidated_at is not null
                      or s.pin_reuse_deadline <= now())
                 and ($1::text is null or
@@ -1115,23 +1287,26 @@ impl TurnStateStore for PgTurnStateStore {
         }
         let now = Utc::now();
         let same_value = old.pin.as_ref().is_some_and(|pin| pin.value == value);
-        let captured_at = same_value
+        let preserve_active_value = same_value
+            && old
+                .pin
+                .as_ref()
+                .is_some_and(|pin| !pin.invalidated && pin.reuse_deadline > now);
+        let captured_at = preserve_active_value
             .then(|| old.pin.as_ref().map(|pin| pin.captured_at))
             .flatten()
             .unwrap_or(now);
-        let reuse_deadline = same_value
+        let reuse_deadline = preserve_active_value
             .then(|| old.pin.as_ref().map(|pin| pin.reuse_deadline))
             .flatten()
-            .unwrap_or_else(|| {
-                let metadata = model_turn_state_token_metadata(value);
-                model_reuse_deadline(now, metadata.issued_at, old.reuse_window_seconds)
-            });
+            .unwrap_or_else(|| model_reuse_deadline(now, old.reuse_window_seconds));
         let metadata = model_turn_state_token_metadata(value);
         sqlx::query(
             "update openai_model_turn_states
                 set pin_value = $4, pin_source = 'capture', pin_compatible_transport = 'http',
                     pin_token_version = $5, pin_issued_at = $6, pin_raw_bytes = $7,
                     pin_captured_at = $8, pin_reuse_deadline = $9, pin_invalidated_at = null,
+                    capture_requested_at = null,
                     config_revision = config_revision + 1, updated_at = now()
               where account_id = $1 and identity_revision = $2 and effective_model = $3
                 and config_revision = $10",
@@ -1210,7 +1385,8 @@ impl TurnStateStore for PgTurnStateStore {
         }
         sqlx::query(
             "update openai_model_turn_states
-                set pin_invalidated_at = now(), config_revision = config_revision + 1,
+                set pin_invalidated_at = now(), capture_requested_at = null,
+                    config_revision = config_revision + 1,
                     updated_at = now()
               where account_id = $1 and identity_revision = $2 and effective_model = $3
                 and config_revision = $4",

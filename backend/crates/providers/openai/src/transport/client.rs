@@ -12,7 +12,7 @@ use crate::transport::profile::CodexWireProfileState;
 use bytes::Bytes;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use futures::{Stream, StreamExt};
-use gateway_core::provider_ports::turn_state::TurnStateStore;
+use gateway_core::provider_ports::turn_state::{ModelTurnStateObservationScope, TurnStateStore};
 use gateway_protocol::openai::{
     WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY, events::retry_after_seconds_from_body,
     sse::SseError,
@@ -480,6 +480,8 @@ pub struct CodexRequestContext<'a> {
     pub request_id: &'a str,
     /// 请求内的实际上游 attempt 序号；独立客户端测试可省略。
     pub attempt_index: Option<u32>,
+    /// 普通 HTTP Responses 请求可提交模型级观察时的 CAS scope。
+    pub model_turn_state_observation_scope: Option<&'a ModelTurnStateObservationScope>,
     /// 当前账号同一 turn 内的 opaque sticky-routing 状态。
     pub turn_state: Option<&'a str>,
     /// 客户端 turn metadata；其中 installation ID 已按当前账号处理。
@@ -524,6 +526,7 @@ impl<'a> CodexRequestContext<'a> {
             account_id,
             request_id,
             attempt_index: None,
+            model_turn_state_observation_scope: None,
             turn_state: None,
             turn_metadata: None,
             beta_features: None,
@@ -544,6 +547,15 @@ impl<'a> CodexRequestContext<'a> {
     #[must_use]
     pub const fn with_trace(mut self, trace: &'a gateway_core::diagnostics::TraceContext) -> Self {
         self.trace = Some(trace);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_model_turn_state_observation_scope(
+        mut self,
+        scope: Option<&'a ModelTurnStateObservationScope>,
+    ) -> Self {
+        self.model_turn_state_observation_scope = scope;
         self
     }
 }

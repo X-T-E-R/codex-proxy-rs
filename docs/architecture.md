@@ -422,21 +422,32 @@ request / attempt / account 入队，不等待 Provider stream 被下游继续 p
 `identity_revision` 只在上游身份实际替换时推进，普通 token refresh 不废弃同一身份的模型锁。服务启动
 hydrate 模型锁到进程内快照，HTTP attempt 在最终账号与模型确定后只读该快照，不执行 SQL。有效值必须是
 292 个可打印 ASCII 字节，数据面优先级为 fresh 模型锁、旧版账号覆盖、正常 continuation；模型值不进入
-上游 WebSocket。可配置 reuse window 是保守的本地最大复用边界：到期标记 AGED 并停止注入，不声明上游
+上游 WebSocket。可配置 reuse window 是保守的本地最大复用边界，默认 7200 秒：到期标记 AGED 并停止注入，不声明上游
 真实 TTL。官方客户端将 Turn State 当作单 turn sticky routing；跨 turn 锁定属于本网关实验策略。
 无密钥 Fernet envelope 解析只投影 version、未认证 timestamp 与字节分类，`issuedAt` 不解释为 expiry，
-长度差异也不作为 token 质量真值。复用 deadline 取 captured/issued 两个本地上限的更早值。
-EMPTY、AGED 与显式 INVALID 在启用自动捕获时进入 Admin-owned 有界队列。
+长度差异也不作为 token 质量真值。复用 deadline 只按本地 `capturedAt + reuse window` 计算；未验签的
+`issuedAt` 不参与有效性判断。
+EMPTY、AGED 与显式 INVALID 不直接进入住宅代理队列，而是先等待普通 HTTP Responses 流量。
+实际 HTTP 响应头或 SSE metadata 事件返回 292 字节可打印 ASCII 值时，按当前
+identity/model/config fence 直接发布 `observation` pin；只有 encoded byte length 明确不等于 292 时才写入
+持久捕获信号，随后进入 Admin-owned 有界队列。正好 292 字节但不可打印的值只记为 suspect；Fernet
+envelope 解析结果仅作为观测 metadata，不参与 pin 准入。
+观察 scope 随请求准备，但只由实际 HTTP transport 消费，因此 WebSocket fast path 在发送前回退到 HTTP 仍能
+观察，真正的 WebSocket、未返回值与无法归因的错误不推进这个状态机。SSE 观察只旁路解析已交付字节，不修改
+业务流内容或顺序。
 
 捕获任务只驻留进程内，按账号与模型 singleflight、全局最多并发 2 个。每个 attempt 使用选定且最近测试
 成功的 managed proxy 创建新的无池 HTTP/SSE client，并以当前账号 credential 和 effective model 发送固定
 最小探针；首个 Turn State header/event 到达即取消剩余 body。只有精确 292 字节可打印 ASCII 值能经
 identity/model/config fence 提交；配置关闭、取消、身份或映射变化使迟到结果失效。捕获绕过普通 Core
 执行链，因此不创建 `model_requests`、usage、request/账号 Turn State observation，也不改变 quota、
-rate limit、cooldown、circuit 或 feedback。自动捕获到与现值相同的值不延长原 `capturedAt` 和 deadline。
+rate limit、cooldown、circuit 或 feedback。手动获取到与仍有效现值相同的值不延长原 `capturedAt` 和 deadline；
+AGED/INVALID 在普通流量触发住宅捕获后，成功取得 292 字节值会建立新的本地期限，即使字节与旧值相同。
+普通 292 字节观测是新的本地锁定起点，并清除等待中的住宅捕获信号。
 普通上游错误不失效 pin。只有当前 HTTP Responses attempt 确实注入模型 pin，结构化错误的 `param` 或
 `target` 明确指向 `x-codex-turn-state`，并且 fingerprint、identity、model 与 config revision 仍匹配时，
-Store 才 CAS 标记 INVALID；通用密文错误码或文本只能作为 SUSPECT，不能触发自动轮换。
+Store 才 CAS 标记 INVALID 并清除旧捕获信号，下一次先走普通 HTTP 观测；通用密文错误码或文本只能作为
+SUSPECT，不能触发自动轮换。
 管理端 mutation 同时回传读取时的 config revision、identity revision 与 effective model；三项共同 fence
 alias 映射和身份切换。Keep 只能按新窗口收紧已有 deadline，不改变 `capturedAt` 或延长已确定的期限。
 捕获在取得 commit guard 后设置明确线性化点：点前 deadline/cancel 阻止提交；点后 Store commit 不可取消，
