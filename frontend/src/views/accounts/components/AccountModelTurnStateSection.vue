@@ -518,14 +518,44 @@ function formatByteCount(value: number | null) {
   return value === null ? '未识别' : `${value} 字节`
 }
 
-async function handleConflict(accountId: string, model: string) {
-  const discardedPinDraft = pinAction.value === 'replace' && Boolean(pinDraftValue.value)
+function snapshotPinDraft() {
+  return {
+    action: pinAction.value,
+    value: pinDraftValue.value,
+    showPin: showPin.value,
+    showPinDraft: showPinDraft.value,
+  }
+}
+
+function restorePinDraft(draft: ReturnType<typeof snapshotPinDraft>) {
+  pinAction.value = draft.action
+  pinDraftValue.value = draft.value
+  showPin.value = draft.showPin
+  showPinDraft.value = draft.showPinDraft
+}
+
+async function reloadModelStatePreservingDraft() {
+  const requestGeneration = generation
+  const requestModelGeneration = modelGeneration
+  const draft = snapshotPinDraft()
   await loadModelState()
+  if (requestGeneration !== generation || requestModelGeneration !== modelGeneration)
+    return false
+  restorePinDraft(draft)
+  return !modelError.value
+}
+
+async function handleConflict(accountId: string, model: string, policySaved: boolean) {
+  const refreshed = await reloadModelStatePreservingDraft()
   if (!props.open || props.accountId !== accountId || selectedModel.value !== model)
     return
-  actionError.value = modelError.value
-    ? `配置已变化，刷新失败：${modelError.value}`
-    : `配置已变化，已载入最新状态；请重新确认后保存。${discardedPinDraft ? '手动值草稿已清除。' : ''}`
+  if (!refreshed) {
+    actionError.value = `模型状态已变化，但刷新失败：${modelError.value}。草稿已保留；请先刷新模型状态。`
+    return
+  }
+  actionError.value = policySaved
+    ? '账号策略已保存，模型状态变化，草稿已保留，请重新确认。'
+    : '模型状态已变化，已载入最新状态并保留草稿；请重新确认后保存。'
 }
 
 async function handleCaptureConflict(accountId: string, model: string) {
@@ -551,10 +581,12 @@ async function handleCaptureConflict(accountId: string, model: string) {
       : '账号策略或模型状态已变化，已载入最新设置并保留模型值草稿；请重新确认后启动任务。'
 }
 
-async function savePolicySettings() {
+async function savePolicySettings(): Promise<boolean> {
   const current = accountPolicy.value
-  if (!current || !policyChanged.value || policySaving.value)
-    return
+  if (!current || policySaving.value)
+    return false
+  if (!policyChanged.value)
+    return true
   const requestGeneration = generation
   policySaving.value = true
   actionError.value = ''
@@ -575,14 +607,15 @@ async function savePolicySettings() {
       cooldownSeconds: draftCooldownSeconds.value,
     })
     if (requestGeneration !== generation)
-      return
+      return false
     // 只应用账号策略响应，不重新读取模型；pinAction、value 与显隐草稿原样保留。
     applyPolicy(result)
     toast.success('账号 Turn State 策略已保存，适用于该账号的所有模型')
+    return true
   }
   catch (error) {
     if (requestGeneration !== generation)
-      return
+      return false
     if (error instanceof ApiError && error.status === 409) {
       await loadPolicy()
       actionError.value = policyError.value
@@ -592,6 +625,7 @@ async function savePolicySettings() {
     else {
       actionError.value = errorMessage(error, '账号 Turn State 策略保存失败')
     }
+    return false
   }
   finally {
     if (requestGeneration === generation)
@@ -599,9 +633,21 @@ async function savePolicySettings() {
   }
 }
 
-async function saveModelSettings() {
+async function saveAllSettings() {
+  if (busy.value || pinValidationError.value || (modelChanged.value && modelError.value) || (!policyChanged.value && !modelChanged.value))
+    return
+  // 开关属于账号策略，模型值是另一个 CAS。统一保存时先提交策略，
+  // 避免用户同时替换模型值时只保存了值操作，重开后看到开关仍关闭。
+  const policySaved = policyChanged.value
+  if (policySaved && !await savePolicySettings())
+    return
+  if (modelChanged.value)
+    await saveModelSettings(policySaved)
+}
+
+async function saveModelSettings(policySaved = false) {
   const current = modelState.value
-  if (!current || !modelChanged.value || pinValidationError.value || busy.value)
+  if (!current || !modelChanged.value || pinValidationError.value || modelError.value || busy.value)
     return
   const requestGeneration = generation
   const requestModelGeneration = modelGeneration
@@ -626,7 +672,7 @@ async function saveModelSettings() {
     if (requestGeneration !== generation || requestModelGeneration !== modelGeneration)
       return
     if (error instanceof ApiError && error.status === 409)
-      await handleConflict(current.accountId, current.requestedModel)
+      await handleConflict(current.accountId, current.requestedModel, policySaved)
     else
       actionError.value = errorMessage(error, '模型 Turn State 设置保存失败')
   }
@@ -777,7 +823,7 @@ onBeforeUnmount(() => {
       </p>
       <div v-else-if="modelError" role="alert" class="grid gap-3 rounded-cp bg-cp-error-container p-4 text-cp-error-on-container">
         <span>{{ modelError }}</span>
-        <BaseButton size="sm" class="justify-self-start" @click="loadModelState">
+        <BaseButton size="sm" class="justify-self-start" @click="reloadModelStatePreservingDraft">
           重试
         </BaseButton>
       </div>
@@ -1189,22 +1235,17 @@ onBeforeUnmount(() => {
         <p v-if="actionError" role="alert" class="m-0 text-cp-error-text">
           {{ actionError }}
         </p>
-        <div class="flex flex-wrap justify-end gap-2">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <p class="m-0 text-xs text-cp-text-secondary">
+            这里会同时保存账号开关与当前模型的值操作。
+          </p>
           <BaseButton
             variant="primary"
-            :loading="policySaving"
-            :disabled="!policyChanged || busy"
-            @click="savePolicySettings"
+            :loading="busy"
+            :disabled="(!policyChanged && !modelChanged) || !!pinValidationError || (modelChanged && !!modelError) || busy"
+            @click="saveAllSettings"
           >
-            保存账号策略
-          </BaseButton>
-          <BaseButton
-            variant="secondary"
-            :loading="modelSaving"
-            :disabled="!modelChanged || !!pinValidationError || busy"
-            @click="saveModelSettings"
-          >
-            保存当前模型值操作
+            保存所有更改
           </BaseButton>
         </div>
       </template>
