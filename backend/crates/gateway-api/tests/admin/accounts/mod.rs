@@ -266,6 +266,8 @@ mod turn_state {
         let value = serde_json::to_value(data).expect("serialize account policy");
         assert_eq!(value["captureReadiness"], "waiting_proxy");
         assert_eq!(value["lockEnabled"], true);
+        assert_eq!(value["captureEnabled"], true);
+        assert_eq!(value["configRevision"], 8);
     }
 
     #[test]

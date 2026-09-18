@@ -163,6 +163,19 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     assert!(waiting.lock_enabled);
     assert!(waiting.capture_enabled);
     assert!(waiting.capture_proxy_id.is_none());
+    let reloaded_waiting = store
+        .load_account_policy("acct_model_state")
+        .await
+        .expect("reload account policy after saving switches");
+    assert!(
+        reloaded_waiting.lock_enabled,
+        "the account lock switch must survive a fresh policy read without a model pin"
+    );
+    assert!(
+        reloaded_waiting.capture_enabled,
+        "the account capture switch must survive the same policy round trip"
+    );
+    assert_eq!(reloaded_waiting.config_revision, waiting.config_revision);
     let configured_policy = store
         .update_account_policy(
             "acct_model_state",

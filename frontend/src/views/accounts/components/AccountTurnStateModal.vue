@@ -354,10 +354,10 @@ function adoptObserved() {
         关闭
       </BaseButton>
       <BaseButton variant="destructive" :disabled="!state || loading || saving || modelBusy || (!state.override.value && !state.override.enabled)" @click="clear">
-        清空覆盖
+        清空 Legacy 覆盖
       </BaseButton>
       <BaseButton variant="primary" :loading="saving" :disabled="!state || loading || saving || modelBusy || !changed || !!validationError" @click="save">
-        保存覆盖
+        保存 Legacy 覆盖
       </BaseButton>
     </template>
   </BaseModal>
