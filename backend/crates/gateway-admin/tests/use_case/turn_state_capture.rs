@@ -343,6 +343,7 @@ async fn disabling_model_b_does_not_cancel_the_queued_model_a_job() {
         view("acct_scope", "model-b", "model-b", policy),
     ]);
     let provider = FakeProviderAdmin::new("openai", events());
+    let provider_probe = provider.clone();
     let (_bundle, services) = bundle(store, provider).await;
     assert!(
         services
@@ -350,6 +351,26 @@ async fn disabling_model_b_does_not_cancel_the_queued_model_a_job() {
             .start_model_turn_state_capture(
                 &ProviderAccountId::new("acct_scope").expect("account ID"),
                 "model-a",
+                1,
+                99,
+                1,
+                "model-a",
+            )
+            .await
+            .is_err(),
+        "manual capture start must fence the account policy revision"
+    );
+    assert!(
+        provider_probe.capture_calls().is_empty(),
+        "stale policy must be rejected before any provider probe starts"
+    );
+    assert!(
+        services
+            .accounts()
+            .start_model_turn_state_capture(
+                &ProviderAccountId::new("acct_scope").expect("account ID"),
+                "model-a",
+                1,
                 1,
                 99,
                 "model-a",
@@ -364,6 +385,7 @@ async fn disabling_model_b_does_not_cancel_the_queued_model_a_job() {
             .start_model_turn_state_capture(
                 &ProviderAccountId::new("acct_scope").expect("account ID"),
                 "model-a",
+                1,
                 1,
                 1,
                 "stale-effective-model",
@@ -402,6 +424,7 @@ async fn automatic_scan_advances_past_sixty_four_unusable_candidates() {
             effective_model: format!("model-{index:03}"),
             identity_revision: 1,
             config_revision: 1,
+            policy_revision: 1,
             capture_enabled: true,
             capture_proxy_id: Some(if index == 64 {
                 "proxy_capture".to_owned()
@@ -518,6 +541,7 @@ async fn start(
             model,
             1,
             1,
+            1,
             model,
         )
         .await
@@ -546,6 +570,7 @@ fn view(
         effective_model: effective_model.to_owned(),
         identity_revision: 1,
         config_revision: 1,
+        policy_revision: 1,
         lock_enabled: false,
         capture_enabled: true,
         reuse_window_seconds: 3_600,

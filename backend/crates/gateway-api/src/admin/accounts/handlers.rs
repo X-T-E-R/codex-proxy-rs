@@ -30,6 +30,14 @@ where
             get(account_model_turn_state::<S>),
         )
         .route(
+            "/api/admin/accounts/turn-state/policy",
+            get(account_turn_state_policy::<S>),
+        )
+        .route(
+            "/api/admin/accounts/turn-state/policy/update",
+            post(update_account_turn_state_policy::<S>),
+        )
+        .route(
             "/api/admin/accounts/turn-state/model/update",
             post(update_account_model_turn_state::<S>),
         )
@@ -111,6 +119,7 @@ where
             &id,
             &request.model,
             request.expected_revision,
+            request.expected_policy_revision,
             request.expected_identity_revision,
             &request.expected_effective_model,
         )
@@ -119,6 +128,50 @@ where
     Ok(AdminResponse::new(
         StatusCode::ACCEPTED,
         AdminEnvelope::ok(ModelTurnStateCaptureAcceptedData::from(job)),
+    ))
+}
+
+async fn account_turn_state_policy<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<AccountIdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let id = query.into_id().map_err(map_wire_error)?;
+    let view = state
+        .admin_services()
+        .accounts()
+        .account_turn_state_policy(&id)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountTurnStatePolicyData::from(view)),
+    ))
+}
+
+async fn update_account_turn_state_policy<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<UpdateAccountTurnStatePolicyRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
+    let id = ProviderAccountId::new(request.account_id.clone())
+        .map_err(|_| map_wire_error(WireValidationError::new("accountId")))?;
+    let view = state
+        .admin_services()
+        .accounts()
+        .update_account_turn_state_policy(&id, request.into_update())
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(AccountTurnStatePolicyData::from(view)),
     ))
 }
 

@@ -767,6 +767,33 @@ async fn managed_proxies_persist_bind_update_all_accounts_and_protect_stale_test
         .await
         .unwrap();
 
+    sqlx::query(
+        "insert into openai_account_turn_state_policies
+           (account_id, identity_revision, capture_proxy_id)
+         values ('acct_one', 1, $1)",
+    )
+    .bind(&created.id)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .delete(&created.id, edited.revision, &context)
+            .await
+            .unwrap_err()
+            .kind(),
+        AdminStoreErrorKind::Conflict,
+        "the account policy is the only Turn State proxy owner after migration"
+    );
+    sqlx::query(
+        "update openai_account_turn_state_policies
+            set capture_proxy_id = null
+          where account_id = 'acct_one'",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+
     for id in ["acct_one", "acct_two"] {
         admin
             .update_account(update(id, AccountProxySelection::Direct), &context)
@@ -867,7 +894,8 @@ async fn migration_backfills_shared_proxies_without_changing_credentials() {
             .await
             .unwrap();
     }
-    sqlx::raw_sql("drop table openai_model_turn_states;
+    sqlx::raw_sql("drop table openai_account_turn_state_policies;
+        drop table openai_model_turn_states;
         alter table provider_accounts drop column outbound_proxy_id; drop table outbound_proxies;
         update provider_accounts set outbound_proxy_url = 'http://user:secret@127.0.0.1:8080/' where id <> 'acct_direct';")
         .execute(&database.pool).await.unwrap();

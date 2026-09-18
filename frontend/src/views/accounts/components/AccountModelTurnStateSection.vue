@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type {
   AccountModelTurnStateResponse,
+  AccountTurnStatePolicyResponse,
   ModelTurnStateCaptureAccepted,
   ModelTurnStateCaptureJob,
   ModelTurnStateCaptureStatus,
@@ -15,9 +16,11 @@ import {
   getAccountModels,
   getAccountModelTurnState,
   getAccountModelTurnStateCapture,
+  getAccountTurnStatePolicy,
   getProxies,
   startAccountModelTurnStateCapture,
   updateAccountModelTurnState,
+  updateAccountTurnStatePolicy,
 } from '@/api'
 import { ApiError } from '@/api/request'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -47,23 +50,36 @@ const ACTIVE_CAPTURE_STATUSES: ModelTurnStateCaptureStatus[] = ['queued', 'runni
 const POLL_INTERVAL_MS = 2_000
 const MAX_POLL_FAILURES = 3
 const CAPTURE_PROXY_TEST_MAX_AGE_MS = 24 * 60 * 60 * 1_000
+const RECOMMENDED_REUSE_WINDOW_SECONDS = 7_200
+const RECOMMENDED_CAPTURE_POLICY = {
+  maxAttempts: 3,
+  attemptTimeoutSeconds: 8,
+  jobTimeoutSeconds: 30,
+  backoffSeconds: 1,
+  maxBackoffSeconds: 4,
+  cooldownSeconds: 900,
+} as const
 
 const copyText = useCopyText()
 const models = ref<Array<{ id: string, label: string }>>([])
 const proxies = ref<OutboundProxyRecord[]>([])
 const selectedModel = ref('')
 const modelState = ref<AccountModelTurnStateResponse | null>(null)
+const accountPolicy = ref<AccountTurnStatePolicyResponse | null>(null)
 const captureJob = ref<CaptureJobState | null>(null)
 const modelsLoading = ref(false)
 const proxiesLoading = ref(false)
 const modelLoading = ref(false)
+const policyLoading = ref(false)
 const modelSaving = ref(false)
+const policySaving = ref(false)
 const captureStarting = ref(false)
 const captureCancelling = ref(false)
 const pollingStopped = ref(false)
 const modelsError = ref('')
 const proxiesError = ref('')
 const modelError = ref('')
+const policyError = ref('')
 const actionError = ref('')
 const captureError = ref('')
 const showPin = ref(false)
@@ -89,11 +105,10 @@ let pollTimer: number | undefined
 let pollDeadline = 0
 let pollFailures = 0
 
-const busy = computed(() => modelSaving.value || captureStarting.value || captureCancelling.value)
+const busy = computed(() => modelSaving.value || policySaving.value || captureStarting.value || captureCancelling.value)
 const captureActive = computed(() => Boolean(
   captureJob.value && ACTIVE_CAPTURE_STATUSES.includes(captureJob.value.status),
 ))
-const captureEditingLocked = computed(() => captureActive.value && !pollingStopped.value)
 const pinDraftBytes = computed(() => new TextEncoder().encode(pinDraftValue.value).length)
 const modelOptions = computed(() => models.value.map(model => ({
   label: model.label,
@@ -111,7 +126,7 @@ const proxyOptions = computed(() => {
     label: `${proxy.name}${proxyReady(proxy) ? '' : proxy.lastTest?.success ? '（测试已过期）' : proxy.lastTest ? '（测试失败）' : '（未测试）'}`,
     value: proxy.id,
     description: proxy.endpoint,
-    disabled: !proxyReady(proxy),
+    disabled: false,
   }))
   const current = modelState.value?.captureProxy
   if (current && !options.some(option => option.value === current.id)) {
@@ -119,7 +134,7 @@ const proxyOptions = computed(() => {
       label: `${current.name}（测试结果未载入）`,
       value: current.id,
       description: current.endpoint,
-      disabled: true,
+      disabled: false,
     })
   }
   return [
@@ -133,8 +148,26 @@ const selectedProxyReady = computed(() => {
   const proxy = proxies.value.find(item => item.id === draftCaptureProxyId.value)
   return proxy !== undefined && proxyReady(proxy)
 })
-const modelChanged = computed(() => {
-  const current = modelState.value
+const readyProxies = computed(() => proxies.value.filter(proxyReady))
+const captureProxyValidationError = computed(() => {
+  if (!draftCaptureEnabled.value)
+    return ''
+  if (proxiesLoading.value)
+    return '正在核对捕获代理的测试状态；账号策略仍可保存'
+  if (proxiesError.value)
+    return '代理列表读取失败；账号策略仍可保存，自动捕获会等待代理就绪'
+  if (proxies.value.length === 0)
+    return '自动捕获当前在等待代理；可先保存，再到代理管理添加并测试'
+  if (readyProxies.value.length === 0)
+    return '自动捕获当前在等待代理测试；普通请求不受影响'
+  if (!draftCaptureProxyId.value)
+    return '自动捕获当前未指定代理；可先保存，稍后再选择'
+  if (!selectedProxyReady.value)
+    return '所选代理尚未就绪；设置可以保存，自动捕获会等待最近 24 小时内的成功测试'
+  return ''
+})
+const policyChanged = computed(() => {
+  const current = accountPolicy.value
   return Boolean(current && (
     draftLockEnabled.value !== current.lockEnabled
     || draftCaptureEnabled.value !== current.captureEnabled
@@ -146,9 +179,9 @@ const modelChanged = computed(() => {
     || draftBackoffSeconds.value !== current.capturePolicy.backoffSeconds
     || draftMaxBackoffSeconds.value !== current.capturePolicy.maxBackoffSeconds
     || draftCooldownSeconds.value !== current.capturePolicy.cooldownSeconds
-    || pinAction.value !== 'keep'
   ))
 })
+const modelChanged = computed(() => pinAction.value !== 'keep')
 const pinValidationError = computed(() => {
   if (pinAction.value === 'replace') {
     if (pinDraftBytes.value !== 292)
@@ -156,31 +189,26 @@ const pinValidationError = computed(() => {
     if (/[^\x20-\x7E]/.test(pinDraftValue.value))
       return '手动值仅支持可打印 ASCII 字符，不含换行或控制字符'
   }
-  if (draftLockEnabled.value) {
-    if (pinAction.value === 'clear' || pinAction.value === 'invalidate')
-      return '关闭模型锁定后，才能清除或标记当前值失效'
-    if (pinAction.value === 'keep' && modelState.value?.pin?.encodedBytes !== 292)
-      return '启用模型锁定前，需要保存一个 292 字节的值'
-  }
   return ''
 })
-const settingsValidationError = computed(() => {
-  if (draftCaptureEnabled.value && proxiesLoading.value)
-    return '正在核对捕获代理的测试状态'
-  if (draftCaptureEnabled.value && !selectedProxyReady.value)
-    return '启用自动捕获前，请选择一个测试成功的已管理代理'
-  if (draftAttemptTimeoutSeconds.value > draftJobTimeoutSeconds.value)
-    return '单次尝试超时不能大于任务总超时'
-  if (draftBackoffSeconds.value > draftMaxBackoffSeconds.value)
-    return '首次退避不能大于最大退避'
-  return pinValidationError.value
+const setupStatus = computed(() => {
+  if (!draftLockEnabled.value)
+    return '锁定未启用：请求不会注入模型级 Turn State。'
+  if (modelState.value?.pin?.status === 'fresh')
+    return '锁定已就绪：普通 HTTP 请求会注入当前 292 字节值。'
+  if (draftCaptureEnabled.value && selectedProxyReady.value)
+    return '待获取并自动锁定：先走账号正常出口；只有明确观测到非 292 字节值后，才使用所选代理捕获。'
+  return '待获取并自动锁定：先走账号正常出口；观测到 292 字节值后会直接锁定。'
 })
 const canStartCapture = computed(() => Boolean(
   modelState.value
-  && modelState.value.captureProxyId
+  && accountPolicy.value?.captureProxyId
   && selectedProxyReady.value
+  && !policyError.value
+  && !modelError.value
+  && !policyChanged.value
   && !modelChanged.value
-  && !settingsValidationError.value
+  && !pinValidationError.value
   && !captureActive.value
   && !busy.value,
 ))
@@ -237,9 +265,13 @@ function reset() {
   models.value = []
   proxies.value = []
   selectedModel.value = ''
+  accountPolicy.value = null
   modelsError.value = ''
+  policyError.value = ''
   proxiesError.value = ''
   modelsLoading.value = false
+  policyLoading.value = false
+  policySaving.value = false
   proxiesLoading.value = false
 }
 
@@ -299,6 +331,20 @@ function applyModelState(result: AccountModelTurnStateResponse) {
   stopPolling()
   modelState.value = result
   captureJob.value = result.capture
+  pinAction.value = 'keep'
+  pinDraftValue.value = ''
+  showPin.value = false
+  showPinDraft.value = false
+  pollingStopped.value = false
+  if (isCaptureActive(result.capture)) {
+    pollDeadline = Date.now() + ((accountPolicy.value?.capturePolicy.jobTimeoutSeconds ?? 30) + 30) * 1_000
+    pollFailures = 0
+    schedulePoll()
+  }
+}
+
+function applyPolicy(result: AccountTurnStatePolicyResponse) {
+  accountPolicy.value = result
   draftLockEnabled.value = result.lockEnabled
   draftCaptureEnabled.value = result.captureEnabled
   draftReuseWindowSeconds.value = result.reuseWindowSeconds
@@ -309,15 +355,27 @@ function applyModelState(result: AccountModelTurnStateResponse) {
   draftBackoffSeconds.value = result.capturePolicy.backoffSeconds
   draftMaxBackoffSeconds.value = result.capturePolicy.maxBackoffSeconds
   draftCooldownSeconds.value = result.capturePolicy.cooldownSeconds
-  pinAction.value = 'keep'
-  pinDraftValue.value = ''
-  showPin.value = false
-  showPinDraft.value = false
-  pollingStopped.value = false
-  if (isCaptureActive(result.capture)) {
-    pollDeadline = Date.now() + (result.capturePolicy.jobTimeoutSeconds + 30) * 1_000
-    pollFailures = 0
-    schedulePoll()
+  chooseOnlyReadyProxy()
+}
+
+async function loadPolicy() {
+  if (!props.open)
+    return
+  const requestGeneration = generation
+  policyLoading.value = true
+  policyError.value = ''
+  try {
+    const result = await getAccountTurnStatePolicy({ accountId: props.accountId })
+    if (requestGeneration === generation)
+      applyPolicy(result)
+  }
+  catch (error) {
+    if (requestGeneration === generation)
+      policyError.value = errorMessage(error, '账号 Turn State 策略读取失败')
+  }
+  finally {
+    if (requestGeneration === generation)
+      policyLoading.value = false
   }
 }
 
@@ -356,8 +414,10 @@ async function loadProxies() {
         return
       items.push(...result.items)
     }
-    if (requestGeneration === generation)
+    if (requestGeneration === generation) {
       proxies.value = items
+      chooseOnlyReadyProxy()
+    }
   }
   catch (error) {
     if (requestGeneration === generation)
@@ -367,6 +427,30 @@ async function loadProxies() {
     if (requestGeneration === generation)
       proxiesLoading.value = false
   }
+}
+
+function chooseOnlyReadyProxy() {
+  if (draftCaptureEnabled.value && !draftCaptureProxyId.value && readyProxies.value.length === 1)
+    draftCaptureProxyId.value = readyProxies.value[0]!.id
+}
+
+function handleCaptureToggle(enabled: boolean) {
+  if (enabled)
+    chooseOnlyReadyProxy()
+}
+
+function applyRecommendedDefaults() {
+  draftReuseWindowSeconds.value = RECOMMENDED_REUSE_WINDOW_SECONDS
+  draftMaxAttempts.value = RECOMMENDED_CAPTURE_POLICY.maxAttempts
+  draftAttemptTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.attemptTimeoutSeconds
+  draftJobTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.jobTimeoutSeconds
+  draftBackoffSeconds.value = RECOMMENDED_CAPTURE_POLICY.backoffSeconds
+  draftMaxBackoffSeconds.value = RECOMMENDED_CAPTURE_POLICY.maxBackoffSeconds
+  draftCooldownSeconds.value = RECOMMENDED_CAPTURE_POLICY.cooldownSeconds
+}
+
+function openProxyManager() {
+  window.open('/proxies', '_blank', 'noopener,noreferrer')
 }
 
 async function loadModelState() {
@@ -401,6 +485,7 @@ watch([() => props.open, () => props.accountId], () => {
   if (props.open) {
     void loadModels()
     void loadProxies()
+    void loadPolicy()
   }
 }, { immediate: true })
 
@@ -444,19 +529,79 @@ async function handleConflict(accountId: string, model: string) {
 }
 
 async function handleCaptureConflict(accountId: string, model: string) {
+  const preservedPinDraft = {
+    action: pinAction.value,
+    value: pinDraftValue.value,
+    showPin: showPin.value,
+    showPinDraft: showPinDraft.value,
+  }
+  await loadPolicy()
   await loadModelState()
   if (!props.open || props.accountId !== accountId || selectedModel.value !== model)
     return
-  captureError.value = modelError.value
-    ? `任务状态刷新失败：${modelError.value}`
+  pinAction.value = preservedPinDraft.action
+  pinDraftValue.value = preservedPinDraft.value
+  showPin.value = preservedPinDraft.showPin
+  showPinDraft.value = preservedPinDraft.showPinDraft
+  const refreshError = policyError.value || modelError.value
+  captureError.value = refreshError
+    ? `账号策略或模型状态刷新失败：${refreshError}`
     : captureActive.value
       ? '已有获取任务，已载入最新状态。'
-      : '模型配置已变化，已载入最新状态；请重新确认后启动任务。'
+      : '账号策略或模型状态已变化，已载入最新设置并保留模型值草稿；请重新确认后启动任务。'
+}
+
+async function savePolicySettings() {
+  const current = accountPolicy.value
+  if (!current || !policyChanged.value || policySaving.value)
+    return
+  const requestGeneration = generation
+  policySaving.value = true
+  actionError.value = ''
+  try {
+    const result = await updateAccountTurnStatePolicy({
+      accountId: current.accountId,
+      expectedIdentityRevision: current.identityRevision,
+      expectedRevision: current.configRevision,
+      lockEnabled: draftLockEnabled.value,
+      captureEnabled: draftCaptureEnabled.value,
+      reuseWindowSeconds: draftReuseWindowSeconds.value,
+      captureProxyId: draftCaptureProxyId.value || null,
+      maxAttempts: draftMaxAttempts.value,
+      attemptTimeoutSeconds: draftAttemptTimeoutSeconds.value,
+      jobTimeoutSeconds: draftJobTimeoutSeconds.value,
+      backoffSeconds: draftBackoffSeconds.value,
+      maxBackoffSeconds: draftMaxBackoffSeconds.value,
+      cooldownSeconds: draftCooldownSeconds.value,
+    })
+    if (requestGeneration !== generation)
+      return
+    // 只应用账号策略响应，不重新读取模型；pinAction、value 与显隐草稿原样保留。
+    applyPolicy(result)
+    toast.success('账号 Turn State 策略已保存，适用于该账号的所有模型')
+  }
+  catch (error) {
+    if (requestGeneration !== generation)
+      return
+    if (error instanceof ApiError && error.status === 409) {
+      await loadPolicy()
+      actionError.value = policyError.value
+        ? `账号策略已变化，刷新失败：${policyError.value}`
+        : '账号策略已变化，已载入最新设置；请重新确认后保存。'
+    }
+    else {
+      actionError.value = errorMessage(error, '账号 Turn State 策略保存失败')
+    }
+  }
+  finally {
+    if (requestGeneration === generation)
+      policySaving.value = false
+  }
 }
 
 async function saveModelSettings() {
   const current = modelState.value
-  if (!current || !modelChanged.value || settingsValidationError.value || captureEditingLocked.value || busy.value)
+  if (!current || !modelChanged.value || pinValidationError.value || busy.value)
     return
   const requestGeneration = generation
   const requestModelGeneration = modelGeneration
@@ -469,23 +614,13 @@ async function saveModelSettings() {
       expectedRevision: current.configRevision,
       expectedIdentityRevision: current.identityRevision,
       expectedEffectiveModel: current.effectiveModel,
-      lockEnabled: draftLockEnabled.value,
-      captureEnabled: draftCaptureEnabled.value,
-      reuseWindowSeconds: draftReuseWindowSeconds.value,
-      captureProxyId: draftCaptureProxyId.value || null,
-      maxAttempts: draftMaxAttempts.value,
-      attemptTimeoutSeconds: draftAttemptTimeoutSeconds.value,
-      jobTimeoutSeconds: draftJobTimeoutSeconds.value,
-      backoffSeconds: draftBackoffSeconds.value,
-      maxBackoffSeconds: draftMaxBackoffSeconds.value,
-      cooldownSeconds: draftCooldownSeconds.value,
       pinAction: pinAction.value,
       ...(pinAction.value === 'replace' ? { value: pinDraftValue.value } : {}),
     })
     if (requestGeneration !== generation || requestModelGeneration !== modelGeneration)
       return
     applyModelState(result)
-    toast.success('模型 Turn State 设置已保存')
+    toast.success('该模型的 Turn State 值操作已保存')
   }
   catch (error) {
     if (requestGeneration !== generation || requestModelGeneration !== modelGeneration)
@@ -508,7 +643,8 @@ function requestCapture() {
 
 async function startCapture() {
   const current = modelState.value
-  if (!current || !canStartCapture.value)
+  const policy = accountPolicy.value
+  if (!current || !policy || !canStartCapture.value)
     return
   const requestGeneration = generation
   const requestModelGeneration = modelGeneration
@@ -520,6 +656,7 @@ async function startCapture() {
       accountId: current.accountId,
       model: current.requestedModel,
       expectedRevision: current.configRevision,
+      expectedPolicyRevision: policy.configRevision,
       expectedIdentityRevision: current.identityRevision,
       expectedEffectiveModel: current.effectiveModel,
     })
@@ -527,7 +664,7 @@ async function startCapture() {
       return
     captureJob.value = result
     pollingStopped.value = false
-    pollDeadline = Date.now() + (current.capturePolicy.jobTimeoutSeconds + 30) * 1_000
+    pollDeadline = Date.now() + (policy.capturePolicy.jobTimeoutSeconds + 30) * 1_000
     pollFailures = 0
     toast.success('Turn State 获取任务已创建')
     schedulePoll()
@@ -645,6 +782,15 @@ onBeforeUnmount(() => {
         </BaseButton>
       </div>
       <template v-else-if="modelState">
+        <div v-if="policyLoading" role="status" class="rounded-cp bg-cp-fill-quaternary p-4 text-cp-text-secondary">
+          正在读取账号级 Turn State 策略…
+        </div>
+        <div v-else-if="policyError" role="alert" class="flex flex-wrap items-center justify-between gap-2 rounded-cp bg-cp-error-container p-4 text-cp-error-on-container">
+          <span>{{ policyError }}</span>
+          <BaseButton size="sm" @click="loadPolicy">
+            重试
+          </BaseButton>
+        </div>
         <div class="grid gap-2 rounded-cp bg-cp-fill-quaternary p-4 text-xs sm:grid-cols-2">
           <div class="min-w-0">
             <p class="m-0 text-cp-text-quaternary">
@@ -656,25 +802,37 @@ onBeforeUnmount(() => {
           </div>
           <div>
             <p class="m-0 text-cp-text-quaternary">
-              账号身份代次
+              账号身份代次 / 账号策略版本
             </p>
             <p class="mt-1 mb-0 font-mono text-cp-text">
-              {{ modelState.identityRevision }}
+              {{ modelState.identityRevision }} / {{ accountPolicy?.configRevision ?? '—' }}
             </p>
           </div>
+        </div>
+
+        <div class="grid gap-2 rounded-cp border border-cp-primary/25 bg-cp-primary-container p-4 text-xs text-cp-primary-on-container">
+          <p class="m-0 font-bold">
+            推荐流程
+          </p>
+          <p class="m-0 leading-relaxed">
+            以下开关、代理、TTL 与捕获策略按账号保存一次，适用于该账号的所有模型；每个模型的实际密文仍独立保存，绝不跨模型复用。可以先保存开关，缺少代理或代理未测试时只会等待，不影响普通请求。
+          </p>
+          <p class="m-0 font-bold">
+            {{ setupStatus }}
+          </p>
         </div>
 
         <div class="grid gap-4 rounded-cp bg-cp-fill-quaternary p-4 sm:grid-cols-2">
           <div class="flex items-start justify-between gap-3">
             <div>
               <p class="m-0 font-bold text-cp-text">
-                模型锁定
+                账号级自动锁定
               </p>
               <p class="mt-1 mb-0 text-xs leading-relaxed text-cp-text-secondary">
                 实验性地跨 turn 注入当前可用值；本地期限到期或明确失效后先等待普通 HTTP 请求重新观测。
               </p>
             </div>
-            <BaseSwitch v-model="draftLockEnabled" label="启用模型 Turn State 锁定" :disabled="busy || captureEditingLocked" active-text="启用" inactive-text="停用" />
+            <BaseSwitch v-model="draftLockEnabled" label="启用账号 Turn State 自动锁定" :disabled="busy" active-text="启用" inactive-text="停用" />
           </div>
           <div class="flex items-start justify-between gap-3">
             <div>
@@ -685,29 +843,44 @@ onBeforeUnmount(() => {
                 普通 HTTP 请求明确返回非 292 字节值后，按下方策略通过已测试代理轮换；正好 292 字节但不可打印的值不会触发。也可手动获取。
               </p>
             </div>
-            <BaseSwitch v-model="draftCaptureEnabled" label="启用模型 Turn State 自动捕获" :disabled="busy || captureEditingLocked" active-text="启用" inactive-text="停用" />
+            <BaseSwitch v-model="draftCaptureEnabled" label="启用模型 Turn State 自动捕获" :disabled="busy" active-text="启用" inactive-text="停用" @update:model-value="handleCaptureToggle" />
           </div>
         </div>
 
         <div class="grid gap-4 sm:grid-cols-2">
           <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用期限" description="默认 7200 秒。到期后停止注入并等待普通 HTTP 请求重新观测；Fernet 内嵌时间是未验签签发时间，不是过期时间。">
-            <BaseNumberInput id="model-turn-state-reuse-window" v-model="draftReuseWindowSeconds" aria-describedby="model-turn-state-reuse-window-description" label="本地最大复用期限" :min="1" :max="86400" unit="秒" :disabled="busy || captureEditingLocked" />
+            <BaseNumberInput id="model-turn-state-reuse-window" v-model="draftReuseWindowSeconds" aria-describedby="model-turn-state-reuse-window-description" label="本地最大复用期限" :min="1" :max="86400" unit="秒" :disabled="busy" />
+            <div class="mt-2 flex flex-wrap gap-1.5" aria-label="复用期限快捷值">
+              <BaseButton v-for="hours in [1, 2, 4, 12, 24]" :key="hours" size="sm" variant="ghost" :disabled="busy" @click="draftReuseWindowSeconds = hours * 3600">
+                {{ hours }} 小时
+              </BaseButton>
+            </div>
           </BaseFormItem>
           <BaseFormItem
             label="捕获代理"
             description="选择已管理且在最近 24 小时测试成功的代理。DataImpulse 等服务可先把 rotating URL 添加为代理并完成测试。"
-            :error="draftCaptureEnabled && !proxiesLoading && !selectedProxyReady ? '自动捕获需要最近 24 小时测试成功的代理' : undefined"
           >
             <BaseSelect
               v-model="draftCaptureProxyId"
               :options="proxyOptions"
-              :disabled="proxiesLoading || busy || captureEditingLocked"
+              :disabled="proxiesLoading || busy"
               :placeholder="proxiesLoading ? '加载代理中…' : '选择捕获代理'"
               empty-text="还没有已管理代理"
               aria-label="捕获代理"
             />
+            <div class="mt-2 flex flex-wrap gap-2">
+              <BaseButton size="sm" variant="ghost" :disabled="proxiesLoading || busy" @click="loadProxies">
+                刷新代理状态
+              </BaseButton>
+              <BaseButton size="sm" variant="secondary" :disabled="busy" @click="openProxyManager">
+                打开代理管理
+              </BaseButton>
+            </div>
+            <p v-if="captureProxyValidationError" role="status" class="mt-2 mb-0 text-xs text-cp-warning-text">
+              {{ captureProxyValidationError }}
+            </p>
             <p v-if="!proxiesLoading && !proxiesError && proxies.length === 0" class="mt-2 mb-0 text-xs text-cp-text-quaternary">
-              还没有已管理代理。先在代理页面添加并测试代理，再返回这里选择。
+              还没有已管理代理。代理管理会在新标签页打开；添加并测试后，回到这里点击“刷新代理状态”。
             </p>
             <div v-if="proxiesError" role="alert" class="mt-2 flex flex-wrap items-center gap-2 text-xs text-cp-error-text">
               <span>{{ proxiesError }}</span>
@@ -716,6 +889,20 @@ onBeforeUnmount(() => {
               </BaseButton>
             </div>
           </BaseFormItem>
+        </div>
+
+        <div class="flex flex-wrap items-center justify-between gap-2 rounded-cp bg-cp-bg-container px-4 py-3">
+          <p class="m-0 text-xs text-cp-text-secondary">
+            保存后立即应用到此账号的所有模型；缺少可用代理时自动捕获保持等待。
+          </p>
+          <BaseButton
+            variant="primary"
+            :loading="policySaving"
+            :disabled="!policyChanged || busy"
+            @click="savePolicySettings"
+          >
+            保存账号策略
+          </BaseButton>
         </div>
 
         <section class="grid min-w-0 gap-3 rounded-cp bg-cp-bg-container p-4 shadow-cp-tertiary" aria-label="模型锁定值">
@@ -833,17 +1020,17 @@ onBeforeUnmount(() => {
             </dl>
           </template>
           <p v-else class="m-0 text-cp-text-secondary">
-            当前模型还没有保存值。可以手动替换，或配置代理后启动获取任务。
+            当前模型还没有保存值。锁定开关仍可保存为“获取后自动锁定”；系统会先从普通 HTTP 请求观测，必要时再按自动捕获设置使用代理。
           </p>
 
           <div class="flex flex-wrap gap-2">
-            <BaseButton size="sm" :variant="pinAction === 'replace' ? 'primary' : 'secondary'" :disabled="busy || captureEditingLocked" @click="setPinAction('replace')">
+            <BaseButton size="sm" :variant="pinAction === 'replace' ? 'primary' : 'secondary'" :disabled="busy" @click="setPinAction('replace')">
               手动替换
             </BaseButton>
-            <BaseButton size="sm" :variant="pinAction === 'invalidate' ? 'primary' : 'secondary'" :disabled="!modelState.pin || busy || captureEditingLocked" @click="setPinAction('invalidate')">
+            <BaseButton size="sm" :variant="pinAction === 'invalidate' ? 'primary' : 'secondary'" :disabled="!modelState.pin || busy" @click="setPinAction('invalidate')">
               标记失效
             </BaseButton>
-            <BaseButton size="sm" :variant="pinAction === 'clear' ? 'destructive' : 'secondary'" :disabled="!modelState.pin || busy || captureEditingLocked" @click="setPinAction('clear')">
+            <BaseButton size="sm" :variant="pinAction === 'clear' ? 'destructive' : 'secondary'" :disabled="!modelState.pin || busy" @click="setPinAction('clear')">
               清除保存值
             </BaseButton>
             <BaseButton v-if="pinAction !== 'keep'" size="sm" variant="ghost" :disabled="busy" @click="setPinAction('keep')">
@@ -871,10 +1058,10 @@ onBeforeUnmount(() => {
             </p>
           </BaseFormItem>
           <p v-else-if="pinAction === 'invalidate'" role="status" class="m-0 text-xs text-cp-warning-text">
-            保存后，这个值会保留用于审计，但不再作为可用的模型锁定值。
+            保存后，这个值会保留用于审计，但不再注入；若锁定开关仍开启，会回到待获取状态。
           </p>
           <p v-else-if="pinAction === 'clear'" role="status" class="m-0 text-xs text-cp-error-text">
-            保存后会删除这个模型的当前值。
+            保存后会删除这个模型的当前值；若锁定开关仍开启，会回到待获取状态。
           </p>
           <p v-if="modelState.pin?.status === 'aged'" role="status" class="m-0 text-xs text-cp-warning-text">
             这个值已停止注入。下一次普通 HTTP 请求返回 292 字节可打印 ASCII 值时会直接采用；明确返回非 292 字节值时才会触发已配置的住宅代理捕获。也可以手动获取或替换。
@@ -883,26 +1070,31 @@ onBeforeUnmount(() => {
 
         <details class="group rounded-cp bg-cp-fill-quaternary">
           <summary class="cursor-pointer rounded-cp px-4 py-3 font-bold text-cp-text hover:bg-cp-bg-text-hover focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cp-primary">
-            捕获策略高级设置
+            捕获策略高级设置（默认通常无需修改）
           </summary>
           <div class="grid gap-4 px-4 pb-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div class="flex items-end sm:col-span-2 lg:col-span-3">
+              <BaseButton size="sm" variant="ghost" :disabled="busy" @click="applyRecommendedDefaults">
+                恢复推荐默认值
+              </BaseButton>
+            </div>
             <BaseFormItem control-id="model-turn-state-max-attempts" label="最大尝试次数" description="1–10 次">
-              <BaseNumberInput id="model-turn-state-max-attempts" v-model="draftMaxAttempts" aria-describedby="model-turn-state-max-attempts-description" label="最大尝试次数" :min="1" :max="10" unit="次" :disabled="busy || captureEditingLocked" />
+              <BaseNumberInput id="model-turn-state-max-attempts" v-model="draftMaxAttempts" aria-describedby="model-turn-state-max-attempts-description" label="最大尝试次数" :min="1" :max="10" unit="次" :disabled="busy" />
             </BaseFormItem>
-            <BaseFormItem control-id="model-turn-state-attempt-timeout" label="单次尝试超时" description="1–60 秒，且不能大于任务总超时">
-              <BaseNumberInput id="model-turn-state-attempt-timeout" v-model="draftAttemptTimeoutSeconds" aria-describedby="model-turn-state-attempt-timeout-description" label="单次尝试超时" :min="1" :max="60" unit="秒" :disabled="busy || captureEditingLocked" />
+            <BaseFormItem control-id="model-turn-state-attempt-timeout" label="单次尝试超时" description="1–60 秒；运行时不会超过任务剩余时间">
+              <BaseNumberInput id="model-turn-state-attempt-timeout" v-model="draftAttemptTimeoutSeconds" aria-describedby="model-turn-state-attempt-timeout-description" label="单次尝试超时" :min="1" :max="60" unit="秒" :disabled="busy" />
             </BaseFormItem>
             <BaseFormItem control-id="model-turn-state-job-timeout" label="任务总超时" description="1–300 秒">
-              <BaseNumberInput id="model-turn-state-job-timeout" v-model="draftJobTimeoutSeconds" aria-describedby="model-turn-state-job-timeout-description" label="任务总超时" :min="1" :max="300" unit="秒" :disabled="busy || captureEditingLocked" />
+              <BaseNumberInput id="model-turn-state-job-timeout" v-model="draftJobTimeoutSeconds" aria-describedby="model-turn-state-job-timeout-description" label="任务总超时" :min="1" :max="300" unit="秒" :disabled="busy" />
             </BaseFormItem>
             <BaseFormItem control-id="model-turn-state-backoff" label="首次退避" description="0–60 秒">
-              <BaseNumberInput id="model-turn-state-backoff" v-model="draftBackoffSeconds" aria-describedby="model-turn-state-backoff-description" label="首次退避" :min="0" :max="60" unit="秒" :disabled="busy || captureEditingLocked" />
+              <BaseNumberInput id="model-turn-state-backoff" v-model="draftBackoffSeconds" aria-describedby="model-turn-state-backoff-description" label="首次退避" :min="0" :max="60" unit="秒" :disabled="busy" />
             </BaseFormItem>
-            <BaseFormItem control-id="model-turn-state-max-backoff" label="最大退避" description="0–60 秒，不能小于首次退避">
-              <BaseNumberInput id="model-turn-state-max-backoff" v-model="draftMaxBackoffSeconds" aria-describedby="model-turn-state-max-backoff-description" label="最大退避" :min="0" :max="60" unit="秒" :disabled="busy || captureEditingLocked" />
+            <BaseFormItem control-id="model-turn-state-max-backoff" label="最大退避" description="0–60 秒；小于首次退避时按此上限截断">
+              <BaseNumberInput id="model-turn-state-max-backoff" v-model="draftMaxBackoffSeconds" aria-describedby="model-turn-state-max-backoff-description" label="最大退避" :min="0" :max="60" unit="秒" :disabled="busy" />
             </BaseFormItem>
             <BaseFormItem control-id="model-turn-state-cooldown" label="失败冷却" description="0–86400 秒">
-              <BaseNumberInput id="model-turn-state-cooldown" v-model="draftCooldownSeconds" aria-describedby="model-turn-state-cooldown-description" label="失败冷却" :min="0" :max="86400" unit="秒" :disabled="busy || captureEditingLocked" />
+              <BaseNumberInput id="model-turn-state-cooldown" v-model="draftCooldownSeconds" aria-describedby="model-turn-state-cooldown-description" label="失败冷却" :min="0" :max="86400" unit="秒" :disabled="busy" />
             </BaseFormItem>
           </div>
         </details>
@@ -926,8 +1118,8 @@ onBeforeUnmount(() => {
               </BaseButton>
             </div>
           </div>
-          <p v-if="!modelState.captureProxyId" class="m-0 text-xs text-cp-warning-text">
-            保存一个测试成功的捕获代理后，才能启动手动获取。
+          <p v-if="accountPolicy?.captureReadiness !== 'ready'" class="m-0 text-xs text-cp-warning-text">
+            手动获取需要账号策略中已选择且最近 24 小时测试成功的代理；自动流程会保持等待，不影响普通请求。
           </p>
           <template v-if="captureJob">
             <div class="flex flex-wrap items-center gap-2">
@@ -994,20 +1186,25 @@ onBeforeUnmount(() => {
           </p>
         </div>
 
-        <p v-if="settingsValidationError" role="alert" class="m-0 text-cp-error-text">
-          {{ settingsValidationError }}
-        </p>
         <p v-if="actionError" role="alert" class="m-0 text-cp-error-text">
           {{ actionError }}
         </p>
-        <div class="flex justify-end">
+        <div class="flex flex-wrap justify-end gap-2">
           <BaseButton
             variant="primary"
+            :loading="policySaving"
+            :disabled="!policyChanged || busy"
+            @click="savePolicySettings"
+          >
+            保存账号策略
+          </BaseButton>
+          <BaseButton
+            variant="secondary"
             :loading="modelSaving"
-            :disabled="!modelChanged || !!settingsValidationError || captureEditingLocked || busy"
+            :disabled="!modelChanged || !!pinValidationError || busy"
             @click="saveModelSettings"
           >
-            保存模型设置
+            保存当前模型值操作
           </BaseButton>
         </div>
       </template>

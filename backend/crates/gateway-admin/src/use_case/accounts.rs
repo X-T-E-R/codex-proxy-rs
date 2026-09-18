@@ -9,6 +9,7 @@ use gateway_core::{
     account::ProviderAccountId,
     engine::probe::{AccountProbe, AccountProbeRequest},
     provider_ports::turn_state::{
+        AccountTurnStatePolicyUpdate, AccountTurnStatePolicyView, ModelTurnStatePinAction,
         ModelTurnStateUpdate, TurnStateStore, TurnStateStoreError, TurnStateView,
     },
     routing::{ProviderKind, UpstreamModelId},
@@ -51,8 +52,31 @@ const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
 fn map_turn_state_error(error: TurnStateStoreError) -> AdminError {
     match error {
         TurnStateStoreError::Invalid => AdminError::invalid("Turn State 值无效"),
+        TurnStateStoreError::CaptureProxyRequired => {
+            AdminError::invalid("开启自动捕获前，请选择一个捕获代理")
+        }
+        TurnStateStoreError::CaptureProxyNotReady => {
+            AdminError::invalid("捕获代理不存在，或未在最近 24 小时内测试成功")
+        }
         TurnStateStoreError::NotFound => AdminError::not_found("OpenAI 账号不存在"),
         TurnStateStoreError::Conflict => AdminError::conflict("Turn State 已变化，请刷新后重试"),
+        TurnStateStoreError::Unavailable => AdminError::unavailable("Turn State 服务暂不可用"),
+    }
+}
+
+fn map_turn_state_policy_error(error: TurnStateStoreError) -> AdminError {
+    match error {
+        TurnStateStoreError::Invalid => AdminError::invalid("账号 Turn State 策略参数超出允许范围"),
+        TurnStateStoreError::CaptureProxyRequired => {
+            AdminError::invalid("手动捕获前，请先选择捕获代理")
+        }
+        TurnStateStoreError::CaptureProxyNotReady => {
+            AdminError::invalid("手动捕获需要最近 24 小时内测试成功的代理")
+        }
+        TurnStateStoreError::NotFound => AdminError::not_found("OpenAI 账号不存在"),
+        TurnStateStoreError::Conflict => {
+            AdminError::conflict("账号 Turn State 策略已变化，请刷新后重试")
+        }
         TurnStateStoreError::Unavailable => AdminError::unavailable("Turn State 服务暂不可用"),
     }
 }
@@ -95,6 +119,21 @@ pub trait AccountsService: Send + Sync {
         Err(AdminError::unavailable("Turn State 服务暂不可用"))
     }
 
+    async fn account_turn_state_policy(
+        &self,
+        _account_id: &ProviderAccountId,
+    ) -> Result<AccountTurnStatePolicyView, AdminError> {
+        Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
+    async fn update_account_turn_state_policy(
+        &self,
+        _account_id: &ProviderAccountId,
+        _update: AccountTurnStatePolicyUpdate,
+    ) -> Result<AccountTurnStatePolicyView, AdminError> {
+        Err(AdminError::unavailable("Turn State 服务暂不可用"))
+    }
+
     async fn update_model_turn_state(
         &self,
         _account_id: &ProviderAccountId,
@@ -109,6 +148,7 @@ pub trait AccountsService: Send + Sync {
         _account_id: &ProviderAccountId,
         _model: &str,
         _expected_revision: u64,
+        _expected_policy_revision: u64,
         _expected_identity_revision: u64,
         _expected_effective_model: &str,
     ) -> Result<ModelTurnStateCaptureJob, AdminError> {
@@ -527,13 +567,55 @@ impl AccountsService for DefaultAccountsService {
         })
     }
 
+    async fn account_turn_state_policy(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<AccountTurnStatePolicyView, AdminError> {
+        let mut view = self
+            .turn_state
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 服务暂不可用"))?
+            .load_account_policy(account_id.as_str())
+            .await
+            .map_err(map_turn_state_policy_error)?;
+        if let Some(manager) = &self.turn_state_capture {
+            view.capture_proxy = manager
+                .capture_proxy_by_id(view.capture_proxy_id.as_deref())
+                .await;
+        }
+        Ok(view)
+    }
+
+    async fn update_account_turn_state_policy(
+        &self,
+        account_id: &ProviderAccountId,
+        update: AccountTurnStatePolicyUpdate,
+    ) -> Result<AccountTurnStatePolicyView, AdminError> {
+        let mut view = self
+            .turn_state
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("Turn State 服务暂不可用"))?
+            .update_account_policy(account_id.as_str(), update)
+            .await
+            .map_err(map_turn_state_policy_error)?;
+        if let Some(manager) = &self.turn_state_capture {
+            manager.cancel_account(account_id.as_str()).await;
+        }
+        if let Some(manager) = &self.turn_state_capture {
+            view.capture_proxy = manager
+                .capture_proxy_by_id(view.capture_proxy_id.as_deref())
+                .await;
+        }
+        Ok(view)
+    }
+
     async fn update_model_turn_state(
         &self,
         account_id: &ProviderAccountId,
         model: &str,
         update: ModelTurnStateUpdate,
     ) -> Result<ModelTurnStateResult, AdminError> {
-        let close_capture = !update.capture_enabled || !update.lock_enabled;
+        let close_capture = !matches!(update.pin_action, ModelTurnStatePinAction::Keep);
         let mut view = self
             .turn_state
             .as_ref()
@@ -561,6 +643,7 @@ impl AccountsService for DefaultAccountsService {
         account_id: &ProviderAccountId,
         model: &str,
         expected_revision: u64,
+        expected_policy_revision: u64,
         expected_identity_revision: u64,
         expected_effective_model: &str,
     ) -> Result<ModelTurnStateCaptureJob, AdminError> {
@@ -571,6 +654,7 @@ impl AccountsService for DefaultAccountsService {
                 account_id,
                 model,
                 expected_revision,
+                expected_policy_revision,
                 expected_identity_revision,
                 expected_effective_model,
             )
