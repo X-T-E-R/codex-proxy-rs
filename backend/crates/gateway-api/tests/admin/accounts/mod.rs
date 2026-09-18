@@ -76,12 +76,13 @@ mod turn_state {
         ModelTurnStateCaptureJob, ModelTurnStateCaptureStatus, ModelTurnStateResult,
     };
     use gateway_api::admin::accounts::{
-        ModelTurnStateCaptureAcceptedData, ModelTurnStateData, StartModelTurnStateCaptureRequest,
+        AccountTurnStatePolicyData, ModelTurnStateCaptureAcceptedData, ModelTurnStateData,
+        StartModelTurnStateCaptureRequest, UpdateAccountTurnStatePolicyRequest,
         UpdateModelTurnStateRequest, UpdateTurnStateRequest,
     };
     use gateway_core::provider_ports::turn_state::{
-        ModelTurnStateCapturePolicy, ModelTurnStateCaptureProxy, ModelTurnStatePin,
-        ModelTurnStateView,
+        AccountTurnStatePolicyView, ModelTurnStateCapturePolicy, ModelTurnStateCaptureProxy,
+        ModelTurnStatePin, ModelTurnStateView,
     };
     use serde_json::json;
 
@@ -112,6 +113,7 @@ mod turn_state {
             "accountId": "acct_1",
             "model": "public-codex",
             "expectedRevision": 7,
+            "expectedPolicyRevision": 5,
             "expectedIdentityRevision": 3,
             "expectedEffectiveModel": "upstream-codex"
         }))
@@ -133,24 +135,62 @@ mod turn_state {
             "expectedRevision": 7,
             "expectedIdentityRevision": 3,
             "expectedEffectiveModel": "upstream-codex",
-            "lockEnabled": false,
-            "captureEnabled": false,
-            "reuseWindowSeconds": 3600,
-            "captureProxyId": null,
-            "maxAttempts": 3,
-            "attemptTimeoutSeconds": 60,
-            "jobTimeoutSeconds": 300,
-            "backoffSeconds": 1,
-            "maxBackoffSeconds": 4,
-            "cooldownSeconds": 900,
             "pinAction": "keep"
         }))
-        .expect("complete model update fence and timeout boundary");
+        .expect("pin-only model update does not require account policy fields");
         let update = update.into_update();
         assert_eq!(update.expected_identity_revision, 3);
         assert_eq!(update.expected_effective_model, "upstream-codex");
-        assert_eq!(update.attempt_timeout_seconds, 60);
-        assert_eq!(update.job_timeout_seconds, 300);
+        assert_eq!(update.attempt_timeout_seconds, 8);
+        assert_eq!(update.job_timeout_seconds, 30);
+    }
+
+    #[test]
+    fn account_policy_accepts_pending_capture_and_projects_readiness() {
+        let request: UpdateAccountTurnStatePolicyRequest = serde_json::from_value(json!({
+            "accountId": "acct_1",
+            "expectedIdentityRevision": 3,
+            "expectedRevision": 7,
+            "lockEnabled": true,
+            "captureEnabled": true,
+            "reuseWindowSeconds": 7200,
+            "captureProxyId": null,
+            "maxAttempts": 3,
+            "attemptTimeoutSeconds": 30,
+            "jobTimeoutSeconds": 8,
+            "backoffSeconds": 4,
+            "maxBackoffSeconds": 1,
+            "cooldownSeconds": 900
+        }))
+        .expect("pending capture policy is a valid saved intent");
+        let update = request.into_update();
+        assert!(update.lock_enabled);
+        assert!(update.capture_enabled);
+        assert_eq!(update.capture_proxy_id, None);
+        assert_eq!(update.attempt_timeout_seconds, 30);
+        assert_eq!(update.job_timeout_seconds, 8);
+
+        let data = AccountTurnStatePolicyData::from(AccountTurnStatePolicyView {
+            account_id: "acct_1".to_owned(),
+            identity_revision: 3,
+            config_revision: 8,
+            lock_enabled: true,
+            capture_enabled: true,
+            reuse_window_seconds: 7_200,
+            capture_proxy_id: None,
+            capture_proxy: None,
+            capture_policy: ModelTurnStateCapturePolicy {
+                max_attempts: 3,
+                attempt_timeout_seconds: 30,
+                job_timeout_seconds: 8,
+                backoff_seconds: 4,
+                max_backoff_seconds: 1,
+                cooldown_seconds: 900,
+            },
+        });
+        let value = serde_json::to_value(data).expect("serialize account policy");
+        assert_eq!(value["captureReadiness"], "waiting_proxy");
+        assert_eq!(value["lockEnabled"], true);
     }
 
     #[test]
@@ -163,6 +203,7 @@ mod turn_state {
                 effective_model: "codex-upstream".to_owned(),
                 identity_revision: 2,
                 config_revision: 7,
+                policy_revision: 3,
                 lock_enabled: true,
                 capture_enabled: true,
                 reuse_window_seconds: 3_600,
@@ -172,6 +213,7 @@ mod turn_state {
                     name: "Rotating".to_owned(),
                     endpoint: "socks5://proxy.example:823".to_owned(),
                     last_test_at: Some(now),
+                    ready: true,
                 }),
                 capture_policy: ModelTurnStateCapturePolicy {
                     max_attempts: 3,

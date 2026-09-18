@@ -211,6 +211,21 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
     .fetch_all(&second)
     .await
     .expect("load routing history columns");
+    let legacy_model_policy_columns = sqlx::query_scalar::<_, String>(
+        "select column_name from information_schema.columns
+         where table_schema = 'public'
+           and table_name = 'openai_model_turn_states'
+           and column_name in (
+             'lock_enabled', 'capture_enabled', 'reuse_window_seconds',
+             'capture_proxy_id', 'max_attempts', 'attempt_timeout_seconds',
+             'job_timeout_seconds', 'backoff_seconds', 'max_backoff_seconds',
+             'cooldown_seconds'
+           )
+         order by column_name",
+    )
+    .fetch_all(&second)
+    .await
+    .expect("check removed model policy columns");
     second.close().await;
 
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -236,6 +251,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "client_key_budget_windows",
             "client_key_charge_events",
             "model_requests",
+            "openai_account_turn_state_policies",
             "openai_model_turn_states",
             "openai_turn_states",
             "ops_events",
@@ -262,6 +278,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "routing_scope",
         ]
     );
+    assert!(legacy_model_policy_columns.is_empty());
 }
 
 #[test]

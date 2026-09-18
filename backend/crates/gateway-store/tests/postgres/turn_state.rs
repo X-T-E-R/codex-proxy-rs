@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::provider_ports::turn_state::{
-    ModelTurnStatePinAction, ModelTurnStateUpdate, TurnStateObservation, TurnStateStore,
-    TurnStateStoreError,
+    AccountTurnStatePolicyUpdate, ModelTurnStatePinAction, ModelTurnStateUpdate,
+    TurnStateObservation, TurnStateStore, TurnStateStoreError,
 };
 use gateway_core::task::DaemonTask;
 use gateway_store::postgres::{PgTurnStateStore, TurnStateObservationWriter};
@@ -128,33 +128,97 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     assert_eq!(initial.capture_policy.max_backoff_seconds, 4);
     assert_eq!(initial.capture_policy.cooldown_seconds, 900);
 
+    let initial_policy = store
+        .load_account_policy("acct_model_state")
+        .await
+        .expect("load account policy");
+    let lock_only = store
+        .update_account_policy(
+            "acct_model_state",
+            AccountTurnStatePolicyUpdate {
+                lock_enabled: true,
+                capture_proxy_id: None,
+                ..account_policy_update(&initial_policy)
+            },
+        )
+        .await
+        .expect("save pending lock intent before a pin exists");
+    assert!(
+        store
+            .model_observation_scope("acct_model_state", 1, "upstream-codex")
+            .is_some(),
+        "lock-only policy must adopt a valid state from ordinary traffic"
+    );
+    let waiting = store
+        .update_account_policy(
+            "acct_model_state",
+            AccountTurnStatePolicyUpdate {
+                capture_enabled: true,
+                capture_proxy_id: None,
+                ..account_policy_update(&lock_only)
+            },
+        )
+        .await
+        .expect("save permissive account policy while capture proxy is missing");
+    assert!(waiting.lock_enabled);
+    assert!(waiting.capture_enabled);
+    assert!(waiting.capture_proxy_id.is_none());
+    let configured_policy = store
+        .update_account_policy(
+            "acct_model_state",
+            AccountTurnStatePolicyUpdate {
+                capture_proxy_id: Some("proxy_capture".to_owned()),
+                ..account_policy_update(&waiting)
+            },
+        )
+        .await
+        .expect("attach tested capture proxy");
+    let pending = store
+        .load_model_state("acct_model_state", "public-codex")
+        .await
+        .expect("load model under account policy");
+    assert!(pending.lock_enabled);
+    assert!(pending.capture_enabled);
+    assert!(pending.pin.is_none());
+    assert_eq!(
+        store.active_model_pin("acct_model_state", 1, "upstream-codex"),
+        None,
+        "a pending lock must not synthesize or inject a value"
+    );
+    assert!(
+        store
+            .model_observation_scope("acct_model_state", 1, "upstream-codex")
+            .is_some(),
+        "normal HTTP traffic must observe the first state before proxy capture"
+    );
+
     let value = synthetic_fernet_candidate();
     let locked = store
         .update_model_state(
             "acct_model_state",
             "public-codex",
             ModelTurnStateUpdate {
-                expected_identity_revision: initial.identity_revision,
-                expected_effective_model: initial.effective_model.clone(),
-                lock_enabled: true,
-                capture_enabled: true,
-                reuse_window_seconds: 86_400,
-                capture_proxy_id: Some("proxy_capture".to_owned()),
-                max_attempts: 3,
-                attempt_timeout_seconds: 60,
-                job_timeout_seconds: 300,
-                backoff_seconds: 1,
-                max_backoff_seconds: 4,
-                cooldown_seconds: 900,
+                expected_identity_revision: pending.identity_revision,
+                expected_effective_model: pending.effective_model.clone(),
+                lock_enabled: configured_policy.lock_enabled,
+                capture_enabled: configured_policy.capture_enabled,
+                reuse_window_seconds: configured_policy.reuse_window_seconds,
+                capture_proxy_id: configured_policy.capture_proxy_id.clone(),
+                max_attempts: configured_policy.capture_policy.max_attempts,
+                attempt_timeout_seconds: configured_policy.capture_policy.attempt_timeout_seconds,
+                job_timeout_seconds: configured_policy.capture_policy.job_timeout_seconds,
+                backoff_seconds: configured_policy.capture_policy.backoff_seconds,
+                max_backoff_seconds: configured_policy.capture_policy.max_backoff_seconds,
+                cooldown_seconds: configured_policy.capture_policy.cooldown_seconds,
                 pin_action: ModelTurnStatePinAction::Replace,
                 value: Some(value.clone()),
-                expected_revision: initial.config_revision,
+                expected_revision: pending.config_revision,
             },
         )
         .await
         .expect("lock model pin");
-    assert_eq!(locked.capture_policy.attempt_timeout_seconds, 60);
-    assert_eq!(locked.capture_policy.job_timeout_seconds, 300);
+    assert_eq!(locked.capture_policy.attempt_timeout_seconds, 8);
+    assert_eq!(locked.capture_policy.job_timeout_seconds, 30);
     assert_eq!(
         store
             .active_model_pin("acct_model_state", 1, "upstream-codex")
@@ -171,49 +235,39 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
         Some(1_789_650_773)
     );
     assert!(!original.timestamp_verified);
-    let shortened = store
-        .update_model_state(
+    let shortened_policy = store
+        .update_account_policy(
             "acct_model_state",
-            "public-codex",
-            ModelTurnStateUpdate {
-                expected_identity_revision: locked.identity_revision,
-                expected_effective_model: locked.effective_model.clone(),
-                lock_enabled: true,
-                capture_enabled: true,
+            AccountTurnStatePolicyUpdate {
                 reuse_window_seconds: 60,
-                capture_proxy_id: Some("proxy_capture".to_owned()),
-                max_attempts: 3,
-                attempt_timeout_seconds: 60,
-                job_timeout_seconds: 300,
-                backoff_seconds: 1,
-                max_backoff_seconds: 4,
-                cooldown_seconds: 900,
-                pin_action: ModelTurnStatePinAction::Keep,
-                value: None,
-                expected_revision: locked.config_revision,
+                ..account_policy_update(&configured_policy)
             },
         )
         .await
-        .expect("shorten model pin reuse window");
+        .expect("shorten account reuse window");
+    let shortened = store
+        .load_model_state("acct_model_state", "public-codex")
+        .await
+        .expect("reload model with shorter account policy");
     let shortened_pin = shortened.pin.as_ref().expect("shortened pin");
     let expected_short_deadline = original
         .reuse_deadline
         .min(original.captured_at + Duration::seconds(60));
     assert_eq!(shortened_pin.captured_at, original.captured_at);
     assert_eq!(shortened_pin.reuse_deadline, expected_short_deadline);
-    let mut invalid_attempt_timeout = disabled_model_update(&shortened);
+    let mut invalid_attempt_timeout = account_policy_update(&shortened_policy);
     invalid_attempt_timeout.attempt_timeout_seconds = 61;
     assert!(matches!(
         store
-            .update_model_state("acct_model_state", "public-codex", invalid_attempt_timeout,)
+            .update_account_policy("acct_model_state", invalid_attempt_timeout)
             .await,
         Err(TurnStateStoreError::Invalid)
     ));
-    let mut invalid_job_timeout = disabled_model_update(&shortened);
+    let mut invalid_job_timeout = account_policy_update(&shortened_policy);
     invalid_job_timeout.job_timeout_seconds = 301;
     assert!(matches!(
         store
-            .update_model_state("acct_model_state", "public-codex", invalid_job_timeout,)
+            .update_account_policy("acct_model_state", invalid_job_timeout)
             .await,
         Err(TurnStateStoreError::Invalid)
     ));
@@ -552,34 +606,29 @@ async fn ordinary_observation_and_capture_are_fenced_by_a_concurrent_manual_repl
         .await
         .expect("initialize observation race store");
     let (writer_cancellation, writer_task) = start_writer(writer);
-    let initial = store
+    store
         .load_model_state("acct_observation_race", "gpt-5.4")
         .await
         .expect("load initial model state");
-    let configured = store
-        .update_model_state(
+    let initial_policy = store
+        .load_account_policy("acct_observation_race")
+        .await
+        .expect("load initial account policy");
+    store
+        .update_account_policy(
             "acct_observation_race",
-            "gpt-5.4",
-            ModelTurnStateUpdate {
-                expected_identity_revision: initial.identity_revision,
-                expected_effective_model: initial.effective_model.clone(),
-                lock_enabled: false,
+            AccountTurnStatePolicyUpdate {
                 capture_enabled: true,
-                reuse_window_seconds: initial.reuse_window_seconds,
                 capture_proxy_id: Some("proxy_observation_race".to_owned()),
-                max_attempts: initial.capture_policy.max_attempts,
-                attempt_timeout_seconds: initial.capture_policy.attempt_timeout_seconds,
-                job_timeout_seconds: initial.capture_policy.job_timeout_seconds,
-                backoff_seconds: initial.capture_policy.backoff_seconds,
-                max_backoff_seconds: initial.capture_policy.max_backoff_seconds,
-                cooldown_seconds: initial.capture_policy.cooldown_seconds,
-                pin_action: ModelTurnStatePinAction::Keep,
-                value: None,
-                expected_revision: initial.config_revision,
+                ..account_policy_update(&initial_policy)
             },
         )
         .await
         .expect("enable capture");
+    let configured = store
+        .load_model_state("acct_observation_race", "gpt-5.4")
+        .await
+        .expect("reload model under account capture policy");
     let observation_scope = store
         .model_observation_scope("acct_observation_race", 1, "gpt-5.4")
         .expect("empty configured scope accepts ordinary observation");
@@ -686,6 +735,109 @@ async fn ordinary_observation_and_capture_are_fenced_by_a_concurrent_manual_repl
 }
 
 #[tokio::test]
+async fn account_policy_observes_a_never_loaded_model_before_proxy_capture() {
+    let Some(database) = TestDatabase::create("model_turn_state_first_observation").await else {
+        return;
+    };
+    seed_account(&database.pool, "acct_first_observation", "openai").await;
+    let (store, writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize first observation store");
+    let (writer_cancellation, writer_task) = start_writer(writer);
+    let policy = store
+        .load_account_policy("acct_first_observation")
+        .await
+        .expect("load account policy");
+    let policy = store
+        .update_account_policy(
+            "acct_first_observation",
+            AccountTurnStatePolicyUpdate {
+                lock_enabled: true,
+                capture_enabled: true,
+                ..account_policy_update(&policy)
+            },
+        )
+        .await
+        .expect("enable account policy without opening a model");
+
+    let first_scope = store
+        .model_observation_scope("acct_first_observation", 1, "brand-new-292")
+        .expect("new effective model receives account-policy scope");
+    assert_eq!(first_scope.config_revision, 0);
+    assert_eq!(first_scope.policy_revision, policy.config_revision);
+    let valid = synthetic_fernet_candidate();
+    store.enqueue_observation(TurnStateObservation {
+        id: "obs_first_292".to_owned(),
+        account_id: "acct_first_observation".to_owned(),
+        request_id: None,
+        attempt_index: None,
+        value: valid.clone(),
+        observed_at: Utc::now(),
+        transport: "http".to_owned(),
+        upstream_response_id: None,
+        client_turn_id: None,
+        model_scope: Some(first_scope),
+    });
+    wait_for_model_pin(&store, "acct_first_observation", "brand-new-292").await;
+    assert_eq!(
+        store
+            .active_model_pin("acct_first_observation", 1, "brand-new-292")
+            .map(|pin| pin.value),
+        Some(valid)
+    );
+
+    let non292_scope = store
+        .model_observation_scope("acct_first_observation", 1, "brand-new-non292")
+        .expect("second new model receives independent scope");
+    assert_eq!(non292_scope.config_revision, 0);
+    store.enqueue_observation(TurnStateObservation {
+        id: "obs_first_non292".to_owned(),
+        account_id: "acct_first_observation".to_owned(),
+        request_id: None,
+        attempt_index: None,
+        value: "short".to_owned(),
+        observed_at: Utc::now(),
+        transport: "http".to_owned(),
+        upstream_response_id: None,
+        client_turn_id: None,
+        model_scope: Some(non292_scope),
+    });
+    for _ in 0..100 {
+        let requested: Option<bool> = sqlx::query_scalar(
+            "select capture_requested_at is not null
+               from openai_model_turn_states
+              where account_id = 'acct_first_observation'
+                and effective_model = 'brand-new-non292'",
+        )
+        .fetch_optional(&database.pool)
+        .await
+        .expect("load non-292 model row");
+        if requested == Some(true) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, bool>(
+            "select capture_requested_at is not null
+               from openai_model_turn_states
+              where account_id = 'acct_first_observation'
+                and effective_model = 'brand-new-non292'",
+        )
+        .fetch_one(&database.pool)
+        .await
+        .expect("non-292 model row exists"),
+        true
+    );
+    writer_cancellation.cancel();
+    writer_task
+        .await
+        .expect("writer task")
+        .expect("writer shutdown");
+    database.close().await;
+}
+
+#[tokio::test]
 async fn automatic_capture_candidates_page_past_the_first_sixty_four_scopes() {
     let Some(database) = TestDatabase::create("model_turn_state_candidate_cursor").await else {
         return;
@@ -700,12 +852,19 @@ async fn automatic_capture_candidates_page_past_the_first_sixty_four_scopes() {
     .execute(&database.pool)
     .await
     .expect("seed candidate proxy");
+    sqlx::query(
+        "insert into openai_account_turn_state_policies
+           (account_id, identity_revision, capture_enabled, capture_proxy_id)
+         values ('acct_candidate_cursor', 1, true, 'proxy_cursor')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed account capture policy");
     for index in 0..65 {
         sqlx::query(
             "insert into openai_model_turn_states
-               (account_id, identity_revision, effective_model, capture_enabled,
-                capture_proxy_id, capture_requested_at)
-             values ('acct_candidate_cursor', 1, $1, true, 'proxy_cursor', now())",
+               (account_id, identity_revision, effective_model, capture_requested_at)
+             values ('acct_candidate_cursor', 1, $1, now())",
         )
         .bind(format!("model-{index:03}"))
         .execute(&database.pool)
@@ -749,6 +908,25 @@ fn disabled_model_update(
         pin_action: ModelTurnStatePinAction::Keep,
         value: None,
         expected_revision: view.config_revision,
+    }
+}
+
+fn account_policy_update(
+    view: &gateway_core::provider_ports::turn_state::AccountTurnStatePolicyView,
+) -> AccountTurnStatePolicyUpdate {
+    AccountTurnStatePolicyUpdate {
+        expected_identity_revision: view.identity_revision,
+        expected_revision: view.config_revision,
+        lock_enabled: view.lock_enabled,
+        capture_enabled: view.capture_enabled,
+        reuse_window_seconds: view.reuse_window_seconds,
+        capture_proxy_id: view.capture_proxy_id.clone(),
+        max_attempts: view.capture_policy.max_attempts,
+        attempt_timeout_seconds: view.capture_policy.attempt_timeout_seconds,
+        job_timeout_seconds: view.capture_policy.job_timeout_seconds,
+        backoff_seconds: view.capture_policy.backoff_seconds,
+        max_backoff_seconds: view.capture_policy.max_backoff_seconds,
+        cooldown_seconds: view.capture_policy.cooldown_seconds,
     }
 }
 
@@ -1354,6 +1532,16 @@ async fn wait_for_observation(store: &PgTurnStateStore, account_id: &str, id: &s
     })
     .await
     .expect("observation persisted");
+}
+
+async fn wait_for_model_pin(store: &PgTurnStateStore, account_id: &str, model: &str) {
+    for _ in 0..100 {
+        if store.active_model_pin(account_id, 1, model).is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("model pin was not persisted in time");
 }
 
 async fn wait_for_response_id(store: &PgTurnStateStore, account_id: &str, response_id: &str) {

@@ -2455,6 +2455,7 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
         identity_revision: 1,
         effective_model: "gpt-5.4".to_owned(),
         config_revision: 11,
+        policy_revision: 1,
     });
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -4570,6 +4571,7 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
         identity_revision: 1,
         effective_model: "gpt-5.4".to_owned(),
         config_revision: 7,
+        policy_revision: 1,
     });
     turn_state
         .overrides

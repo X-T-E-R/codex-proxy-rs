@@ -99,6 +99,7 @@ impl ModelTurnStateCaptureManager {
         account_id: &ProviderAccountId,
         requested_model: &str,
         expected_revision: u64,
+        expected_policy_revision: u64,
         expected_identity_revision: u64,
         expected_effective_model: &str,
     ) -> Result<ModelTurnStateCaptureJob, AdminError> {
@@ -109,6 +110,7 @@ impl ModelTurnStateCaptureManager {
             .await
             .map_err(map_store_error)?;
         if view.config_revision != expected_revision
+            || view.policy_revision != expected_policy_revision
             || view.identity_revision != expected_identity_revision
             || view.effective_model != expected_effective_model
         {
@@ -197,18 +199,38 @@ impl ModelTurnStateCaptureManager {
         }
     }
 
+    pub(crate) async fn cancel_account(&self, account_id: &str) {
+        let job_id = lock(&self.inner.state)
+            .active_accounts
+            .get(account_id)
+            .cloned();
+        if let Some(job_id) = job_id {
+            let _ = self.cancel(&job_id).await;
+        }
+    }
+
     pub(crate) async fn capture_proxy(
         &self,
         view: &ModelTurnStateView,
     ) -> Option<gateway_core::provider_ports::turn_state::ModelTurnStateCaptureProxy> {
-        let id = view.capture_proxy_id.as_deref()?;
+        self.capture_proxy_by_id(view.capture_proxy_id.as_deref())
+            .await
+    }
+
+    pub(crate) async fn capture_proxy_by_id(
+        &self,
+        id: Option<&str>,
+    ) -> Option<gateway_core::provider_ports::turn_state::ModelTurnStateCaptureProxy> {
+        let id = id?;
         let record = self.inner.proxies.get(id).await.ok()?;
+        let ready = validate_proxy(&record).is_ok();
         Some(
             gateway_core::provider_ports::turn_state::ModelTurnStateCaptureProxy {
                 id: record.id,
                 name: record.name,
                 endpoint: safe_proxy_endpoint(&record.proxy),
                 last_test_at: record.last_test_at,
+                ready,
             },
         )
     }
@@ -550,7 +572,16 @@ impl ModelTurnStateCaptureManager {
             .flatten();
         lock(&self.inner.state).scan_cursor = next_cursor;
         for scope in scopes {
-            let _ = self.enqueue(scope, false).await;
+            let account_id = scope.account_id.clone();
+            let effective_model = scope.effective_model.clone();
+            if let Err(error) = self.enqueue(scope, false).await {
+                tracing::debug!(
+                    account_id,
+                    effective_model,
+                    reason = error.message(),
+                    "automatic model turn state capture is waiting for prerequisites"
+                );
+            }
         }
     }
 }
@@ -610,6 +641,7 @@ fn scope_from_view(view: &ModelTurnStateView) -> ModelTurnStateCaptureScope {
         effective_model: view.effective_model.clone(),
         identity_revision: view.identity_revision,
         config_revision: view.config_revision,
+        policy_revision: view.policy_revision,
         capture_enabled: view.capture_enabled,
         capture_proxy_id: view.capture_proxy_id.clone(),
         capture_policy: view.capture_policy.clone(),
@@ -674,6 +706,10 @@ fn trim_finished(state: &mut State) {
 fn map_store_error(error: TurnStateStoreError) -> AdminError {
     match error {
         TurnStateStoreError::Invalid => AdminError::invalid("Turn State 配置无效"),
+        TurnStateStoreError::CaptureProxyRequired => AdminError::invalid("请先选择捕获代理"),
+        TurnStateStoreError::CaptureProxyNotReady => {
+            AdminError::conflict("捕获代理需要在 24 小时内测试成功")
+        }
         TurnStateStoreError::NotFound => AdminError::not_found("OpenAI 账号不存在"),
         TurnStateStoreError::Conflict => AdminError::conflict("Turn State 已变化，请刷新后重试"),
         TurnStateStoreError::Unavailable => AdminError::unavailable("Turn State 服务暂不可用"),

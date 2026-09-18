@@ -54,6 +54,7 @@ pub enum ModelTurnStatePinAction {
 pub struct ModelTurnStateUpdate {
     pub expected_identity_revision: u64,
     pub expected_effective_model: String,
+    /// 账号策略已迁到独立端点；这些字段仅保留旧管理客户端的 wire 兼容，Store 不采用。
     pub lock_enabled: bool,
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
@@ -91,6 +92,45 @@ impl std::fmt::Debug for ModelTurnStateUpdate {
             .field("pin_action", &self.pin_action)
             .field("value", &self.value.as_ref().map(|_| "<redacted>"))
             .field("expected_revision", &self.expected_revision)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountTurnStatePolicyUpdate {
+    pub expected_identity_revision: u64,
+    pub expected_revision: u64,
+    pub lock_enabled: bool,
+    pub capture_enabled: bool,
+    pub reuse_window_seconds: u32,
+    pub capture_proxy_id: Option<String>,
+    pub max_attempts: u8,
+    pub attempt_timeout_seconds: u16,
+    pub job_timeout_seconds: u16,
+    pub backoff_seconds: u8,
+    pub max_backoff_seconds: u8,
+    pub cooldown_seconds: u32,
+}
+
+impl std::fmt::Debug for AccountTurnStatePolicyUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AccountTurnStatePolicyUpdate")
+            .field(
+                "expected_identity_revision",
+                &self.expected_identity_revision,
+            )
+            .field("expected_revision", &self.expected_revision)
+            .field("lock_enabled", &self.lock_enabled)
+            .field("capture_enabled", &self.capture_enabled)
+            .field("reuse_window_seconds", &self.reuse_window_seconds)
+            .field("capture_proxy_id", &self.capture_proxy_id)
+            .field("max_attempts", &self.max_attempts)
+            .field("attempt_timeout_seconds", &self.attempt_timeout_seconds)
+            .field("job_timeout_seconds", &self.job_timeout_seconds)
+            .field("backoff_seconds", &self.backoff_seconds)
+            .field("max_backoff_seconds", &self.max_backoff_seconds)
+            .field("cooldown_seconds", &self.cooldown_seconds)
             .finish()
     }
 }
@@ -152,6 +192,7 @@ pub struct ModelTurnStateView {
     pub effective_model: String,
     pub identity_revision: u64,
     pub config_revision: u64,
+    pub policy_revision: u64,
     pub lock_enabled: bool,
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
@@ -164,11 +205,25 @@ pub struct ModelTurnStateView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountTurnStatePolicyView {
+    pub account_id: String,
+    pub identity_revision: u64,
+    pub config_revision: u64,
+    pub lock_enabled: bool,
+    pub capture_enabled: bool,
+    pub reuse_window_seconds: u32,
+    pub capture_proxy_id: Option<String>,
+    pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
+    pub capture_policy: ModelTurnStateCapturePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelTurnStateCaptureProxy {
     pub id: String,
     pub name: String,
     pub endpoint: String,
     pub last_test_at: Option<DateTime<Utc>>,
+    pub ready: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +233,7 @@ pub struct ModelTurnStateCaptureScope {
     pub effective_model: String,
     pub identity_revision: u64,
     pub config_revision: u64,
+    pub policy_revision: u64,
     pub capture_enabled: bool,
     pub capture_proxy_id: Option<String>,
     pub capture_policy: ModelTurnStateCapturePolicy,
@@ -196,6 +252,7 @@ pub struct ModelTurnStateObservationScope {
     pub identity_revision: u64,
     pub effective_model: String,
     pub config_revision: u64,
+    pub policy_revision: u64,
 }
 
 impl ModelTurnStateCaptureScope {
@@ -230,6 +287,8 @@ impl std::fmt::Debug for ActiveModelTurnStatePin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnStateStoreError {
     Invalid,
+    CaptureProxyRequired,
+    CaptureProxyNotReady,
     NotFound,
     Conflict,
     Unavailable,
@@ -247,7 +306,7 @@ pub struct TurnStateObservation {
     pub transport: String,
     pub upstream_response_id: Option<String>,
     pub client_turn_id: Option<String>,
-    /// 仅当普通 HTTP Responses 请求没有注入有效模型锁时设置。
+    /// 普通 HTTP Responses 请求没有注入有效模型锁，且账号启用锁定或捕获时设置。
     pub model_scope: Option<ModelTurnStateObservationScope>,
 }
 
@@ -357,6 +416,21 @@ pub trait TurnStateStore: Send + Sync {
         _account_id: &str,
         _requested_model: &str,
     ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    async fn load_account_policy(
+        &self,
+        _account_id: &str,
+    ) -> Result<AccountTurnStatePolicyView, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
+    async fn update_account_policy(
+        &self,
+        _account_id: &str,
+        _update: AccountTurnStatePolicyUpdate,
+    ) -> Result<AccountTurnStatePolicyView, TurnStateStoreError> {
         Err(TurnStateStoreError::Unavailable)
     }
 

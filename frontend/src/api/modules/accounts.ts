@@ -303,6 +303,7 @@ export interface AccountModelTurnStateResponse {
   effectiveModel: string
   identityRevision: number
   configRevision: number
+  policyRevision: number
   lockEnabled: boolean
   captureEnabled: boolean
   reuseWindowSeconds: number
@@ -312,6 +313,7 @@ export interface AccountModelTurnStateResponse {
     name: string
     endpoint: string
     lastTestAt: string | null
+    ready: boolean
   }
   capturePolicy: ModelTurnStateCapturePolicy
   pin: null | {
@@ -337,6 +339,25 @@ export interface AccountModelTurnStateResponse {
     willApplyWhenModelPinUnavailable: boolean
   }
   capture: ModelTurnStateCaptureJob | null
+}
+
+export interface AccountTurnStatePolicyResponse {
+  accountId: string
+  identityRevision: number
+  configRevision: number
+  lockEnabled: boolean
+  captureEnabled: boolean
+  reuseWindowSeconds: number
+  captureProxyId: string | null
+  captureProxy: null | {
+    id: string
+    name: string
+    endpoint: string
+    lastTestAt: string | null
+    ready: boolean
+  }
+  captureReadiness: 'disabled' | 'waiting_proxy' | 'proxy_not_ready' | 'ready'
+  capturePolicy: ModelTurnStateCapturePolicy
 }
 
 export interface AccountUpdateResponse {
@@ -396,6 +417,13 @@ interface AccountModelTurnStateUpdateParam extends AccountModelTurnStateParam {
   expectedRevision: number
   expectedIdentityRevision: number
   expectedEffectiveModel: string
+  pinAction: 'keep' | 'replace' | 'clear' | 'invalidate'
+  value?: string
+}
+
+interface AccountTurnStatePolicyUpdateParam extends AccountIdParam {
+  expectedIdentityRevision: number
+  expectedRevision: number
   lockEnabled: boolean
   captureEnabled: boolean
   reuseWindowSeconds: number
@@ -406,8 +434,6 @@ interface AccountModelTurnStateUpdateParam extends AccountModelTurnStateParam {
   backoffSeconds: number
   maxBackoffSeconds: number
   cooldownSeconds: number
-  pinAction: 'keep' | 'replace' | 'clear' | 'invalidate'
-  value?: string
 }
 
 interface AccountResetCreditConsumeParam extends AccountIdParam {
@@ -514,6 +540,22 @@ export function getAccountModelTurnState(params: AccountModelTurnStateParam) {
   })
 }
 
+export function getAccountTurnStatePolicy(params: AccountIdParam) {
+  return request<AccountTurnStatePolicyResponse>({
+    url: '/api/admin/accounts/turn-state/policy',
+    method: 'GET',
+    params,
+  })
+}
+
+export function updateAccountTurnStatePolicy(data: AccountTurnStatePolicyUpdateParam) {
+  return request<AccountTurnStatePolicyResponse>({
+    url: '/api/admin/accounts/turn-state/policy/update',
+    method: 'POST',
+    data,
+  })
+}
+
 export function updateAccountModelTurnState(data: AccountModelTurnStateUpdateParam) {
   return request<AccountModelTurnStateResponse>({
     url: '/api/admin/accounts/turn-state/model/update',
@@ -524,6 +566,7 @@ export function updateAccountModelTurnState(data: AccountModelTurnStateUpdatePar
 
 export function startAccountModelTurnStateCapture(data: AccountModelTurnStateParam & {
   expectedRevision: number
+  expectedPolicyRevision: number
   expectedIdentityRevision: number
   expectedEffectiveModel: string
 }) {

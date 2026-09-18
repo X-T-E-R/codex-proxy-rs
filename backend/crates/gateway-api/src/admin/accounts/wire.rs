@@ -5,7 +5,8 @@ use gateway_admin::model::accounts::{
     ModelTurnStateCaptureJob, ModelTurnStateCaptureStatus, ModelTurnStateResult,
 };
 use gateway_core::provider_ports::turn_state::{
-    ModelTurnStatePinAction, ModelTurnStateUpdate, TurnStateView,
+    AccountTurnStatePolicyUpdate, AccountTurnStatePolicyView, ModelTurnStatePinAction,
+    ModelTurnStateUpdate, TurnStateView,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,6 +22,7 @@ pub struct StartModelTurnStateCaptureRequest {
     pub account_id: String,
     pub model: String,
     pub expected_revision: u64,
+    pub expected_policy_revision: u64,
     pub expected_identity_revision: u64,
     pub expected_effective_model: String,
 }
@@ -65,6 +67,58 @@ pub struct UpdateModelTurnStateRequest {
     pub expected_revision: u64,
     pub expected_identity_revision: u64,
     pub expected_effective_model: String,
+    #[serde(default)]
+    pub lock_enabled: Option<bool>,
+    #[serde(default)]
+    pub capture_enabled: Option<bool>,
+    #[serde(default)]
+    pub reuse_window_seconds: Option<u32>,
+    #[serde(default)]
+    pub capture_proxy_id: Option<String>,
+    #[serde(default)]
+    pub max_attempts: Option<u8>,
+    #[serde(default)]
+    pub attempt_timeout_seconds: Option<u16>,
+    #[serde(default)]
+    pub job_timeout_seconds: Option<u16>,
+    #[serde(default)]
+    pub backoff_seconds: Option<u8>,
+    #[serde(default)]
+    pub max_backoff_seconds: Option<u8>,
+    #[serde(default)]
+    pub cooldown_seconds: Option<u32>,
+    pub pin_action: ModelTurnStatePinActionWire,
+    pub value: Option<String>,
+}
+
+impl UpdateModelTurnStateRequest {
+    pub fn into_update(self) -> ModelTurnStateUpdate {
+        ModelTurnStateUpdate {
+            expected_identity_revision: self.expected_identity_revision,
+            expected_effective_model: self.expected_effective_model,
+            lock_enabled: self.lock_enabled.unwrap_or(false),
+            capture_enabled: self.capture_enabled.unwrap_or(false),
+            reuse_window_seconds: self.reuse_window_seconds.unwrap_or(7_200),
+            capture_proxy_id: self.capture_proxy_id,
+            max_attempts: self.max_attempts.unwrap_or(3),
+            attempt_timeout_seconds: self.attempt_timeout_seconds.unwrap_or(8),
+            job_timeout_seconds: self.job_timeout_seconds.unwrap_or(30),
+            backoff_seconds: self.backoff_seconds.unwrap_or(1),
+            max_backoff_seconds: self.max_backoff_seconds.unwrap_or(4),
+            cooldown_seconds: self.cooldown_seconds.unwrap_or(900),
+            pin_action: self.pin_action.into(),
+            value: self.value,
+            expected_revision: self.expected_revision,
+        }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateAccountTurnStatePolicyRequest {
+    pub account_id: String,
+    pub expected_identity_revision: u64,
+    pub expected_revision: u64,
     pub lock_enabled: bool,
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
@@ -75,15 +129,13 @@ pub struct UpdateModelTurnStateRequest {
     pub backoff_seconds: u8,
     pub max_backoff_seconds: u8,
     pub cooldown_seconds: u32,
-    pub pin_action: ModelTurnStatePinActionWire,
-    pub value: Option<String>,
 }
 
-impl UpdateModelTurnStateRequest {
-    pub fn into_update(self) -> ModelTurnStateUpdate {
-        ModelTurnStateUpdate {
+impl UpdateAccountTurnStatePolicyRequest {
+    pub fn into_update(self) -> AccountTurnStatePolicyUpdate {
+        AccountTurnStatePolicyUpdate {
             expected_identity_revision: self.expected_identity_revision,
-            expected_effective_model: self.expected_effective_model,
+            expected_revision: self.expected_revision,
             lock_enabled: self.lock_enabled,
             capture_enabled: self.capture_enabled,
             reuse_window_seconds: self.reuse_window_seconds,
@@ -94,9 +146,6 @@ impl UpdateModelTurnStateRequest {
             backoff_seconds: self.backoff_seconds,
             max_backoff_seconds: self.max_backoff_seconds,
             cooldown_seconds: self.cooldown_seconds,
-            pin_action: self.pin_action.into(),
-            value: self.value,
-            expected_revision: self.expected_revision,
         }
     }
 }
@@ -109,6 +158,7 @@ pub struct ModelTurnStateData {
     effective_model: String,
     identity_revision: u64,
     config_revision: u64,
+    policy_revision: u64,
     lock_enabled: bool,
     capture_enabled: bool,
     reuse_window_seconds: u32,
@@ -127,6 +177,7 @@ struct ModelTurnStateCaptureProxyData {
     name: String,
     endpoint: String,
     last_test_at: Option<DateTime<Utc>>,
+    ready: bool,
 }
 
 #[derive(Serialize)]
@@ -138,6 +189,62 @@ struct ModelTurnStateCapturePolicyData {
     backoff_seconds: u8,
     max_backoff_seconds: u8,
     cooldown_seconds: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTurnStatePolicyData {
+    account_id: String,
+    identity_revision: u64,
+    config_revision: u64,
+    lock_enabled: bool,
+    capture_enabled: bool,
+    reuse_window_seconds: u32,
+    capture_proxy_id: Option<String>,
+    capture_proxy: Option<ModelTurnStateCaptureProxyData>,
+    capture_readiness: &'static str,
+    capture_policy: ModelTurnStateCapturePolicyData,
+}
+
+impl From<AccountTurnStatePolicyView> for AccountTurnStatePolicyData {
+    fn from(view: AccountTurnStatePolicyView) -> Self {
+        let capture_readiness = if !view.capture_enabled {
+            "disabled"
+        } else if view.capture_proxy_id.is_none() {
+            "waiting_proxy"
+        } else if view.capture_proxy.as_ref().is_some_and(|proxy| proxy.ready) {
+            "ready"
+        } else {
+            "proxy_not_ready"
+        };
+        Self {
+            account_id: view.account_id,
+            identity_revision: view.identity_revision,
+            config_revision: view.config_revision,
+            lock_enabled: view.lock_enabled,
+            capture_enabled: view.capture_enabled,
+            reuse_window_seconds: view.reuse_window_seconds,
+            capture_proxy_id: view.capture_proxy_id,
+            capture_proxy: view
+                .capture_proxy
+                .map(|proxy| ModelTurnStateCaptureProxyData {
+                    id: proxy.id,
+                    name: proxy.name,
+                    endpoint: proxy.endpoint,
+                    last_test_at: proxy.last_test_at,
+                    ready: proxy.ready,
+                }),
+            capture_readiness,
+            capture_policy: ModelTurnStateCapturePolicyData {
+                max_attempts: view.capture_policy.max_attempts,
+                attempt_timeout_seconds: view.capture_policy.attempt_timeout_seconds,
+                job_timeout_seconds: view.capture_policy.job_timeout_seconds,
+                backoff_seconds: view.capture_policy.backoff_seconds,
+                max_backoff_seconds: view.capture_policy.max_backoff_seconds,
+                cooldown_seconds: view.capture_policy.cooldown_seconds,
+            },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -183,6 +290,7 @@ impl From<ModelTurnStateResult> for ModelTurnStateData {
             effective_model: view.effective_model,
             identity_revision: view.identity_revision,
             config_revision: view.config_revision,
+            policy_revision: view.policy_revision,
             lock_enabled: view.lock_enabled,
             capture_enabled: view.capture_enabled,
             reuse_window_seconds: view.reuse_window_seconds,
@@ -194,6 +302,7 @@ impl From<ModelTurnStateResult> for ModelTurnStateData {
                     name: proxy.name,
                     endpoint: proxy.endpoint,
                     last_test_at: proxy.last_test_at,
+                    ready: proxy.ready,
                 }),
             capture_policy: ModelTurnStateCapturePolicyData {
                 max_attempts: view.capture_policy.max_attempts,
