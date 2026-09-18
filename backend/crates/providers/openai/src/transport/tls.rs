@@ -21,7 +21,28 @@ type PemSection = (SectionKind, Vec<u8>);
 pub fn ensure_rustls_provider() {
     static INSTALL: OnceLock<()> = OnceLock::new();
     INSTALL.get_or_init(|| {
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        if rustls::crypto::CryptoProvider::get_default().is_some() {
+            return;
+        }
+        let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+        // 安全补丁新增的 ML-DSA 声明不在已采样的 Codex ClientHello 中。
+        // 保留原有协商集合与证书校验；映射仅在进程首次安装 provider 时分配。
+        let mapping = provider
+            .signature_verification_algorithms
+            .mapping
+            .iter()
+            .copied()
+            .filter(|(scheme, _)| {
+                !matches!(
+                    scheme,
+                    rustls::SignatureScheme::ML_DSA_44
+                        | rustls::SignatureScheme::ML_DSA_65
+                        | rustls::SignatureScheme::ML_DSA_87
+                )
+            })
+            .collect::<Vec<_>>();
+        provider.signature_verification_algorithms.mapping = Box::leak(mapping.into_boxed_slice());
+        let _ = provider.install_default();
     });
 }
 
