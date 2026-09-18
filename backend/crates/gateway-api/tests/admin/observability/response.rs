@@ -1289,7 +1289,13 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
     assert!(value["data"]["items"][0].get("metadata").is_none());
     assert_eq!(
         value["data"]["items"][0]["turnState"],
-        json!({"classification": "notApplicable", "bytes": null})
+        json!({
+            "classification": "notApplicable",
+            "bytes": null,
+            "relation": "neither",
+            "sentBytes": null,
+            "returnedBytes": null
+        })
     );
     assert!(
         value["data"]["items"][0]["turnState"]
