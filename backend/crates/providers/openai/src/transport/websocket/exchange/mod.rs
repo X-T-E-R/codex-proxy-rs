@@ -4,15 +4,20 @@ mod io;
 mod reducer;
 mod stream;
 
-use std::{pin::Pin, sync::Arc};
+use std::{
+    collections::VecDeque,
+    pin::Pin,
+    sync::{Arc, Mutex as StdMutex},
+};
 
 use bytes::Bytes;
 use futures::Stream;
 use gateway_core::provider_ports::turn_state::{
-    ModelTurnStateObservationScope, TurnStateObservation, TurnStateSent, TurnStateStore,
+    MODEL_TURN_STATE_BYTES, ModelTurnStateObservationScope, TurnStateObservation, TurnStateSent,
+    TurnStateStore,
 };
 use gateway_protocol::openai::events::ParsedRateLimits;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
 use crate::transport::{
@@ -27,6 +32,7 @@ use super::pool::{CodexWebSocketConnectionMetadata, WebSocketPoolDecision};
 
 const WEBSOCKET_STREAM_BUFFER: usize = 16;
 const WEBSOCKET_TURN_STATE_OBSERVATION_BUFFER: usize = 32;
+const TURN_STATE_UPDATE_BUFFER: usize = 32;
 
 pub(super) use self::stream::{WebSocketStreamPoolReturn, stream_websocket_response};
 
@@ -64,8 +70,72 @@ pub type CodexWebSocketSseStream =
 /// live 流中的结构化限流动态更新。
 pub type CodexWebSocketRateLimitUpdates = Arc<Mutex<Vec<ParsedRateLimits>>>;
 /// live 流中的 turn state 动态更新。
-pub type CodexWebSocketTurnStateUpdate = Arc<Mutex<Option<String>>>;
+pub type CodexWebSocketTurnStateUpdate = Arc<CodexWebSocketTurnStateUpdateSlot>;
 pub type CodexWebSocketTurnStateObservations = Arc<Mutex<Vec<CodexObservedTurnState>>>;
+
+pub struct CodexWebSocketTurnStateUpdateSlot {
+    pending: StdMutex<VecDeque<String>>,
+    notification: Notify,
+}
+
+impl CodexWebSocketTurnStateUpdateSlot {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: StdMutex::new(VecDeque::new()),
+            notification: Notify::new(),
+        }
+    }
+
+    pub(crate) fn publish(&self, value: String) {
+        {
+            let mut pending = self
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pending.len() == TURN_STATE_UPDATE_BUFFER {
+                let removable = pending
+                    .iter()
+                    .position(|value| value.len() == MODEL_TURN_STATE_BYTES)
+                    .unwrap_or(0);
+                pending.remove(removable);
+            }
+            pending.push_back(value);
+        }
+        self.notification.notify_one();
+    }
+
+    pub(crate) fn drain(&self) -> Vec<String> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+            .collect()
+    }
+
+    #[doc(hidden)]
+    pub fn snapshot(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .front()
+            .cloned()
+    }
+
+    pub(crate) async fn wait_until_pending(&self) {
+        loop {
+            let notified = self.notification.notified();
+            if !self
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct CodexWebSocketTurnStateObserver {

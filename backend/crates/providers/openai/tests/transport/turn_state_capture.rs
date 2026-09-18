@@ -1,7 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use gateway_core::account::OutboundProxy;
-use provider_openai::transport::{CodexBackendClient, build_fresh_capture_http_client};
+use provider_openai::transport::{
+    CodexBackendClient, CodexTurnStateCaptureError, build_fresh_capture_http_client,
+};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -21,7 +23,8 @@ async fn capture_returns_on_header_drops_body_and_uses_fresh_proxy_connections()
         async move {
             for _ in 0..2 {
                 let (mut stream, _) = listener.accept().await.expect("accept fresh connection");
-                read_http_request(&mut stream).await;
+                let request = read_http_request(&mut stream).await;
+                assert_capture_probe_has_no_turn_state(&request);
                 let value = "H".repeat(292);
                 stream
                     .write_all(
@@ -77,7 +80,8 @@ async fn capture_returns_on_first_sse_state_event_without_terminal_body() {
     );
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept request");
-        read_http_request(&mut stream).await;
+        let request = read_http_request(&mut stream).await;
+        assert_capture_probe_has_no_turn_state(&request);
         stream
             .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n")
             .await
@@ -113,7 +117,48 @@ async fn capture_returns_on_first_sse_state_event_without_terminal_body() {
     server.abort();
 }
 
-async fn read_http_request(stream: &mut TcpStream) {
+#[tokio::test]
+async fn capture_rejects_a_turn_state_header_from_a_failed_http_response() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("upstream address")
+    );
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept request");
+        let request = read_http_request(&mut stream).await;
+        assert_capture_probe_has_no_turn_state(&request);
+        let value = "F".repeat(292);
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nx-codex-turn-state: {value}\r\ncontent-length: 2\r\n\r\n{{}}"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("write failed response");
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("HTTP client");
+    let backend = CodexBackendClient::new(client, base_url, test_wire_profile());
+    let error = backend
+        .capture_turn_state_http_sse(
+            &codex_request("gpt-test", "", Vec::new()),
+            request_context("capture-failed-status", Some("chatgpt-account")),
+        )
+        .await
+        .expect_err("failed status must reject its state header");
+    assert_eq!(error, CodexTurnStateCaptureError::Upstream);
+    server.await.expect("upstream server");
+}
+
+async fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
     let header_end = loop {
@@ -139,4 +184,27 @@ async fn read_http_request(stream: &mut TcpStream) {
         assert!(count > 0, "request closed before body");
         bytes.extend_from_slice(&buffer[..count]);
     }
+    bytes
+}
+
+fn assert_capture_probe_has_no_turn_state(request: &[u8]) {
+    let header_end = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .expect("capture request header terminator");
+    let headers = String::from_utf8_lossy(&request[..header_end]);
+    assert!(
+        headers.lines().all(|line| {
+            line.split_once(':')
+                .is_none_or(|(name, _)| !name.eq_ignore_ascii_case("x-codex-turn-state"))
+        }),
+        "capture probe must not send a turn-state header"
+    );
+    let body = zstd::stream::decode_all(std::io::Cursor::new(&request[header_end..]))
+        .expect("decode capture probe body");
+    let body: serde_json::Value = serde_json::from_slice(&body).expect("capture probe JSON");
+    assert_eq!(body.get("turn_state"), None);
+    assert_eq!(body.get("x-codex-turn-state"), None);
+    assert_eq!(body.pointer("/client_metadata/x-codex-turn-state"), None);
 }

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -34,7 +34,8 @@ use gateway_core::operation::{
 };
 use gateway_core::provider_ports::ProviderSessionAffinityKey;
 use gateway_core::provider_ports::turn_state::{
-    ModelTurnStateObservationScope, TurnStateObservation, TurnStateStore,
+    ModelTurnStateCaptureCoordinator, ModelTurnStateCaptureRequest, ModelTurnStateMissingAction,
+    ModelTurnStateObservationScope, TurnStateObservation, TurnStateStore, valid_model_turn_state,
 };
 use gateway_core::routing::{
     ModelCapabilities, ModelPresentation, ProviderCandidate, ProviderCatalogGeneration,
@@ -159,6 +160,7 @@ pub struct CodexProvider {
     session_transport_recovery: CodexSessionTransportRecovery,
     request_body_override: CodexRequestBodyOverrideState,
     turn_state_store: Option<Arc<dyn TurnStateStore>>,
+    turn_state_capture: Arc<RwLock<Option<Arc<dyn ModelTurnStateCaptureCoordinator>>>>,
     stream_max_retries: u32,
 }
 
@@ -203,6 +205,7 @@ impl CodexProvider {
                 gateway_core::provider_ports::OpenAiRequestBodyOverride::disabled(),
             ),
             turn_state_store: None,
+            turn_state_capture: Arc::new(RwLock::new(None)),
             stream_max_retries,
         })
     }
@@ -225,6 +228,23 @@ impl CodexProvider {
         self.client = self.client.with_turn_state_store(store.clone());
         self.turn_state_store = store;
         self
+    }
+
+    #[doc(hidden)]
+    pub fn set_turn_state_capture_coordinator(
+        &self,
+        coordinator: Option<Arc<dyn ModelTurnStateCaptureCoordinator>>,
+    ) {
+        if let Ok(mut current) = self.turn_state_capture.write() {
+            *current = coordinator;
+        }
+    }
+
+    fn turn_state_capture_coordinator(&self) -> Option<Arc<dyn ModelTurnStateCaptureCoordinator>> {
+        self.turn_state_capture
+            .read()
+            .ok()
+            .and_then(|current| current.clone())
     }
 }
 
@@ -379,15 +399,19 @@ impl Provider for CodexProvider {
         if let Some(identity) = &self.session_identity {
             identity.prepare_local_conversation(&mut upstream_request);
         }
+        let mut managed_session_fallback = false;
         if let Some(previous_session) = previous_session.as_ref() {
             upstream_request.turn_state = if same_client_turn(
                 previous_session.client_turn_id.as_deref(),
                 upstream_request.client_turn_id.as_deref(),
             ) {
-                upstream_request
-                    .turn_state
-                    .take()
-                    .or_else(|| previous_session.turn_state.clone())
+                match upstream_request.turn_state.take() {
+                    Some(value) => Some(value),
+                    None => {
+                        managed_session_fallback = previous_session.managed_model_turn_state;
+                        previous_session.turn_state.clone()
+                    }
+                }
             } else {
                 None
             };
@@ -527,13 +551,49 @@ impl Provider for CodexProvider {
             requested_transport
         };
         apply_transport(&mut upstream_request, transport);
-        let model_pin = self.turn_state_store.as_ref().and_then(|store| {
-            store.active_model_pin(
-                lease.account_id().as_str(),
-                lease.account().identity_revision().get(),
-                upstream_model.as_str(),
-            )
+        let account_id = lease.account_id().as_str();
+        let identity_revision = lease.account().identity_revision().get();
+        let missing_policy = self
+            .turn_state_store
+            .as_ref()
+            .and_then(|store| store.model_missing_state_policy(account_id, identity_revision));
+        let mut model_pin = self.turn_state_store.as_ref().and_then(|store| {
+            store.active_model_pin(account_id, identity_revision, upstream_model.as_str())
         });
+        let capture_request = ModelTurnStateCaptureRequest {
+            account_id: account_id.to_owned(),
+            requested_model: upstream_model.as_str().to_owned(),
+            identity_revision,
+            effective_model: upstream_model.as_str().to_owned(),
+        };
+        if model_pin.is_none()
+            && managed_session_fallback
+            && missing_policy.is_some_and(|policy| policy.lock_enabled)
+        {
+            upstream_request.turn_state = None;
+            upstream_request
+                .passthrough_headers
+                .remove("x-codex-turn-state");
+        }
+        if model_pin.is_none()
+            && missing_policy.is_some_and(|policy| {
+                policy.lock_enabled
+                    && policy.capture_enabled
+                    && policy.action == ModelTurnStateMissingAction::CaptureFirst
+            })
+        {
+            let coordinator = self.turn_state_capture_coordinator().ok_or_else(|| {
+                provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
+            })?;
+            model_pin = Some(
+                coordinator
+                    .capture_for_request(capture_request.clone())
+                    .await
+                    .map_err(|_| {
+                        provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
+                    })?,
+            );
+        }
         if model_pin.is_none()
             && let Some(store) = self.turn_state_store.as_ref()
         {
@@ -565,6 +625,16 @@ impl Provider for CodexProvider {
                 })
                 .flatten()
         });
+        let missing_turn_state_capture = (model_pin.is_none()
+            && missing_policy.is_some_and(|policy| {
+                policy.lock_enabled
+                    && policy.capture_enabled
+                    && policy.action == ModelTurnStateMissingAction::NaturalThenCapture
+            }))
+        .then(|| MissingTurnStateCapture {
+            coordinator: self.turn_state_capture_coordinator(),
+            request: capture_request,
+        });
         let turn_state = model_pin.map(|pin| pin.value);
         if let Some(value) = turn_state {
             upstream_request.turn_state = Some(value);
@@ -592,6 +662,7 @@ impl Provider for CodexProvider {
                 conversation_id: upstream_request.local_conversation_id.clone(),
                 turn_state: upstream_request.turn_state.clone(),
                 client_turn_id: upstream_request.client_turn_id.clone(),
+                managed_model_turn_state: model_turn_state_fence.is_some(),
                 response_store,
                 continuation_scope: None,
             });
@@ -627,6 +698,7 @@ impl Provider for CodexProvider {
             turn_state_store: self.turn_state_store.clone(),
             model_turn_state_fence,
             model_turn_state_observation_scope,
+            missing_turn_state_capture,
         });
         let stream = ProviderStream::new(metadata, events, lease);
         Ok(if allows_account_state_mutation {

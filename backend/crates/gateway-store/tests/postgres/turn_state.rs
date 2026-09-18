@@ -3,7 +3,9 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::provider_ports::turn_state::{
-    AccountTurnStatePolicyUpdate, ModelTurnStateCaptureTriggerMode, ModelTurnStatePinAction,
+    AccountTurnStatePolicyUpdate, ModelTurnStateCaptureActivation,
+    ModelTurnStateCaptureCommitOutcome, ModelTurnStateCaptureScope,
+    ModelTurnStateCaptureTriggerMode, ModelTurnStateMissingAction, ModelTurnStatePinAction,
     ModelTurnStateUpdate, TurnStateObservation, TurnStateStore, TurnStateStoreError,
 };
 use gateway_core::task::DaemonTask;
@@ -127,6 +129,10 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     assert_eq!(initial.capture_policy.backoff_seconds, 1);
     assert_eq!(initial.capture_policy.max_backoff_seconds, 4);
     assert_eq!(initial.capture_policy.cooldown_seconds, 900);
+    assert_eq!(
+        initial.missing_state_action,
+        ModelTurnStateMissingAction::NaturalThenCapture
+    );
 
     let initial_policy = store
         .load_account_policy("acct_model_state")
@@ -154,6 +160,7 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
             "acct_model_state",
             AccountTurnStatePolicyUpdate {
                 capture_enabled: true,
+                missing_state_action: ModelTurnStateMissingAction::CaptureFirst,
                 capture_proxy_id: None,
                 ..account_policy_update(&lock_only)
             },
@@ -162,6 +169,10 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
         .expect("save permissive account policy while capture proxy is missing");
     assert!(waiting.lock_enabled);
     assert!(waiting.capture_enabled);
+    assert_eq!(
+        waiting.missing_state_action,
+        ModelTurnStateMissingAction::CaptureFirst
+    );
     assert!(waiting.capture_proxy_id.is_none());
     let reloaded_waiting = store
         .load_account_policy("acct_model_state")
@@ -174,6 +185,10 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     assert!(
         reloaded_waiting.capture_enabled,
         "the account capture switch must survive the same policy round trip"
+    );
+    assert_eq!(
+        reloaded_waiting.missing_state_action,
+        ModelTurnStateMissingAction::CaptureFirst
     );
     assert_eq!(reloaded_waiting.config_revision, waiting.config_revision);
     let configured_policy = store
@@ -322,6 +337,48 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     let scope = aged_store
         .model_observation_scope("acct_model_state", 1, "upstream-codex")
         .expect("aged pin accepts an ordinary HTTP observation");
+    aged_store.enqueue_observation(TurnStateObservation {
+        id: "obs_same_expired".to_owned(),
+        account_id: "acct_model_state".to_owned(),
+        request_id: None,
+        attempt_index: None,
+        value: value.clone(),
+        observed_at: Utc::now(),
+        transport: "http".to_owned(),
+        upstream_response_id: None,
+        client_turn_id: None,
+        model_scope: Some(scope.clone()),
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let observed = aged_store
+                .load("acct_model_state")
+                .await
+                .expect("load same expired observation");
+            if observed
+                .observed
+                .as_ref()
+                .is_some_and(|value| value.id == "obs_same_expired")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("same expired observation is persisted");
+    let still_expired = aged_store
+        .load_model_state("acct_model_state", "public-codex")
+        .await
+        .expect("same expired observation does not renew the pin");
+    assert_eq!(
+        still_expired.pin.as_ref().map(|pin| pin.captured_at),
+        Some(original.captured_at)
+    );
+    assert_eq!(
+        aged_store.active_model_pin("acct_model_state", 1, "upstream-codex"),
+        None
+    );
     let suspect = format!("{}\u{1}", "A".repeat(291));
     assert_eq!(suspect.len(), 292);
     aged_store.enqueue_observation(TurnStateObservation {
@@ -556,6 +613,53 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
             .await
             .expect("stale invalidation is fenced")
     );
+    let rejected_scope = aged_store
+        .model_observation_scope("acct_model_state", 1, "upstream-codex")
+        .expect("invalidated pin accepts a new ordinary observation scope");
+    aged_store.enqueue_observation(TurnStateObservation {
+        id: "obs_same_rejected".to_owned(),
+        account_id: "acct_model_state".to_owned(),
+        request_id: None,
+        attempt_index: None,
+        value: observed_value.clone(),
+        observed_at: Utc::now(),
+        transport: "http".to_owned(),
+        upstream_response_id: None,
+        client_turn_id: None,
+        model_scope: Some(rejected_scope),
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let observed = aged_store
+                .load("acct_model_state")
+                .await
+                .expect("load same rejected observation");
+            if observed
+                .observed
+                .as_ref()
+                .is_some_and(|value| value.id == "obs_same_rejected")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("same rejected observation is persisted");
+    let still_rejected = aged_store
+        .load_model_state("acct_model_state", "public-codex")
+        .await
+        .expect("same rejected observation does not renew the pin");
+    assert!(
+        still_rejected
+            .pin
+            .as_ref()
+            .is_some_and(|pin| pin.invalidated && pin.sha256 == captured_pin.sha256)
+    );
+    assert_eq!(
+        aged_store.active_model_pin("acct_model_state", 1, "upstream-codex"),
+        None
+    );
     let invalid_candidates = aged_store
         .model_capture_candidates(None, 8)
         .await
@@ -563,15 +667,26 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     assert_eq!(invalid_candidates.len(), 1);
     assert!(matches!(
         aged_store
-            .commit_model_capture(&invalid_candidates[0], &observed_value)
+            .commit_model_capture(
+                &invalid_candidates[0],
+                &observed_value,
+                ModelTurnStateCaptureActivation::StageIfActiveFresh,
+            )
             .await,
-        Err(TurnStateStoreError::Conflict)
+        Ok(ModelTurnStateCaptureCommitOutcome::RejectedValue)
     ));
     let replacement = "B".repeat(292);
-    let recaptured = aged_store
-        .commit_model_capture(&invalid_candidates[0], &replacement)
+    let ModelTurnStateCaptureCommitOutcome::Committed(recaptured) = aged_store
+        .commit_model_capture(
+            &invalid_candidates[0],
+            &replacement,
+            ModelTurnStateCaptureActivation::StageIfActiveFresh,
+        )
         .await
-        .expect("residential capture accepts a different value after rejection");
+        .expect("residential capture accepts a different value after rejection")
+    else {
+        panic!("different capture value must commit");
+    };
     let recaptured_pin = recaptured.pin.expect("renewed residential pin");
     assert_eq!(recaptured_pin.source, "capture");
     assert!(recaptured_pin.reuse_deadline > Utc::now());
@@ -589,7 +704,11 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     .expect("rotate identity");
     assert!(matches!(
         aged_store
-            .commit_model_capture(&invalid_candidates[0], &"B".repeat(292))
+            .commit_model_capture(
+                &invalid_candidates[0],
+                &"B".repeat(292),
+                ModelTurnStateCaptureActivation::StageIfActiveFresh,
+            )
             .await,
         Err(TurnStateStoreError::Conflict)
     ));
@@ -863,11 +982,62 @@ async fn proactive_capture_stages_candidate_and_promotes_without_extending_candi
         .await
         .expect("scan proactive candidate");
     assert_eq!(scopes.len(), 1, "45 minutes enters a 15 minute lead");
-    let candidate_value = "C".repeat(292);
-    let staged = store
-        .commit_model_capture(&scopes[0], &candidate_value)
+    let before_same = store
+        .load_model_state("acct_candidate", "gpt-5.6-sol")
         .await
-        .expect("stage candidate while active remains valid");
+        .expect("load active before automatic same-value capture");
+    assert!(matches!(
+        store
+            .commit_model_capture(
+                &scopes[0],
+                &active_value,
+                ModelTurnStateCaptureActivation::StageIfActiveFresh,
+            )
+            .await
+            .expect("automatic same-value capture remains idempotent"),
+        ModelTurnStateCaptureCommitOutcome::Unchanged(_)
+    ));
+    let unchanged = store
+        .load_model_state("acct_candidate", "gpt-5.6-sol")
+        .await
+        .expect("reload unchanged automatic capture");
+    assert_eq!(unchanged.config_revision, scopes[0].config_revision);
+    assert_eq!(
+        unchanged.pin.as_ref().map(|pin| pin.captured_at),
+        before_same.pin.as_ref().map(|pin| pin.captured_at)
+    );
+    assert_eq!(
+        unchanged.pin.as_ref().map(|pin| pin.reuse_deadline),
+        before_same.pin.as_ref().map(|pin| pin.reuse_deadline)
+    );
+    assert!(unchanged.candidate.is_none());
+    sqlx::query(
+        "update openai_model_turn_states
+            set capture_not_before = now() - interval '1 second'
+          where account_id = 'acct_candidate' and effective_model = 'gpt-5.6-sol'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("advance past failed-trigger cooldown");
+    assert!(
+        store
+            .model_capture_candidates(None, 8)
+            .await
+            .expect("an exhausted trigger must not restart without a new send")
+            .is_empty()
+    );
+    let candidate_value = "C".repeat(292);
+    let ModelTurnStateCaptureCommitOutcome::Committed(staged) = store
+        .commit_model_capture(
+            &scopes[0],
+            &candidate_value,
+            ModelTurnStateCaptureActivation::StageIfActiveFresh,
+        )
+        .await
+        .expect("stage candidate while active remains valid")
+    else {
+        panic!("new automatic value must commit");
+    };
     assert_eq!(
         staged.pin.as_ref().map(|pin| pin.value.as_str()),
         Some(active_value.as_str())
@@ -941,8 +1111,45 @@ async fn proactive_capture_stages_candidate_and_promotes_without_extending_candi
             .map(|pin| pin.value),
         Some(candidate_value)
     );
+    sqlx::query(
+        "update openai_model_turn_states
+            set pin_captured_at = now() - interval '45 minutes',
+                pin_reuse_deadline = now() + interval '15 minutes',
+                active_sent_count = 1,
+                active_last_sent_at = now()
+          where account_id = 'acct_candidate' and effective_model = 'gpt-5.6-sol'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("move promoted value into its own refresh lead");
+    let (second_cycle, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("restart for second automatic rotation");
+    let second_scopes = second_cycle
+        .model_capture_candidates(None, 8)
+        .await
+        .expect("promoted value schedules the next proactive capture");
+    assert_eq!(second_scopes.len(), 1);
+    let next_value = "D".repeat(292);
+    let ModelTurnStateCaptureCommitOutcome::Committed(second_staged) = second_cycle
+        .commit_model_capture(
+            &second_scopes[0],
+            &next_value,
+            ModelTurnStateCaptureActivation::StageIfActiveFresh,
+        )
+        .await
+        .expect("stage the next-generation candidate")
+    else {
+        panic!("second automatic rotation must stage a candidate");
+    };
+    let next_candidate = second_staged
+        .candidate
+        .as_ref()
+        .expect("second candidate staged");
+    let next_generation = next_candidate.generation;
+    let next_candidate_id = next_candidate.id.clone().expect("second candidate ID");
     assert!(
-        restarted
+        second_cycle
             .invalidate_active_model_pin(
                 "acct_candidate",
                 1,
@@ -952,7 +1159,238 @@ async fn proactive_capture_stages_candidate_and_promotes_without_extending_candi
                 &candidate_sha256,
             )
             .await
-            .expect("in-flight candidate rejection matches after persistent promotion")
+            .expect("promoted generation rejection activates the next candidate")
+    );
+    let second_promoted = second_cycle
+        .active_model_pin("acct_candidate", 1, "gpt-5.6-sol")
+        .expect("second candidate becomes active without manual invalidation");
+    assert_eq!(second_promoted.value, next_value);
+    assert_eq!(second_promoted.generation, next_generation);
+    assert_eq!(
+        second_promoted.candidate_id.as_deref(),
+        Some(next_candidate_id.as_str())
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn manual_capture_replaces_a_locally_fresh_active_value_immediately() {
+    let Some(database) = TestDatabase::create("model_turn_state_manual_capture_activation").await
+    else {
+        return;
+    };
+    const ACCOUNT_ID: &str = "acct_manual_capture_activation";
+    const MODEL: &str = "gpt-6-astra";
+    seed_account(&database.pool, ACCOUNT_ID, "openai").await;
+    sqlx::query(
+        "insert into outbound_proxies
+           (id, name, proxy_url, last_test_at, last_test_success, last_test_latency_ms,
+            last_test_message)
+         values ('proxy_manual_capture_activation', 'Manual capture',
+                 'http://127.0.0.1:823', now(), true, 1, 'ok')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed manual capture proxy");
+    let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize manual capture store");
+    let initial_policy = store
+        .load_account_policy(ACCOUNT_ID)
+        .await
+        .expect("load manual capture policy");
+    let policy = store
+        .update_account_policy(
+            ACCOUNT_ID,
+            AccountTurnStatePolicyUpdate {
+                lock_enabled: true,
+                capture_enabled: true,
+                capture_proxy_id: Some("proxy_manual_capture_activation".to_owned()),
+                reuse_window_seconds: 3_600,
+                ..account_policy_update(&initial_policy)
+            },
+        )
+        .await
+        .expect("configure manual capture");
+    let empty = store
+        .load_model_state(ACCOUNT_ID, MODEL)
+        .await
+        .expect("load empty manual capture scope");
+    let old_value = "O".repeat(292);
+    let fresh = store
+        .update_model_state(
+            ACCOUNT_ID,
+            MODEL,
+            ModelTurnStateUpdate {
+                expected_identity_revision: empty.identity_revision,
+                expected_effective_model: empty.effective_model.clone(),
+                lock_enabled: true,
+                capture_enabled: true,
+                reuse_window_seconds: 3_600,
+                capture_proxy_id: policy.capture_proxy_id.clone(),
+                max_attempts: policy.capture_policy.max_attempts,
+                attempt_timeout_seconds: policy.capture_policy.attempt_timeout_seconds,
+                job_timeout_seconds: policy.capture_policy.job_timeout_seconds,
+                backoff_seconds: policy.capture_policy.backoff_seconds,
+                max_backoff_seconds: policy.capture_policy.max_backoff_seconds,
+                cooldown_seconds: policy.capture_policy.cooldown_seconds,
+                pin_action: ModelTurnStatePinAction::Replace,
+                value: Some(old_value.clone()),
+                expected_revision: empty.config_revision,
+            },
+        )
+        .await
+        .expect("seed fresh active value");
+    assert_eq!(
+        fresh.pin.as_ref().map(|pin| pin.value.as_str()),
+        Some(old_value.as_str())
+    );
+    assert!(fresh.pin.as_ref().is_some_and(|pin| !pin.invalidated));
+    assert!(
+        fresh
+            .pin
+            .as_ref()
+            .is_some_and(|pin| pin.reuse_deadline > Utc::now())
+    );
+    let scope = ModelTurnStateCaptureScope {
+        account_id: fresh.account_id.clone(),
+        requested_model: fresh.requested_model.clone(),
+        effective_model: fresh.effective_model.clone(),
+        identity_revision: fresh.identity_revision,
+        config_revision: fresh.config_revision,
+        policy_revision: fresh.policy_revision,
+        capture_enabled: fresh.capture_enabled,
+        capture_proxy_id: fresh.capture_proxy_id.clone(),
+        capture_policy: fresh.capture_policy.clone(),
+    };
+    assert!(matches!(
+        store
+            .commit_model_capture(
+                &scope,
+                &old_value,
+                ModelTurnStateCaptureActivation::ActivateImmediately,
+            )
+            .await,
+        Ok(ModelTurnStateCaptureCommitOutcome::Unchanged(_))
+    ));
+    let unchanged = store
+        .load_model_state(ACCOUNT_ID, MODEL)
+        .await
+        .expect("load state after unchanged manual capture");
+    assert_eq!(unchanged.config_revision, fresh.config_revision);
+    assert_eq!(
+        unchanged.pin.as_ref().map(|pin| pin.captured_at),
+        fresh.pin.as_ref().map(|pin| pin.captured_at)
+    );
+    assert_eq!(
+        unchanged.pin.as_ref().map(|pin| pin.reuse_deadline),
+        fresh.pin.as_ref().map(|pin| pin.reuse_deadline)
+    );
+    let candidate_value = "N".repeat(292);
+    let ModelTurnStateCaptureCommitOutcome::Committed(staged) = store
+        .commit_model_capture(
+            &scope,
+            &candidate_value,
+            ModelTurnStateCaptureActivation::StageIfActiveFresh,
+        )
+        .await
+        .expect("stage automatic candidate before manual promotion")
+    else {
+        panic!("new automatic value must stage");
+    };
+    assert_eq!(
+        staged.pin.as_ref().map(|pin| pin.value.as_str()),
+        Some(old_value.as_str())
+    );
+    let candidate = staged.candidate.as_ref().expect("staged candidate");
+    let candidate_id = candidate.id.clone().expect("candidate ID");
+    let candidate_generation = candidate.generation;
+    let candidate_captured_at = candidate.captured_at;
+    let candidate_deadline = candidate.reuse_deadline;
+    let promote_scope = ModelTurnStateCaptureScope {
+        account_id: staged.account_id.clone(),
+        requested_model: staged.requested_model.clone(),
+        effective_model: staged.effective_model.clone(),
+        identity_revision: staged.identity_revision,
+        config_revision: staged.config_revision,
+        policy_revision: staged.policy_revision,
+        capture_enabled: staged.capture_enabled,
+        capture_proxy_id: staged.capture_proxy_id.clone(),
+        capture_policy: staged.capture_policy.clone(),
+    };
+    let ModelTurnStateCaptureCommitOutcome::Committed(promoted) = store
+        .commit_model_capture(
+            &promote_scope,
+            &candidate_value,
+            ModelTurnStateCaptureActivation::ActivateImmediately,
+        )
+        .await
+        .expect("promote the matching candidate for manual capture")
+    else {
+        panic!("matching candidate must promote");
+    };
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.value.as_str()),
+        Some(candidate_value.as_str())
+    );
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.id.as_deref()),
+        Some(Some(candidate_id.as_str()))
+    );
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.generation),
+        Some(candidate_generation)
+    );
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.captured_at),
+        Some(candidate_captured_at)
+    );
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.reuse_deadline),
+        Some(candidate_deadline)
+    );
+    assert!(promoted.candidate.is_none());
+    let cached = store
+        .active_model_pin(ACCOUNT_ID, fresh.identity_revision, MODEL)
+        .expect("promoted candidate is published");
+    assert_eq!(cached.value, candidate_value);
+    assert_eq!(cached.generation, candidate_generation);
+    assert_eq!(cached.candidate_id.as_deref(), Some(candidate_id.as_str()));
+
+    let replacement_scope = ModelTurnStateCaptureScope {
+        account_id: promoted.account_id.clone(),
+        requested_model: promoted.requested_model.clone(),
+        effective_model: promoted.effective_model.clone(),
+        identity_revision: promoted.identity_revision,
+        config_revision: promoted.config_revision,
+        policy_revision: promoted.policy_revision,
+        capture_enabled: promoted.capture_enabled,
+        capture_proxy_id: promoted.capture_proxy_id.clone(),
+        capture_policy: promoted.capture_policy.clone(),
+    };
+    let replacement = "D".repeat(292);
+    let ModelTurnStateCaptureCommitOutcome::Committed(replaced) = store
+        .commit_model_capture(
+            &replacement_scope,
+            &replacement,
+            ModelTurnStateCaptureActivation::ActivateImmediately,
+        )
+        .await
+        .expect("commit a new manual capture")
+    else {
+        panic!("new manual value must commit");
+    };
+    assert_eq!(
+        replaced.pin.as_ref().map(|pin| pin.value.as_str()),
+        Some(replacement.as_str())
+    );
+    assert!(replaced.candidate.is_none());
+    assert_eq!(replaced.config_revision, promoted.config_revision + 1);
+    assert_eq!(
+        store
+            .active_model_pin(ACCOUNT_ID, fresh.identity_revision, MODEL)
+            .map(|pin| pin.value),
+        Some(replacement)
     );
     database.close().await;
 }
@@ -1161,7 +1599,11 @@ async fn ordinary_observation_and_capture_are_fenced_by_a_concurrent_manual_repl
     );
     assert!(matches!(
         store
-            .commit_model_capture(&capture_scope, &manual_value)
+            .commit_model_capture(
+                &capture_scope,
+                &manual_value,
+                ModelTurnStateCaptureActivation::StageIfActiveFresh,
+            )
             .await,
         Err(TurnStateStoreError::Conflict)
     ));
@@ -1468,6 +1910,7 @@ fn account_policy_update(
         reuse_window_seconds: view.reuse_window_seconds,
         refresh_lead_seconds: view.refresh_lead_seconds,
         capture_trigger_mode: view.capture_trigger_mode,
+        missing_state_action: view.missing_state_action,
         capture_proxy_id: view.capture_proxy_id.clone(),
         max_attempts: view.capture_policy.max_attempts,
         attempt_timeout_seconds: view.capture_policy.attempt_timeout_seconds,

@@ -276,7 +276,7 @@ async fn collect_backend_response(
         }
     }
     if let Some(update) = turn_state_update {
-        turn_state = update.lock().await.clone().or(turn_state);
+        turn_state = update.snapshot().or(turn_state);
     }
     let turn_state_observations = turn_state_observations.map(|observations| async move {
         observations

@@ -6,6 +6,7 @@ import type {
   ModelTurnStateCaptureJob,
   ModelTurnStateCaptureStatus,
   ModelTurnStateCaptureTriggerMode,
+  ModelTurnStateMissingStateAction,
   OutboundProxyRecord,
 } from '@/api'
 
@@ -53,6 +54,7 @@ const MAX_POLL_FAILURES = 3
 const CAPTURE_PROXY_TEST_MAX_AGE_MS = 24 * 60 * 60 * 1_000
 const RECOMMENDED_REUSE_WINDOW_SECONDS = 7_200
 const RECOMMENDED_REFRESH_LEAD_SECONDS = 900
+const RECOMMENDED_MISSING_STATE_ACTION: ModelTurnStateMissingStateAction = 'natural_then_capture'
 const RECOMMENDED_CAPTURE_POLICY = {
   maxAttempts: 3,
   attemptTimeoutSeconds: 8,
@@ -94,6 +96,7 @@ const draftCaptureEnabled = ref(false)
 const draftReuseWindowSeconds = ref(7_200)
 const draftRefreshLeadSeconds = ref(900)
 const draftCaptureTriggerMode = ref<ModelTurnStateCaptureTriggerMode>('on_attributed_failure')
+const draftMissingStateAction = ref<ModelTurnStateMissingStateAction>(RECOMMENDED_MISSING_STATE_ACTION)
 const draftCaptureProxyId = ref('')
 const draftMaxAttempts = ref(3)
 const draftAttemptTimeoutSeconds = ref(8)
@@ -121,11 +124,23 @@ const modelOptions = computed(() => models.value.map(model => ({
   description: model.id === model.label ? undefined : model.id,
 })))
 const captureTriggerOptions = [
-  { label: '归因拒绝时捕获（默认）', value: 'on_attributed_failure', description: '只有当前值被实际发送，并被上游结构化拒绝时才轮换。' },
-  { label: '用过后提前捕获', value: 'before_expiry_if_used', description: '当前值至少实际发送过一次后，才在到期前按提前量准备候选。' },
-  { label: '到期后首请求捕获', value: 'first_request_after_expiry', description: '到期不后台探测；首个后续业务请求触发一次捕获。' },
-  { label: '拒绝或到期首请求', value: 'failure_or_first_after_expiry', description: '结构化拒绝优先，否则由到期后的首个业务请求兜底。' },
+  { label: '自然请求失效后捕获（默认）', value: 'on_attributed_failure', description: '已发送值被判定失效后捕获。' },
+  { label: '用过后提前捕获', value: 'before_expiry_if_used', description: '发送过后，在到期前准备候选。' },
+  { label: '到期后首请求捕获', value: 'first_request_after_expiry', description: '由到期后的首个业务请求触发。' },
+  { label: '失效或到期首请求', value: 'failure_or_first_after_expiry', description: '失效后捕获，到期首请求兜底。' },
 ] satisfies Array<{ label: string, value: ModelTurnStateCaptureTriggerMode, description: string }>
+const missingStateActionOptions = [
+  {
+    label: '先普通请求，再按需捕获（默认）',
+    value: 'natural_then_capture',
+    description: '先发普通业务，需要时再转捕获。',
+  },
+  {
+    label: '先捕获，再发普通请求',
+    value: 'capture_first',
+    description: '先捕获成功，再发普通业务。',
+  },
+] satisfies Array<{ label: string, value: ModelTurnStateMissingStateAction, description: string }>
 function proxyReady(proxy: OutboundProxyRecord) {
   if (proxy.lastTest?.success !== true || !proxy.lastTestAt)
     return false
@@ -160,21 +175,63 @@ const selectedProxyReady = computed(() => {
   return proxy !== undefined && proxyReady(proxy)
 })
 const readyProxies = computed(() => proxies.value.filter(proxyReady))
+const missingStateFlowEnabled = computed(() => draftLockEnabled.value && draftCaptureEnabled.value)
+const flowAvailabilitySummary = computed(() => {
+  if (!draftLockEnabled.value) {
+    return draftCaptureEnabled.value
+      ? '锁定关闭时，普通业务透明发送；后台或手动捕获仍可收集值，但不会自动启用锁定。'
+      : '锁定与自动捕获均关闭，普通业务透明发送。'
+  }
+  if (!draftCaptureEnabled.value)
+    return '自动捕获关闭时，普通业务照常发送。'
+  if (draftMissingStateAction.value === 'capture_first')
+    return '先捕获模式需要就绪代理；获得可用值前不发送普通业务，捕获失败则本次请求失败。'
+  return '先普通请求模式会先发送普通业务；需要转入捕获但代理未就绪时，请求可能等待或失败。'
+})
+const proxyWaitingImpact = computed(() => {
+  if (!draftCaptureEnabled.value)
+    return '自动捕获已关闭，普通业务照常发送'
+  if (!draftLockEnabled.value)
+    return '锁定已关闭，普通业务透明发送；后台或手动捕获仍会等待代理就绪'
+  return draftMissingStateAction.value === 'capture_first'
+    ? '先捕获流程在获得可用值前不发送普通业务；请求可能等待或失败'
+    : '先普通请求流程仍会发送普通业务；需要转入捕获时请求可能等待或失败'
+})
+const reuseWindowDescription = computed(() => {
+  const prefix = '默认 7200 秒。当前值到期时会切换到已准备的候选值；'
+  if (!draftLockEnabled.value)
+    return `${prefix}锁定关闭时普通业务透明发送，已收集的值供之后启用锁定。`
+  if (!draftCaptureEnabled.value)
+    return `${prefix}没有候选时继续普通业务，不启动代理捕获。`
+  if (draftMissingStateAction.value === 'capture_first')
+    return `${prefix}没有候选时先捕获，获得可用值前不发送普通业务。`
+  return `${prefix}没有候选时先发送普通业务，必要时再转入捕获。`
+})
+const policySaveDescription = computed(() => {
+  const prefix = '保存后立即应用到此账号的所有模型。'
+  if (!draftLockEnabled.value)
+    return `${prefix}${flowAvailabilitySummary.value}`
+  if (!draftCaptureEnabled.value)
+    return `${prefix}自动捕获关闭，普通业务照常发送。`
+  if (selectedProxyReady.value)
+    return `${prefix}当前捕获代理已就绪。`
+  return `${prefix}${proxyWaitingImpact.value}。`
+})
 const captureProxyValidationError = computed(() => {
   if (!draftCaptureEnabled.value)
     return ''
   if (proxiesLoading.value)
-    return '正在核对捕获代理的测试状态；账号策略仍可保存'
+    return `正在核对捕获代理的测试状态；${proxyWaitingImpact.value}`
   if (proxiesError.value)
-    return '代理列表读取失败；账号策略仍可保存，自动捕获会等待代理就绪'
+    return `代理列表读取失败；${proxyWaitingImpact.value}`
   if (proxies.value.length === 0)
-    return '自动捕获当前在等待代理；可先保存，再到代理管理添加并测试'
+    return `还没有捕获代理；可先保存，再到代理管理添加并测试。${proxyWaitingImpact.value}`
   if (readyProxies.value.length === 0)
-    return '自动捕获当前在等待代理测试；普通请求不受影响'
+    return `捕获代理都未通过最近 24 小时测试；${proxyWaitingImpact.value}`
   if (!draftCaptureProxyId.value)
-    return '自动捕获当前未指定代理；可先保存，稍后再选择'
+    return `自动捕获当前未指定代理；${proxyWaitingImpact.value}`
   if (!selectedProxyReady.value)
-    return '所选代理尚未就绪；设置可以保存，自动捕获会等待最近 24 小时内的成功测试'
+    return `所选代理尚未就绪；${proxyWaitingImpact.value}`
   return ''
 })
 const policyChanged = computed(() => {
@@ -185,6 +242,7 @@ const policyChanged = computed(() => {
     || draftReuseWindowSeconds.value !== current.reuseWindowSeconds
     || draftRefreshLeadSeconds.value !== current.refreshLeadSeconds
     || draftCaptureTriggerMode.value !== current.captureTriggerMode
+    || draftMissingStateAction.value !== (current.missingStateAction ?? RECOMMENDED_MISSING_STATE_ACTION)
     || draftCaptureProxyId.value !== (current.captureProxyId ?? '')
     || draftMaxAttempts.value !== current.capturePolicy.maxAttempts
     || draftAttemptTimeoutSeconds.value !== current.capturePolicy.attemptTimeoutSeconds
@@ -205,13 +263,51 @@ const pinValidationError = computed(() => {
   return ''
 })
 const setupStatus = computed(() => {
-  if (!draftLockEnabled.value)
-    return '锁定未启用：请求不会注入模型级 Turn State。'
+  if (!draftLockEnabled.value) {
+    return draftCaptureEnabled.value
+      ? '锁定未启用：普通业务透明发送；后台或手动捕获仍可收集值，但不会自动启用锁定。'
+      : '锁定未启用：请求不会注入模型级 Turn State。'
+  }
   if (modelState.value?.pin?.status === 'fresh')
     return '锁定已就绪：Responses HTTP 与 WebSocket 请求都会注入当前模型值。'
-  if (draftCaptureEnabled.value && selectedProxyReady.value)
-    return '待获取并自动锁定：先走账号正常出口；只有明确观测到非 292 字节值后，才使用所选代理捕获。'
-  return '待获取并自动锁定：先走账号正常出口；观测到 292 字节值后会直接锁定。'
+  if (!draftCaptureEnabled.value)
+    return '待获取并自动锁定：自动捕获已关闭；普通请求观测到 292 字节值时会直接锁定，其他结果不会启动代理捕获。'
+  if (draftMissingStateAction.value === 'capture_first') {
+    return selectedProxyReady.value
+      ? '待获取并自动锁定：先通过所选代理捕获；捕获完成前不会发送普通业务请求，捕获失败则本次请求失败。'
+      : '待获取并自动锁定：先捕获流程已启用；获得可用值前不会发送普通业务，请求可能等待或失败。'
+  }
+  return selectedProxyReady.value
+    ? '待获取并自动锁定：先尝试普通业务；在首次业务内容交付前确认非 292 字节值或终态仍无 state 时，结束该次上游尝试，再通过所选代理捕获。'
+    : '待获取并自动锁定：先尝试普通业务；需要转为自动捕获时会等待代理就绪。'
+})
+const missingStateFlowDescription = computed(() => {
+  if (!missingStateFlowEnabled.value) {
+    if (!draftLockEnabled.value) {
+      return draftCaptureEnabled.value
+        ? '锁定关闭时，此流程只作为预配置；普通业务透明发送。后台或手动捕获仍可收集值，但不会自动启用锁定。'
+        : '锁定与自动捕获均关闭时，此流程只作为预配置，普通业务透明发送。'
+    }
+    return '自动捕获关闭时，无可用值仍继续普通业务；返回 292 字节值时直接保存，其他结果不会启动代理捕获。'
+  }
+  if (draftMissingStateAction.value === 'capture_first')
+    return '无可用值时先通过捕获代理获取；捕获完成前不发送普通业务请求，捕获失败则本次请求失败。'
+  return '无可用值时先尝试普通业务；返回 292 字节值时直接保存。在首次业务内容交付前确认非 292 字节值或终态仍无 state 时，会结束该次上游尝试，转为代理捕获后再发送一次；已交付业务内容的请求不会重放。'
+})
+const automaticCaptureDescription = computed(() => draftLockEnabled.value
+  ? `${missingStateFlowDescription.value} 已有值按下方触发模式轮换，也可手动获取。`
+  : `${missingStateFlowDescription.value} 捕获设置仍可预配置，也可手动获取。`)
+const unavailablePinDescription = computed(() => {
+  if (!draftLockEnabled.value) {
+    return draftCaptureEnabled.value
+      ? '锁定已关闭，普通业务透明发送；后台或手动捕获仍可收集新值，但不会自动启用锁定。'
+      : '锁定与自动捕获均已关闭，普通业务透明发送。'
+  }
+  if (!draftCaptureEnabled.value)
+    return '自动捕获已关闭，因此会继续普通业务；若返回 292 字节可打印 ASCII 值则直接采用，其他结果不会启动代理捕获。'
+  if (draftMissingStateAction.value === 'capture_first')
+    return '当前设置为先捕获再发普通请求；系统会先通过捕获代理获取新值，捕获完成前不发送普通业务请求，捕获失败则本次请求失败。也可以手动获取或替换。'
+  return '当前设置为先普通请求再按需捕获；若返回 292 字节可打印 ASCII 值则直接采用。在首次业务内容交付前确认非 292 字节值或终态仍无 state 时，会结束该次上游尝试，转为代理捕获后再发送一次；已交付业务内容的请求不会重放。也可以手动获取或替换。'
 })
 const canStartCapture = computed(() => Boolean(
   modelState.value
@@ -365,6 +461,7 @@ function applyPolicy(result: AccountTurnStatePolicyResponse) {
   draftReuseWindowSeconds.value = result.reuseWindowSeconds
   draftRefreshLeadSeconds.value = result.refreshLeadSeconds
   draftCaptureTriggerMode.value = result.captureTriggerMode
+  draftMissingStateAction.value = result.missingStateAction ?? RECOMMENDED_MISSING_STATE_ACTION
   draftCaptureProxyId.value = result.captureProxyId ?? ''
   draftMaxAttempts.value = result.capturePolicy.maxAttempts
   draftAttemptTimeoutSeconds.value = result.capturePolicy.attemptTimeoutSeconds
@@ -460,6 +557,7 @@ function applyRecommendedDefaults() {
   draftReuseWindowSeconds.value = RECOMMENDED_REUSE_WINDOW_SECONDS
   draftRefreshLeadSeconds.value = RECOMMENDED_REFRESH_LEAD_SECONDS
   draftCaptureTriggerMode.value = 'on_attributed_failure'
+  draftMissingStateAction.value = RECOMMENDED_MISSING_STATE_ACTION
   draftMaxAttempts.value = RECOMMENDED_CAPTURE_POLICY.maxAttempts
   draftAttemptTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.attemptTimeoutSeconds
   draftJobTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.jobTimeoutSeconds
@@ -637,6 +735,7 @@ async function savePolicySettings(): Promise<boolean> {
       reuseWindowSeconds: draftReuseWindowSeconds.value,
       refreshLeadSeconds: draftRefreshLeadSeconds.value,
       captureTriggerMode: draftCaptureTriggerMode.value,
+      missingStateAction: draftMissingStateAction.value,
       captureProxyId: draftCaptureProxyId.value || null,
       maxAttempts: draftMaxAttempts.value,
       attemptTimeoutSeconds: draftAttemptTimeoutSeconds.value,
@@ -900,7 +999,7 @@ onBeforeUnmount(() => {
             推荐流程
           </p>
           <p class="m-0 leading-relaxed">
-            以下开关、代理、TTL 与捕获策略按账号保存一次，适用于该账号的所有模型；每个模型的实际密文仍独立保存，绝不跨模型复用。可以先保存开关，缺少代理或代理未测试时只会等待，不影响普通请求。
+            以下开关、代理、TTL 与捕获策略按账号保存一次，适用于该账号的所有模型；每个模型的实际密文仍独立保存，绝不跨模型复用。{{ flowAvailabilitySummary }}
           </p>
           <p class="m-0 font-bold">
             {{ setupStatus }}
@@ -925,7 +1024,7 @@ onBeforeUnmount(() => {
                 自动捕获
               </p>
               <p class="mt-1 mb-0 text-xs leading-relaxed text-cp-text-secondary">
-                没有当前值时，普通 Responses 请求明确返回非 292 字节值会启动一次 bootstrap 捕获；已有值按下方触发模式轮换。也可手动获取。
+                {{ automaticCaptureDescription }}
               </p>
             </div>
             <BaseSwitch v-model="draftCaptureEnabled" label="启用模型 Turn State 自动捕获" :disabled="busy" active-text="启用" inactive-text="停用" @update:model-value="handleCaptureToggle" />
@@ -936,16 +1035,17 @@ onBeforeUnmount(() => {
           <BaseFormItem
             v-if="draftCaptureEnabled"
             label="自动捕获触发方式"
-            description="选择何时使用捕获代理。结构化归因拒绝只匹配本次实际发送的账号、模型、generation、candidate 与值。"
+            description="选择已有值的自动轮换时机。实际发送后被上游拒绝、返回非 292 字节值，或请求结束仍无 state，会判定本次值失效；等待响应期间暂时缺少 header 不会判定。"
           >
             <BaseSelect
               v-model="draftCaptureTriggerMode"
               :options="captureTriggerOptions"
               :disabled="busy"
+              class="w-full max-w-full"
               aria-label="自动捕获触发方式"
             />
           </BaseFormItem>
-          <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用期限" description="默认 7200 秒。当前值到期时会切换到已准备的候选值；没有候选时继续走普通请求。">
+          <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用期限" :description="reuseWindowDescription">
             <BaseNumberInput id="model-turn-state-reuse-window" v-model="draftReuseWindowSeconds" aria-describedby="model-turn-state-reuse-window-description" label="本地最大复用期限" :min="1" :max="86400" unit="秒" :disabled="busy" />
             <div class="mt-2 flex flex-wrap gap-1.5" aria-label="复用期限快捷值">
               <BaseButton v-for="hours in [1, 2, 4, 12, 24]" :key="hours" size="sm" variant="ghost" :disabled="busy" @click="draftReuseWindowSeconds = hours * 3600">
@@ -993,7 +1093,7 @@ onBeforeUnmount(() => {
 
         <div class="flex flex-wrap items-center justify-between gap-2 rounded-cp bg-cp-bg-container px-4 py-3">
           <p class="m-0 text-xs text-cp-text-secondary">
-            保存后立即应用到此账号的所有模型；缺少可用代理时自动捕获保持等待。
+            {{ policySaveDescription }}
           </p>
           <BaseButton
             variant="primary"
@@ -1163,7 +1263,7 @@ onBeforeUnmount(() => {
             </dl>
           </template>
           <p v-else class="m-0 text-cp-text-secondary">
-            当前模型还没有保存值。锁定开关仍可保存为“获取后自动锁定”；系统会先从普通 Responses 请求观测，必要时再按自动捕获设置使用代理。
+            当前模型还没有保存值。锁定开关仍可保存为“获取后自动锁定”。{{ unavailablePinDescription }}
           </p>
 
           <div class="flex flex-wrap gap-2">
@@ -1204,13 +1304,13 @@ onBeforeUnmount(() => {
             保存后会把旧账号覆盖导入当前所选模型，立即成为同一个当前使用值；旧值不再作为运行时 fallback。
           </p>
           <p v-else-if="pinAction === 'invalidate'" role="status" class="m-0 text-xs text-cp-warning-text">
-            保存后，这个值会保留用于审计，但不再注入；若锁定开关仍开启，会回到待获取状态。
+            保存后，这个值会保留用于审计，但不再注入；若锁定开关仍开启，会回到待获取状态并按当前“无可用值时流程”继续。
           </p>
           <p v-else-if="pinAction === 'clear'" role="status" class="m-0 text-xs text-cp-error-text">
-            保存后会删除这个模型的当前值；若锁定开关仍开启，会回到待获取状态。
+            保存后会删除这个模型的当前值；若锁定开关仍开启，会回到待获取状态并按当前“无可用值时流程”继续。
           </p>
           <p v-if="modelState.pin?.status === 'aged'" role="status" class="m-0 text-xs text-cp-warning-text">
-            这个值已停止注入。下一次普通 HTTP 请求返回 292 字节可打印 ASCII 值时会直接采用；明确返回非 292 字节值时才会触发已配置的住宅代理捕获。也可以手动获取或替换。
+            这个值已停止注入。{{ unavailablePinDescription }}
           </p>
         </section>
 
@@ -1277,6 +1377,22 @@ onBeforeUnmount(() => {
                 恢复推荐默认值
               </BaseButton>
             </div>
+            <BaseFormItem
+              class="sm:col-span-2 lg:col-span-3"
+              label="无可用值时流程"
+              description="仅在自动锁定与自动捕获同时开启、且账号没有可用值（包括到期或明确失效）时采用；其他开关组合只预配置。"
+            >
+              <BaseSelect
+                v-model="draftMissingStateAction"
+                :options="missingStateActionOptions"
+                :disabled="busy"
+                class="w-full max-w-full"
+                aria-label="无可用 Turn State 值时流程"
+              />
+              <p class="mt-2 mb-0 text-xs leading-relaxed text-cp-text-secondary">
+                {{ missingStateFlowDescription }}
+              </p>
+            </BaseFormItem>
             <BaseFormItem control-id="model-turn-state-max-attempts" label="最大尝试次数" description="1–10 次">
               <BaseNumberInput id="model-turn-state-max-attempts" v-model="draftMaxAttempts" aria-describedby="model-turn-state-max-attempts-description" label="最大尝试次数" :min="1" :max="10" unit="次" :disabled="busy" />
             </BaseFormItem>
@@ -1318,7 +1434,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <p v-if="accountPolicy?.captureReadiness !== 'ready'" class="m-0 text-xs text-cp-warning-text">
-            手动获取需要账号策略中已选择且最近 24 小时测试成功的代理；自动流程会保持等待，不影响普通请求。
+            手动获取需要账号策略中已选择且最近 24 小时测试成功的代理；{{ proxyWaitingImpact }}。
           </p>
           <template v-if="captureJob">
             <div class="flex flex-wrap items-center gap-2">

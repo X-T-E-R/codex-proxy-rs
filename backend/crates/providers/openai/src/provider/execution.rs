@@ -192,6 +192,12 @@ pub(super) struct ColdResponse {
     pub(super) turn_state_store: Option<Arc<dyn TurnStateStore>>,
     pub(super) model_turn_state_fence: Option<ModelTurnStatePinFence>,
     pub(super) model_turn_state_observation_scope: Option<ModelTurnStateObservationScope>,
+    pub(super) missing_turn_state_capture: Option<MissingTurnStateCapture>,
+}
+
+pub(super) struct MissingTurnStateCapture {
+    pub(super) coordinator: Option<Arc<dyn ModelTurnStateCaptureCoordinator>>,
+    pub(super) request: ModelTurnStateCaptureRequest,
 }
 
 pub(super) struct ModelTurnStatePinFence {
@@ -227,7 +233,13 @@ pub(super) struct OpenAiSessionState {
     pub(super) turn_state: Option<String>,
     #[serde(default)]
     pub(super) client_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(super) managed_model_turn_state: bool,
     pub(super) continuation_scope: OpenAiContinuationScope,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -243,6 +255,7 @@ pub(super) struct OpenAiSessionCapture {
     pub(super) conversation_id: Option<String>,
     pub(super) turn_state: Option<String>,
     pub(super) client_turn_id: Option<String>,
+    pub(super) managed_model_turn_state: bool,
     pub(super) response_store: bool,
     pub(super) continuation_scope: Option<OpenAiContinuationScope>,
 }
@@ -288,6 +301,7 @@ fn encode_openai_session_capture(
         conversation_id: capture.conversation_id.clone(),
         turn_state: capture.turn_state.clone(),
         client_turn_id: capture.client_turn_id.clone(),
+        managed_model_turn_state: capture.managed_model_turn_state,
         continuation_scope,
     })
 }
@@ -633,6 +647,41 @@ async fn invalidate_rejected_model_pin(
     }
 }
 
+async fn apply_missing_turn_state_capture(
+    flow: MissingTurnStateCapture,
+    request: &mut CodexResponsesRequest,
+    session_capture: &mut Option<OpenAiSessionCapture>,
+    model_scope: &mut Option<ModelTurnStateObservationScope>,
+    fence: &mut Option<ModelTurnStatePinFence>,
+    active_account: &ProviderAccount,
+    upstream_model: &UpstreamModelId,
+) -> Result<(), ProviderError> {
+    let coordinator = flow
+        .coordinator
+        .ok_or_else(|| provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::Sent))?;
+    let pin = coordinator
+        .capture_for_request(flow.request)
+        .await
+        .map_err(|_| provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::Sent))?;
+    request.turn_state = Some(pin.value.clone());
+    request.passthrough_headers.remove("x-codex-turn-state");
+    if let Some(capture) = session_capture.as_mut() {
+        capture.turn_state = Some(pin.value);
+        capture.managed_model_turn_state = true;
+    }
+    *model_scope = None;
+    *fence = Some(ModelTurnStatePinFence {
+        account_id: active_account.id().as_str().to_owned(),
+        identity_revision: active_account.identity_revision().get(),
+        effective_model: upstream_model.as_str().to_owned(),
+        generation: pin.generation,
+        candidate_id: pin.candidate_id,
+        source: pin.source,
+        sha256: pin.sha256,
+    });
+    Ok(())
+}
+
 fn observe_turn_state(
     store: Option<&Arc<dyn TurnStateStore>>,
     account_id: &str,
@@ -726,7 +775,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     let ColdResponse {
         client,
         response_origin,
-        request,
+        mut request,
         upstream_model,
         transport_policy,
         context,
@@ -742,8 +791,9 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         stream_max_retries,
         mut session_capture,
         turn_state_store,
-        model_turn_state_fence,
-        model_turn_state_observation_scope,
+        mut model_turn_state_fence,
+        mut model_turn_state_observation_scope,
+        mut missing_turn_state_capture,
     } = response;
     Box::pin(async_stream::try_stream! {
         let cyber_policy_scope = lease.cyber_policy_scope().cloned();
@@ -777,10 +827,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             lease.account_switch(),
         );
         let request_transport_requirement = transport_requirement(&request);
+        let client_turn_id = request.client_turn_id.clone();
         let turn_state_request = TurnStateRequestContext {
             request_id: &request_id,
             attempt_index: context.attempt_index().get(),
-            client_turn_id: request.client_turn_id.as_deref(),
+            client_turn_id: client_turn_id.as_deref(),
         };
         let trace = context.trace();
         let turn_state_send = (request.turn_state.is_some()
@@ -837,25 +888,20 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             }
             _ => None,
         };
+        let mut failed_turn_state = None;
+        let mut explicit_turn_state_rejection = false;
         if let Err(CodexHandshakeAttemptError::Client(error)) = &response {
-            if client_error_explicitly_targets_turn_state(error) {
-                invalidate_rejected_model_pin(
-                    turn_state_store.as_ref(),
-                    model_turn_state_fence.as_ref(),
-                )
-                .await;
-            }
-            if let (Some(store), Some((receipt, transport))) =
-                (turn_state_store.as_ref(), error_turn_state(error))
-            {
+            explicit_turn_state_rejection = client_error_explicitly_targets_turn_state(error);
+            failed_turn_state = error_turn_state(error);
+            if let Some((receipt, transport)) = failed_turn_state.as_ref() {
                 observe_turn_state(
-                    Some(store),
+                    turn_state_store.as_ref(),
                     active_account.id().as_str(),
-                    &receipt,
+                    receipt,
                     transport,
                     None,
                     turn_state_request,
-                    (transport == "websocket")
+                    (*transport == "websocket")
                         .then_some(model_turn_state_observation_scope.as_ref())
                         .flatten(),
                 );
@@ -884,7 +930,61 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                             session_affinity_key_hash: session_affinity_key_hash.as_deref(),
                             session_transport_recovery: &session_transport_recovery,
                         },
-                    );
+                        );
+                }
+                let sent = failure.error.send_state() == UpstreamSendState::Sent;
+                let missing_or_invalid = failed_turn_state
+                    .as_ref()
+                    .is_none_or(|(receipt, _)| !valid_model_turn_state(&receipt.value));
+                if sent && (explicit_turn_state_rejection || missing_or_invalid) {
+                    invalidate_rejected_model_pin(
+                        turn_state_store.as_ref(),
+                        model_turn_state_fence.as_ref(),
+                    )
+                    .await;
+                }
+                if sent
+                    && (explicit_turn_state_rejection || missing_or_invalid)
+                    && let Some(flow) = missing_turn_state_capture.take()
+                {
+                    apply_missing_turn_state_capture(
+                        flow,
+                        &mut request,
+                        &mut session_capture,
+                        &mut model_turn_state_observation_scope,
+                        &mut model_turn_state_fence,
+                        &active_account,
+                        &upstream_model,
+                    )
+                    .await?;
+                    drop(failure_context);
+                    let mut replay = cold_response_stream(ColdResponse {
+                        client,
+                        response_origin,
+                        request,
+                        upstream_model,
+                        transport_policy,
+                        context,
+                        selector,
+                        quota,
+                        catalog,
+                        lease,
+                        output_started_at,
+                        session_affinity_key,
+                        session_affinity_key_hash,
+                        session_transport_recovery,
+                        websocket_retry_count,
+                        stream_max_retries,
+                        session_capture,
+                        turn_state_store,
+                        model_turn_state_fence,
+                        model_turn_state_observation_scope,
+                        missing_turn_state_capture: None,
+                    });
+                    while let Some(event) = replay.next().await {
+                        yield event?;
+                    }
+                    return;
                 }
                 if let Some(observation) = failure.observation.take() {
                     yield ProviderEvent::observation(observation);
@@ -895,7 +995,80 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 return;
             }
         };
+        if response
+            .turn_state_observation
+            .as_ref()
+            .is_some_and(|receipt| !valid_model_turn_state(&receipt.value))
+        {
+            invalidate_rejected_model_pin(
+                turn_state_store.as_ref(),
+                model_turn_state_fence.as_ref(),
+            )
+            .await;
+            if let Some(flow) = missing_turn_state_capture.take() {
+                observe_received_turn_state(
+                    turn_state_store.as_ref(),
+                    response.transport,
+                    active_account.id().as_str(),
+                    response.turn_state_observation.as_ref(),
+                    None,
+                    turn_state_request,
+                    model_turn_state_observation_scope.as_ref(),
+                );
+                // 丢弃 response 会先释放 HTTP body 或 WS exchange receiver；捕获等待和
+                // 第二次业务发送都不能与已判无效的源流并存。
+                drop(response);
+                apply_missing_turn_state_capture(
+                    flow,
+                    &mut request,
+                    &mut session_capture,
+                    &mut model_turn_state_observation_scope,
+                    &mut model_turn_state_fence,
+                    &active_account,
+                    &upstream_model,
+                )
+                .await?;
+                drop(failure_context);
+                let mut replay = cold_response_stream(ColdResponse {
+                    client,
+                    response_origin,
+                    request,
+                    upstream_model,
+                    transport_policy,
+                    context,
+                    selector,
+                    quota,
+                    catalog,
+                    lease,
+                    output_started_at,
+                    session_affinity_key,
+                    session_affinity_key_hash,
+                    session_transport_recovery,
+                    websocket_retry_count,
+                    stream_max_retries,
+                    session_capture,
+                    turn_state_store,
+                    model_turn_state_fence,
+                    model_turn_state_observation_scope,
+                    missing_turn_state_capture: None,
+                });
+                while let Some(event) = replay.next().await {
+                    yield event?;
+                }
+                return;
+            }
+        }
         let mut pending_initial_turn_state_observation = response.turn_state_observation.clone();
+        let mut received_turn_state = pending_initial_turn_state_observation.is_some();
+        let mut missing_state_finalized = false;
+        if model_turn_state_observation_scope.is_some()
+            && pending_initial_turn_state_observation
+                .as_ref()
+                .is_some_and(|receipt| valid_model_turn_state(&receipt.value))
+            && let Some(capture) = session_capture.as_mut()
+        {
+            capture.managed_model_turn_state = true;
+        }
         if response.transport == CodexBackendTransport::WebSocket {
             observe_received_turn_state(
                 turn_state_store.as_ref(),
@@ -985,6 +1158,13 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         let mut pre_commit_events = PreCommitClientEvents::new();
         loop {
             let Some(stream_deadline) = remaining(context.deadline()) else {
+                if !received_turn_state && !missing_state_finalized {
+                    invalidate_rejected_model_pin(
+                        turn_state_store.as_ref(),
+                        model_turn_state_fence.as_ref(),
+                    )
+                    .await;
+                }
                 if allows_account_state_mutation {
                     synchronize_passive_quota(
                         &quota,
@@ -1007,6 +1187,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     ProviderErrorKind::Timeout,
                     UpstreamSendState::Sent,
                 ))),
+                _ = wait_for_turn_state_update(turn_state_updates.as_ref()) => Ok(PreCommitPoll::TurnStateUpdated),
                 _ = wait_for_replay_grace(replay_grace_deadline) => Ok(PreCommitPoll::GraceElapsed),
                 chunk = body.next() => match chunk {
                     Some(Ok(chunk)) => Ok(PreCommitPoll::Upstream(Some(chunk))),
@@ -1032,6 +1213,83 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     }
                     continue;
                 }
+                Ok(PreCommitPoll::TurnStateUpdated) => {
+                    let Some(turn_state_merge) = merge_turn_state_update(
+                        turn_state_updates.as_ref(),
+                        !received_turn_state,
+                        &mut session_capture,
+                        &mut observation_state,
+                    )
+                    .await
+                    else {
+                        continue;
+                    };
+                    received_turn_state = true;
+                    if !turn_state_merge.rejected
+                        && valid_model_turn_state(&turn_state_merge.latest)
+                    {
+                        if model_turn_state_observation_scope.is_some()
+                            && let Some(capture) = session_capture.as_mut()
+                        {
+                            capture.managed_model_turn_state = true;
+                        }
+                    } else if turn_state_merge.rejected {
+                        invalidate_rejected_model_pin(
+                            turn_state_store.as_ref(),
+                            model_turn_state_fence.as_ref(),
+                        )
+                        .await;
+                        if !pre_commit_events.is_committed()
+                            && let Some(flow) = missing_turn_state_capture.take()
+                        {
+                            drop(body);
+                            apply_missing_turn_state_capture(
+                                flow,
+                                &mut request,
+                                &mut session_capture,
+                                &mut model_turn_state_observation_scope,
+                                &mut model_turn_state_fence,
+                                &active_account,
+                                &upstream_model,
+                            )
+                            .await?;
+                            drop(failure_context);
+                            let mut replay = cold_response_stream(ColdResponse {
+                                client,
+                                response_origin,
+                                request,
+                                upstream_model,
+                                transport_policy,
+                                context,
+                                selector,
+                                quota,
+                                catalog,
+                                lease,
+                                output_started_at,
+                                session_affinity_key,
+                                session_affinity_key_hash,
+                                session_transport_recovery,
+                                websocket_retry_count,
+                                stream_max_retries,
+                                session_capture,
+                                turn_state_store,
+                                model_turn_state_fence,
+                                model_turn_state_observation_scope,
+                                missing_turn_state_capture: None,
+                            });
+                            while let Some(event) = replay.next().await {
+                                yield event?;
+                            }
+                            return;
+                        }
+                    }
+                    if turn_state_merge.changed
+                        && let Some(observation) = observation_state.observation(None)
+                    {
+                        yield ProviderEvent::observation(observation);
+                    }
+                    continue;
+                }
                 Err(mut failure) => {
                     let updates = take_rate_limit_updates(rate_limit_updates.as_ref()).await;
                     let rate_limits_changed = if updates.is_empty() {
@@ -1043,10 +1301,77 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     };
                     let turn_state_merge = merge_turn_state_update(
                         turn_state_updates.as_ref(),
+                        !received_turn_state,
                         &mut session_capture,
                         &mut observation_state,
                     )
                     .await;
+                    if let Some(turn_state_merge) = turn_state_merge.as_ref() {
+                        received_turn_state = true;
+                        if !turn_state_merge.rejected
+                            && valid_model_turn_state(&turn_state_merge.latest)
+                        {
+                            if model_turn_state_observation_scope.is_some()
+                                && let Some(capture) = session_capture.as_mut()
+                            {
+                                capture.managed_model_turn_state = true;
+                            }
+                        } else if turn_state_merge.rejected {
+                            invalidate_rejected_model_pin(
+                                turn_state_store.as_ref(),
+                                model_turn_state_fence.as_ref(),
+                            )
+                            .await;
+                        }
+                    }
+                    let needs_missing_recovery = !received_turn_state
+                        || turn_state_merge
+                            .as_ref()
+                            .is_some_and(|update| update.rejected);
+                    if !pre_commit_events.is_committed()
+                        && needs_missing_recovery
+                        && let Some(flow) = missing_turn_state_capture.take()
+                    {
+                        drop(body);
+                        apply_missing_turn_state_capture(
+                            flow,
+                            &mut request,
+                            &mut session_capture,
+                            &mut model_turn_state_observation_scope,
+                            &mut model_turn_state_fence,
+                            &active_account,
+                            &upstream_model,
+                        )
+                        .await?;
+                        drop(failure_context);
+                        let mut replay = cold_response_stream(ColdResponse {
+                            client,
+                            response_origin,
+                            request,
+                            upstream_model,
+                            transport_policy,
+                            context,
+                            selector,
+                            quota,
+                            catalog,
+                            lease,
+                            output_started_at,
+                            session_affinity_key,
+                            session_affinity_key_hash,
+                            session_transport_recovery,
+                            websocket_retry_count,
+                            stream_max_retries,
+                            session_capture,
+                            turn_state_store,
+                            model_turn_state_fence,
+                            model_turn_state_observation_scope,
+                            missing_turn_state_capture: None,
+                        });
+                        while let Some(event) = replay.next().await {
+                            yield event?;
+                        }
+                        return;
+                    }
                     let observation_event = if rate_limits_changed || turn_state_merge.is_some() {
                         observation_state.observation(None).map(ProviderEvent::observation)
                     } else {
@@ -1078,6 +1403,13 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     if let Some(event) = observation_event {
                         yield event;
                     }
+                    if !received_turn_state && !missing_state_finalized {
+                        invalidate_rejected_model_pin(
+                            turn_state_store.as_ref(),
+                            model_turn_state_fence.as_ref(),
+                        )
+                        .await;
+                    }
                     if allows_account_state_mutation {
                         synchronize_passive_quota(
                             &quota,
@@ -1102,11 +1434,77 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             };
             let turn_state_merge = merge_turn_state_update(
                 turn_state_updates.as_ref(),
+                !received_turn_state,
                 &mut session_capture,
                 &mut observation_state,
             )
             .await;
-            let turn_state_changed = turn_state_merge.unwrap_or(false);
+            if let Some(turn_state_merge) = turn_state_merge.as_ref() {
+                received_turn_state = true;
+                if !turn_state_merge.rejected
+                    && valid_model_turn_state(&turn_state_merge.latest)
+                {
+                    if model_turn_state_observation_scope.is_some()
+                        && let Some(capture) = session_capture.as_mut()
+                    {
+                        capture.managed_model_turn_state = true;
+                    }
+                } else if turn_state_merge.rejected {
+                    invalidate_rejected_model_pin(
+                        turn_state_store.as_ref(),
+                        model_turn_state_fence.as_ref(),
+                    )
+                    .await;
+                    if !pre_commit_events.is_committed()
+                        && let Some(flow) = missing_turn_state_capture.take()
+                    {
+                        // 当前 chunk 尚未交给 decoder/downstream；先释放旧源流，再等待
+                        // 捕获并把原请求最多重发一次。
+                        drop(body);
+                        apply_missing_turn_state_capture(
+                            flow,
+                            &mut request,
+                            &mut session_capture,
+                            &mut model_turn_state_observation_scope,
+                            &mut model_turn_state_fence,
+                            &active_account,
+                            &upstream_model,
+                        )
+                        .await?;
+                        drop(failure_context);
+                        let mut replay = cold_response_stream(ColdResponse {
+                            client,
+                            response_origin,
+                            request,
+                            upstream_model,
+                            transport_policy,
+                            context,
+                            selector,
+                            quota,
+                            catalog,
+                            lease,
+                            output_started_at,
+                            session_affinity_key,
+                            session_affinity_key_hash,
+                            session_transport_recovery,
+                            websocket_retry_count,
+                            stream_max_retries,
+                            session_capture,
+                            turn_state_store,
+                            model_turn_state_fence,
+                            model_turn_state_observation_scope,
+                            missing_turn_state_capture: None,
+                        });
+                        while let Some(event) = replay.next().await {
+                            yield event?;
+                        }
+                        return;
+                    }
+                }
+            }
+            let turn_state_changed = turn_state_merge
+                .as_ref()
+                .is_some_and(|update| update.changed);
             let first_event_changed =
                 observation_state.observe_stream_chunk(&chunk, output_started_at);
             let chunk_len = chunk.len();
@@ -1182,6 +1580,62 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 .any(|event| matches!(event, GatewayEvent::Completed(_)));
             let terminal_changed = completed
                 && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+            if (completed || terminal_failure.is_some())
+                && !received_turn_state
+                && !pre_commit_events.is_committed()
+                && let Some(flow) = missing_turn_state_capture.take()
+            {
+                drop(body);
+                apply_missing_turn_state_capture(
+                    flow,
+                    &mut request,
+                    &mut session_capture,
+                    &mut model_turn_state_observation_scope,
+                    &mut model_turn_state_fence,
+                    &active_account,
+                    &upstream_model,
+                )
+                .await?;
+                drop(failure_context);
+                let mut replay = cold_response_stream(ColdResponse {
+                    client,
+                    response_origin,
+                    request,
+                    upstream_model,
+                    transport_policy,
+                    context,
+                    selector,
+                    quota,
+                    catalog,
+                    lease,
+                    output_started_at,
+                    session_affinity_key,
+                    session_affinity_key_hash,
+                    session_transport_recovery,
+                    websocket_retry_count,
+                    stream_max_retries,
+                    session_capture,
+                    turn_state_store,
+                    model_turn_state_fence,
+                    model_turn_state_observation_scope,
+                    missing_turn_state_capture: None,
+                });
+                while let Some(event) = replay.next().await {
+                    yield event?;
+                }
+                return;
+            }
+            if (completed || terminal_failure.is_some())
+                && !received_turn_state
+                && !missing_state_finalized
+            {
+                invalidate_rejected_model_pin(
+                    turn_state_store.as_ref(),
+                    model_turn_state_fence.as_ref(),
+                )
+                .await;
+                missing_state_finalized = true;
+            }
             if response_transport == CodexBackendTransport::WebSocket
                 && completed && terminal_failure.is_none()
                 && let Some(key) = session_affinity_key.as_ref()
@@ -1321,18 +1775,91 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         }
         let turn_state_changed = merge_turn_state_update(
             turn_state_updates.as_ref(),
+            !received_turn_state,
             &mut session_capture,
             &mut observation_state,
         )
-        .await
-        .unwrap_or(false);
-        attach_openai_session_update(&mut events, &mut session_capture);
+        .await;
+        if let Some(turn_state_merge) = turn_state_changed.as_ref() {
+            received_turn_state = true;
+            if !turn_state_merge.rejected
+                && valid_model_turn_state(&turn_state_merge.latest)
+            {
+                if model_turn_state_observation_scope.is_some()
+                    && let Some(capture) = session_capture.as_mut()
+                {
+                    capture.managed_model_turn_state = true;
+                }
+            } else if turn_state_merge.rejected {
+                invalidate_rejected_model_pin(
+                    turn_state_store.as_ref(),
+                    model_turn_state_fence.as_ref(),
+                )
+                .await;
+            }
+        }
+        let turn_state_changed = turn_state_changed
+            .as_ref()
+            .is_some_and(|update| update.changed);
         let completed = events
             .iter()
             .flat_map(ProviderEvent::canonical_facts)
             .any(|event| matches!(event, GatewayEvent::Completed(_)));
+        if (completed || terminal_failure.is_some())
+            && !received_turn_state
+            && !pre_commit_events.is_committed()
+            && let Some(flow) = missing_turn_state_capture.take()
+        {
+            drop(body);
+            apply_missing_turn_state_capture(
+                flow,
+                &mut request,
+                &mut session_capture,
+                &mut model_turn_state_observation_scope,
+                &mut model_turn_state_fence,
+                &active_account,
+                &upstream_model,
+            )
+            .await?;
+            drop(failure_context);
+            let mut replay = cold_response_stream(ColdResponse {
+                client,
+                response_origin,
+                request,
+                upstream_model,
+                transport_policy,
+                context,
+                selector,
+                quota,
+                catalog,
+                lease,
+                output_started_at,
+                session_affinity_key,
+                session_affinity_key_hash,
+                session_transport_recovery,
+                websocket_retry_count,
+                stream_max_retries,
+                session_capture,
+                turn_state_store,
+                model_turn_state_fence,
+                model_turn_state_observation_scope,
+                missing_turn_state_capture: None,
+            });
+            while let Some(event) = replay.next().await {
+                yield event?;
+            }
+            return;
+        }
+        attach_openai_session_update(&mut events, &mut session_capture);
         let terminal_changed = completed
             && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+        if !received_turn_state && !missing_state_finalized {
+            invalidate_rejected_model_pin(
+                turn_state_store.as_ref(),
+                model_turn_state_fence.as_ref(),
+            )
+            .await;
+        }
         if response_transport == CodexBackendTransport::WebSocket
             && completed && terminal_failure.is_none()
             && let Some(key) = session_affinity_key.as_ref()
@@ -1386,15 +1913,45 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
     })
 }
 
+struct MergedTurnStateUpdate {
+    changed: bool,
+    latest: String,
+    rejected: bool,
+}
+
 async fn merge_turn_state_update(
     updates: Option<&CodexTurnStateUpdate>,
+    first_received_for_response: bool,
     session_capture: &mut Option<OpenAiSessionCapture>,
     observation_state: &mut OpenAiResponseObservationState,
-) -> Option<bool> {
+) -> Option<MergedTurnStateUpdate> {
     let updates = updates?;
-    let turn_state = updates.lock().await.take()?;
-    if let Some(capture) = session_capture.as_mut() {
-        capture.turn_state = Some(turn_state.clone());
+    let values = updates.drain();
+    let mut values = values.into_iter();
+    let first = values.next()?;
+    let mut latest = first.clone();
+    let changed = observation_state.merge_client_header("x-codex-turn-state", &latest);
+    let mut rejected = !valid_model_turn_state(&latest);
+    for value in values {
+        rejected |= !valid_model_turn_state(&value);
+        latest = value;
     }
-    Some(observation_state.merge_client_header("x-codex-turn-state", &turn_state))
+    if let Some(capture) = session_capture.as_mut() {
+        if first_received_for_response || capture.turn_state.is_none() {
+            capture.turn_state = Some(first);
+        }
+    }
+    Some(MergedTurnStateUpdate {
+        changed,
+        latest,
+        rejected,
+    })
+}
+
+async fn wait_for_turn_state_update(updates: Option<&CodexTurnStateUpdate>) {
+    if let Some(updates) = updates {
+        updates.wait_until_pending().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
 }

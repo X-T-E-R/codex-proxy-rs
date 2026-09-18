@@ -41,10 +41,10 @@ use crate::transport::{
     response_meta,
     websocket::{
         CodexWebSocketConnection, CodexWebSocketExchangeError, CodexWebSocketPool,
-        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, DEFAULT_FAST_PATH_BUDGET_MS,
-        DEFAULT_STREAM_IDLE_TIMEOUT, WebSocketFastPath, WebSocketOriginBreaker,
-        execute_prepared_response_create_request_stream, post_send_ambiguous,
-        prepare_response_create_request_with_pool, websocket_audit_dir,
+        CodexWebSocketPoolKey, CodexWebSocketStreamingExchange, CodexWebSocketTurnStateUpdateSlot,
+        DEFAULT_FAST_PATH_BUDGET_MS, DEFAULT_STREAM_IDLE_TIMEOUT, WebSocketFastPath,
+        WebSocketOriginBreaker, execute_prepared_response_create_request_stream,
+        post_send_ambiguous, prepare_response_create_request_with_pool, websocket_audit_dir,
         write_websocket_audit_artifact_from_env,
     },
 };
@@ -189,18 +189,16 @@ impl CodexBackendClient {
         let diagnostics = response_meta::diagnostics(Some(status.as_u16()), response.headers());
         let turn_state = response_meta::turn_state(response.headers());
         let turn_state_observation = turn_state.clone().map(CodexObservedTurnState::new);
-        let turn_state_observer =
-            self.turn_state_store
-                .as_ref()
-                .zip(provider_account_id)
-                .map(|(store, account_id)| HttpSseTurnStateObserver {
-                    store: Arc::clone(store),
-                    account_id: account_id.to_owned(),
-                    request_id: context.attempt_index.map(|_| context.request_id.to_owned()),
-                    attempt_index: context.attempt_index,
-                    client_turn_id: context.turn_id.map(str::to_owned),
-                    model_scope: context.model_turn_state_observation_scope.cloned(),
-                });
+        let turn_state_update = Arc::new(CodexWebSocketTurnStateUpdateSlot::new());
+        let turn_state_observer = Some(HttpSseTurnStateObserver {
+            store: self.turn_state_store.clone(),
+            account_id: provider_account_id.map(str::to_owned),
+            request_id: context.attempt_index.map(|_| context.request_id.to_owned()),
+            attempt_index: context.attempt_index,
+            client_turn_id: context.turn_id.map(str::to_owned),
+            model_scope: context.model_turn_state_observation_scope.cloned(),
+            turn_state_update: Arc::clone(&turn_state_update),
+        });
         if let (Some(observer), Some(receipt)) = (
             turn_state_observer.as_ref(),
             turn_state_observation.as_ref(),
@@ -313,7 +311,7 @@ impl CodexBackendClient {
             set_cookie_headers,
             rate_limit_headers,
             rate_limit_updates: Some(rate_limit_updates),
-            turn_state_update: None,
+            turn_state_update: Some(turn_state_update),
             turn_state_observations: None,
             websocket_pool_decision: None,
             diagnostics,
@@ -353,11 +351,11 @@ impl CodexBackendClient {
             .send()
             .await
             .map_err(|_| CodexTurnStateCaptureError::Transport)?;
-        if let Some(value) = response_meta::turn_state(response.headers()) {
-            return Ok(Some(value));
-        }
         if !response.status().is_success() {
             return Err(CodexTurnStateCaptureError::Upstream);
+        }
+        if let Some(value) = response_meta::turn_state(response.headers()) {
+            return Ok(Some(value));
         }
         let mut decoder = SseEventDecoder::default();
         let mut stream = response.bytes_stream();
@@ -770,19 +768,24 @@ fn turn_state_from_sse_frame(frame: &SseFrame) -> Option<String> {
 
 #[derive(Clone)]
 struct HttpSseTurnStateObserver {
-    store: Arc<dyn TurnStateStore>,
-    account_id: String,
+    store: Option<Arc<dyn TurnStateStore>>,
+    account_id: Option<String>,
     request_id: Option<String>,
     attempt_index: Option<u32>,
     client_turn_id: Option<String>,
     model_scope: Option<ModelTurnStateObservationScope>,
+    turn_state_update: CodexTurnStateUpdate,
 }
 
 impl HttpSseTurnStateObserver {
     fn observe(&self, receipt: CodexObservedTurnState) {
-        self.store.enqueue_observation(TurnStateObservation {
+        let (Some(store), Some(account_id)) = (self.store.as_ref(), self.account_id.as_ref())
+        else {
+            return;
+        };
+        store.enqueue_observation(TurnStateObservation {
             id: receipt.id,
-            account_id: self.account_id.clone(),
+            account_id: account_id.clone(),
             request_id: self.request_id.clone(),
             attempt_index: self.attempt_index,
             value: receipt.value,
@@ -795,7 +798,8 @@ impl HttpSseTurnStateObserver {
     }
 
     fn observe_value(&self, value: String) {
-        self.observe(CodexObservedTurnState::new(value));
+        self.observe(CodexObservedTurnState::new(value.clone()));
+        self.turn_state_update.publish(value);
     }
 }
 
@@ -811,8 +815,20 @@ async fn await_websocket_delivery_boundary(
     exchange: &mut CodexWebSocketStreamingExchange,
 ) -> Result<DeliveryBoundary, CodexWebSocketExchangeError> {
     let mut prelude = Vec::new();
+    let turn_state_update = Arc::clone(&exchange.turn_state_update);
     loop {
-        match exchange.body.next().await {
+        let next = tokio::select! {
+            biased;
+            next = exchange.body.next() => next,
+            () = turn_state_update.wait_until_pending() => {
+                let remaining =
+                    std::mem::replace(&mut exchange.body, Box::pin(futures::stream::empty()));
+                exchange.body =
+                    Box::pin(futures::stream::iter(prelude.into_iter().map(Ok)).chain(remaining));
+                return Ok(DeliveryBoundary::Ready);
+            },
+        };
+        match next {
             Some(Ok(frame)) if is_websocket_lifecycle_prelude(&frame) => prelude.push(frame),
             Some(Ok(frame)) => {
                 let connection_limit_failure = websocket_connection_limit_failure(&frame);
