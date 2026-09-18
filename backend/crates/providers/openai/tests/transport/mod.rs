@@ -277,11 +277,8 @@ async fn collect_backend_response(
             rate_limit_headers.extend(rate_limits_to_header_pairs(update));
         }
     }
-    let mut reported_model = response_metadata.effective_model.clone();
-    if let Some(update) = response_metadata_updates {
-        let update = update.lock().await;
-        turn_state = update.turn_state.clone().or(turn_state);
-        reported_model = update.reported_model.clone().or(reported_model);
+    if let Some(update) = turn_state_update {
+        turn_state = update.snapshot().or(turn_state);
     }
     let turn_state_observations = turn_state_observations.map(|observations| async move {
         observations

@@ -332,16 +332,20 @@ async fn codex_backend_http_sse_turn_state_event_preserves_the_original_stream_b
         )
         .await
         .expect("HTTP SSE response");
-    assert!(
-        response.turn_state_update.is_none(),
-        "SSE observation must not change the HTTP delivery contract"
-    );
+    let turn_state_update = response
+        .turn_state_update
+        .clone()
+        .expect("HTTP SSE exposes a private lifecycle update channel");
     let mut body = Vec::new();
     while let Some(chunk) = response.body.next().await {
         body.extend_from_slice(&chunk.expect("HTTP SSE body chunk"));
     }
 
     assert_eq!(body, raw.as_bytes());
+    assert_eq!(
+        turn_state_update.snapshot().as_deref(),
+        Some("event-turn-state")
+    );
 }
 
 #[tokio::test]

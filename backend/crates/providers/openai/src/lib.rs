@@ -11,6 +11,7 @@ use gateway_admin::ports::provider::ProviderAdmin;
 use gateway_core::account::ProviderAccountStore;
 use gateway_core::engine::provider::Provider;
 use gateway_core::provider_ports::ProviderStorePorts;
+use gateway_core::provider_ports::turn_state::ModelTurnStateCaptureCoordinator;
 use gateway_core::routing::ProviderKind;
 use gateway_core::task::WorkerContribution;
 
@@ -45,6 +46,7 @@ pub use transport::{
 /// OpenAI 初始化后交给组装根的最小能力集。
 pub struct ProviderBundle {
     core_provider: Arc<dyn Provider>,
+    turn_state_capture_target: Arc<CodexProvider>,
     admin_provider: Arc<dyn ProviderAdmin>,
     worker_contributions: Vec<WorkerContribution>,
 }
@@ -172,7 +174,7 @@ pub async fn initialize(
         Arc::clone(&account_feedback),
         CodexCookiePolicy::official().map_err(|_| OpenAiInitializeError::CookiePolicy)?,
     ));
-    let core_provider: Arc<dyn Provider> = Arc::new(
+    let core_provider = Arc::new(
         CodexProvider::new(
             selector,
             Arc::clone(&catalog),
@@ -189,6 +191,7 @@ pub async fn initialize(
         .with_request_body_override(request_body_override.clone())
         .with_turn_state_store(turn_state_store),
     );
+    let core_provider_erased: Arc<dyn Provider> = core_provider.clone();
     let token_client = Arc::new(
         credential::token_client::openai_token_client(
             config.token_client_config(),
@@ -255,7 +258,8 @@ pub async fn initialize(
     .map_err(|_| OpenAiInitializeError::Worker)?;
 
     Ok(ProviderBundle {
-        core_provider,
+        core_provider: core_provider_erased,
+        turn_state_capture_target: core_provider,
         admin_provider,
         worker_contributions,
     })
@@ -270,6 +274,14 @@ impl ProviderBundle {
     #[must_use]
     pub fn admin_provider(&self) -> Arc<dyn ProviderAdmin> {
         Arc::clone(&self.admin_provider)
+    }
+
+    pub fn set_turn_state_capture_coordinator(
+        &self,
+        coordinator: Option<Arc<dyn ModelTurnStateCaptureCoordinator>>,
+    ) {
+        self.turn_state_capture_target
+            .set_turn_state_capture_coordinator(coordinator);
     }
 
     /// 一次性移交 Host 任务计划，防止同一 owner 被重复注册。

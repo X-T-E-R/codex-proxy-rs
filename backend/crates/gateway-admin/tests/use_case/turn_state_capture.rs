@@ -20,10 +20,11 @@ use gateway_core::{
     account::{OutboundProxy, ProviderAccountId},
     lifecycle::CancellationToken,
     provider_ports::turn_state::{
-        ActiveModelTurnStatePin, ModelTurnStateCaptureCursor, ModelTurnStateCapturePolicy,
-        ModelTurnStateCaptureScope, ModelTurnStateCaptureTriggerMode, ModelTurnStatePinAction,
-        ModelTurnStateUpdate, ModelTurnStateView, TurnStateObservation, TurnStateStore,
-        TurnStateStoreError, TurnStateView,
+        ActiveModelTurnStatePin, ModelTurnStateCaptureActivation,
+        ModelTurnStateCaptureCommitOutcome, ModelTurnStateCaptureCursor,
+        ModelTurnStateCapturePolicy, ModelTurnStateCaptureScope, ModelTurnStateCaptureTriggerMode,
+        ModelTurnStatePin, ModelTurnStatePinAction, ModelTurnStateUpdate, ModelTurnStateView,
+        TurnStateObservation, TurnStateStore, TurnStateStoreError, TurnStateView,
     },
     task::{WorkerContribution, WorkerKind, WorkerRunnable, WorkerTaskError},
 };
@@ -42,6 +43,9 @@ struct CaptureStore {
     write_before_commit_delay: bool,
     commit_calls: AtomicUsize,
     commits: Mutex<Vec<String>>,
+    activation_intents: Mutex<Vec<ModelTurnStateCaptureActivation>>,
+    rejected_values: Mutex<Vec<String>>,
+    conflict_values: Mutex<Vec<String>>,
     published: AtomicUsize,
     maintenance_calls: AtomicUsize,
 }
@@ -61,6 +65,9 @@ impl CaptureStore {
             write_before_commit_delay: false,
             commit_calls: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
+            activation_intents: Mutex::new(Vec::new()),
+            rejected_values: Mutex::new(Vec::new()),
+            conflict_values: Mutex::new(Vec::new()),
             published: AtomicUsize::new(0),
             maintenance_calls: AtomicUsize::new(0),
         })
@@ -75,6 +82,29 @@ impl CaptureStore {
             write_before_commit_delay: false,
             commit_calls: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
+            activation_intents: Mutex::new(Vec::new()),
+            rejected_values: Mutex::new(Vec::new()),
+            conflict_values: Mutex::new(Vec::new()),
+            published: AtomicUsize::new(0),
+            maintenance_calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn with_view_and_candidates(
+        view: ModelTurnStateView,
+        candidates: Vec<ModelTurnStateCaptureScope>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            views: Mutex::new(HashMap::from([(view.requested_model.clone(), view)])),
+            candidates,
+            candidate_queries: Mutex::new(Vec::new()),
+            commit_delay: Duration::ZERO,
+            write_before_commit_delay: false,
+            commit_calls: AtomicUsize::new(0),
+            commits: Mutex::new(Vec::new()),
+            activation_intents: Mutex::new(Vec::new()),
+            rejected_values: Mutex::new(Vec::new()),
+            conflict_values: Mutex::new(Vec::new()),
             published: AtomicUsize::new(0),
             maintenance_calls: AtomicUsize::new(0),
         })
@@ -89,6 +119,9 @@ impl CaptureStore {
             write_before_commit_delay: true,
             commit_calls: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
+            activation_intents: Mutex::new(Vec::new()),
+            rejected_values: Mutex::new(Vec::new()),
+            conflict_values: Mutex::new(Vec::new()),
             published: AtomicUsize::new(0),
             maintenance_calls: AtomicUsize::new(0),
         })
@@ -102,6 +135,27 @@ impl CaptureStore {
         self.candidate_queries
             .lock()
             .expect("candidate queries")
+            .clone()
+    }
+
+    fn reject_value(&self, value: String) {
+        self.rejected_values
+            .lock()
+            .expect("rejected capture values")
+            .push(value);
+    }
+
+    fn conflict_value(&self, value: String) {
+        self.conflict_values
+            .lock()
+            .expect("conflicting capture values")
+            .push(value);
+    }
+
+    fn activation_intents(&self) -> Vec<ModelTurnStateCaptureActivation> {
+        self.activation_intents
+            .lock()
+            .expect("capture activation intents")
             .clone()
     }
 }
@@ -218,9 +272,46 @@ impl TurnStateStore for CaptureStore {
     async fn commit_model_capture(
         &self,
         scope: &ModelTurnStateCaptureScope,
-        _: &str,
-    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        value: &str,
+        activation: ModelTurnStateCaptureActivation,
+    ) -> Result<ModelTurnStateCaptureCommitOutcome, TurnStateStoreError> {
         self.commit_calls.fetch_add(1, Ordering::SeqCst);
+        self.activation_intents
+            .lock()
+            .expect("capture activation intents")
+            .push(activation);
+        if self
+            .rejected_values
+            .lock()
+            .expect("rejected capture values")
+            .iter()
+            .any(|rejected| rejected == value)
+        {
+            return Ok(ModelTurnStateCaptureCommitOutcome::RejectedValue);
+        }
+        if self
+            .conflict_values
+            .lock()
+            .expect("conflicting capture values")
+            .iter()
+            .any(|conflicting| conflicting == value)
+        {
+            return Err(TurnStateStoreError::Conflict);
+        }
+        if let Some(view) = self
+            .views
+            .lock()
+            .expect("capture views")
+            .get(&scope.requested_model)
+            .filter(|view| {
+                view.pin
+                    .as_ref()
+                    .is_some_and(|pin| !pin.invalidated && pin.value == value)
+            })
+            .cloned()
+        {
+            return Ok(ModelTurnStateCaptureCommitOutcome::Unchanged(view));
+        }
         if self.write_before_commit_delay {
             self.commits
                 .lock()
@@ -235,12 +326,12 @@ impl TurnStateStore for CaptureStore {
                 .expect("capture commits")
                 .push(scope.effective_model.clone());
         }
-        Ok(view(
+        Ok(ModelTurnStateCaptureCommitOutcome::Committed(view(
             &scope.account_id,
             &scope.requested_model,
             &scope.effective_model,
             scope.capture_policy.clone(),
-        ))
+        )))
     }
 }
 
@@ -281,6 +372,116 @@ async fn invalid_candidate_waits_for_backoff_before_the_next_attempt() {
     let calls = provider.capture_calls();
     assert!(calls[1].duration_since(calls[0]) >= Duration::from_secs(1));
     assert_eq!(store.commits(), vec!["model-backoff"]);
+    assert_eq!(
+        store.activation_intents(),
+        vec![ModelTurnStateCaptureActivation::ActivateImmediately]
+    );
+    stop_worker(shutdown, worker).await;
+}
+
+#[tokio::test]
+async fn manual_same_active_value_finishes_unchanged_without_another_attempt() {
+    let policy = policy(2, 10, 30, 0, 0);
+    let rejected = "R".repeat(292);
+    let mut model_view = view(
+        "acct_rejected_retry",
+        "model-rejected-retry",
+        "model-rejected-retry",
+        policy,
+    );
+    model_view.pin = Some(active_pin(rejected.clone()));
+    let store = CaptureStore::new([model_view]);
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_capture_values([rejected, "N".repeat(292)]);
+    let (mut bundle, services) = bundle(Arc::clone(&store), Arc::clone(&provider)).await;
+    let job = start(&services, "acct_rejected_retry", "model-rejected-retry").await;
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+
+    spin_until("retry after rejected capture value", || {
+        services
+            .accounts()
+            .model_turn_state_capture(&job.job_id)
+            .is_ok_and(|job| job.status == ModelTurnStateCaptureStatus::Succeeded)
+    })
+    .await;
+    let unchanged = services
+        .accounts()
+        .model_turn_state_capture(&job.job_id)
+        .expect("unchanged capture job");
+    assert_eq!(unchanged.reason.as_deref(), Some("unchanged_value"));
+    assert_eq!(provider.capture_calls().len(), 1);
+    assert_eq!(store.commit_calls.load(Ordering::SeqCst), 1);
+    assert!(store.commits().is_empty());
+    assert_eq!(
+        store.activation_intents(),
+        vec![ModelTurnStateCaptureActivation::ActivateImmediately]
+    );
+    stop_worker(shutdown, worker).await;
+}
+
+#[tokio::test]
+async fn manual_same_active_value_reports_rejected_reason_after_attempts_are_exhausted() {
+    let policy = policy(2, 10, 30, 0, 0);
+    let rejected = "R".repeat(292);
+    let mut model_view = view("acct_rejected", "model-rejected", "model-rejected", policy);
+    model_view.pin = Some(active_pin(rejected.clone()));
+    let store = CaptureStore::new([model_view]);
+    store.reject_value(rejected.clone());
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_capture_values([rejected.clone(), rejected]);
+    let (mut bundle, services) = bundle(Arc::clone(&store), Arc::clone(&provider)).await;
+    let job = start(&services, "acct_rejected", "model-rejected").await;
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+
+    spin_until("rejected capture failure", || {
+        services
+            .accounts()
+            .model_turn_state_capture(&job.job_id)
+            .is_ok_and(|job| job.status == ModelTurnStateCaptureStatus::Failed)
+    })
+    .await;
+    let failed = services
+        .accounts()
+        .model_turn_state_capture(&job.job_id)
+        .expect("rejected capture job");
+    assert_eq!(failed.reason.as_deref(), Some("rejected_value"));
+    assert_eq!(failed.attempts, 2);
+    assert_eq!(provider.capture_calls().len(), 2);
+    assert!(store.commits().is_empty());
+    stop_worker(shutdown, worker).await;
+}
+
+#[tokio::test]
+async fn store_scope_conflict_still_terminates_the_job() {
+    let policy = policy(2, 10, 30, 0, 0);
+    let store = CaptureStore::new([view(
+        "acct_scope_changed",
+        "model-scope-changed",
+        "model-scope-changed",
+        policy,
+    )]);
+    let conflicting = "C".repeat(292);
+    store.conflict_value(conflicting.clone());
+    let provider = FakeProviderAdmin::new("openai", events());
+    provider.set_capture_values([conflicting, "N".repeat(292)]);
+    let (mut bundle, services) = bundle(Arc::clone(&store), Arc::clone(&provider)).await;
+    let job = start(&services, "acct_scope_changed", "model-scope-changed").await;
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+
+    spin_until("scope conflict failure", || {
+        services
+            .accounts()
+            .model_turn_state_capture(&job.job_id)
+            .is_ok_and(|job| job.status == ModelTurnStateCaptureStatus::Failed)
+    })
+    .await;
+    let failed = services
+        .accounts()
+        .model_turn_state_capture(&job.job_id)
+        .expect("scope-conflicted capture job");
+    assert_eq!(failed.reason.as_deref(), Some("scope_changed"));
+    assert_eq!(failed.attempts, 1);
+    assert_eq!(provider.capture_calls().len(), 1);
     stop_worker(shutdown, worker).await;
 }
 
@@ -427,6 +628,53 @@ async fn disabling_model_b_does_not_cancel_the_queued_model_a_job() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn manual_start_conflicts_with_an_active_automatic_job_for_the_same_scope() {
+    let policy = policy(2, 10, 300, 60, 60);
+    let model_view = view(
+        "acct_auto_owned",
+        "model-auto-owned",
+        "model-auto-owned",
+        policy.clone(),
+    );
+    let candidate = ModelTurnStateCaptureScope {
+        account_id: model_view.account_id.clone(),
+        requested_model: model_view.requested_model.clone(),
+        effective_model: model_view.effective_model.clone(),
+        identity_revision: model_view.identity_revision,
+        config_revision: model_view.config_revision,
+        policy_revision: model_view.policy_revision,
+        capture_enabled: model_view.capture_enabled,
+        capture_proxy_id: model_view.capture_proxy_id.clone(),
+        capture_policy: policy,
+    };
+    let store = CaptureStore::with_view_and_candidates(model_view, vec![candidate]);
+    let provider = FakeProviderAdmin::new("openai", events());
+    let (mut bundle, services) = bundle(Arc::clone(&store), Arc::clone(&provider)).await;
+    let (shutdown, worker) = spawn_capture_worker(&mut bundle);
+
+    spin_until("automatic capture attempt", || {
+        provider.capture_calls().len() == 1
+    })
+    .await;
+    let error = services
+        .accounts()
+        .start_model_turn_state_capture(
+            &ProviderAccountId::new("acct_auto_owned").expect("account ID"),
+            "model-auto-owned",
+            1,
+            1,
+            1,
+            "model-auto-owned",
+        )
+        .await
+        .expect_err("manual start must not reuse an automatic job");
+    assert_eq!(error.message(), "账号已有自动捕获任务，请先取消后重试");
+    assert!(store.activation_intents().is_empty());
+
+    stop_worker(shutdown, worker).await;
+}
+
+#[tokio::test(start_paused = true)]
 async fn automatic_scan_advances_past_sixty_four_unusable_candidates() {
     let policy = policy(1, 10, 30, 0, 0);
     let candidates = (0..65)
@@ -482,6 +730,10 @@ async fn automatic_scan_advances_past_sixty_four_unusable_candidates() {
         Some("acct_fair_063")
     );
     assert_eq!(store.commits(), vec!["model-064"]);
+    assert_eq!(
+        store.activation_intents(),
+        vec![ModelTurnStateCaptureActivation::StageIfActiveFresh]
+    );
     stop_worker(shutdown, worker).await;
 }
 
@@ -589,6 +841,7 @@ fn view(
         reuse_window_seconds: 3_600,
         refresh_lead_seconds: 900,
         capture_trigger_mode: ModelTurnStateCaptureTriggerMode::OnAttributedFailure,
+        missing_state_action: Default::default(),
         capture_proxy_id: Some("proxy_capture".to_owned()),
         capture_proxy: None,
         capture_policy,
@@ -618,6 +871,30 @@ fn policy(
         backoff_seconds,
         max_backoff_seconds,
         cooldown_seconds: 0,
+    }
+}
+
+fn active_pin(value: String) -> ModelTurnStatePin {
+    let captured_at = Utc::now();
+    ModelTurnStatePin {
+        encoded_bytes: value.len(),
+        value,
+        raw_bytes: None,
+        ciphertext_bytes: None,
+        envelope_format: None,
+        token_version: None,
+        issued_at: None,
+        timestamp_verified: false,
+        sha256: "active-sha256".to_owned(),
+        captured_at,
+        reuse_deadline: captured_at + chrono::Duration::hours(1),
+        source: "capture".to_owned(),
+        compatible_transports: vec!["http".to_owned(), "websocket".to_owned()],
+        sent_count: 0,
+        last_sent_at: None,
+        invalidated: false,
+        generation: 1,
+        id: None,
     }
 }
 

@@ -33,8 +33,10 @@ use gateway_core::operation::{
 };
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::turn_state::{
-    ActiveModelTurnStatePin, ModelTurnStateObservationScope, TurnStateObservation,
-    TurnStateOverride, TurnStateSent, TurnStateStore, TurnStateStoreError, TurnStateView,
+    ActiveModelTurnStatePin, ModelTurnStateCaptureCoordinator, ModelTurnStateCaptureRequest,
+    ModelTurnStateCaptureWaitError, ModelTurnStateMissingAction, ModelTurnStateMissingPolicy,
+    ModelTurnStateObservationScope, TurnStateObservation, TurnStateOverride, TurnStateSent,
+    TurnStateStore, TurnStateStoreError, TurnStateView,
 };
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ModelServiceTier,
@@ -54,7 +56,7 @@ use serde_json::{Map, Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::{Notify, oneshot},
     time::{sleep, timeout},
 };
 use tokio_tungstenite::tungstenite::Message;
@@ -495,6 +497,7 @@ struct MemoryTurnStateStore {
     observations: Mutex<Vec<CapturedTurnStateObservation>>,
     model_pin: Mutex<Option<ActiveModelTurnStatePin>>,
     model_observation_scope: Mutex<Option<ModelTurnStateObservationScope>>,
+    missing_policy: Mutex<Option<ModelTurnStateMissingPolicy>>,
     invalidations: Mutex<Vec<CapturedModelPinInvalidation>>,
     sent: Mutex<Vec<TurnStateSent>>,
 }
@@ -595,6 +598,14 @@ impl TurnStateStore for MemoryTurnStateStore {
         self.model_pin.lock().unwrap().clone()
     }
 
+    fn model_missing_state_policy(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+    ) -> Option<ModelTurnStateMissingPolicy> {
+        *self.missing_policy.lock().unwrap()
+    }
+
     fn model_observation_scope(
         &self,
         _account_id: &str,
@@ -625,6 +636,30 @@ impl TurnStateStore for MemoryTurnStateStore {
                 sha256: expected_sha256.to_owned(),
             });
         Ok(true)
+    }
+}
+
+struct MemoryCaptureCoordinator {
+    store: Arc<MemoryTurnStateStore>,
+    pin: ActiveModelTurnStatePin,
+    calls: Mutex<Vec<ModelTurnStateCaptureRequest>>,
+    wait_for: Option<Arc<Notify>>,
+}
+
+#[async_trait::async_trait]
+impl ModelTurnStateCaptureCoordinator for MemoryCaptureCoordinator {
+    async fn capture_for_request(
+        &self,
+        request: ModelTurnStateCaptureRequest,
+    ) -> Result<ActiveModelTurnStatePin, ModelTurnStateCaptureWaitError> {
+        self.calls.lock().unwrap().push(request);
+        if let Some(wait_for) = self.wait_for.as_ref() {
+            timeout(Duration::from_secs(2), wait_for.notified())
+                .await
+                .map_err(|_| ModelTurnStateCaptureWaitError::Unavailable)?;
+        }
+        *self.store.model_pin.lock().unwrap() = Some(self.pin.clone());
+        Ok(self.pin.clone())
     }
 }
 
@@ -1116,6 +1151,1120 @@ fn fallback_transport_context(request_id: &str) -> AttemptContext {
     context(request_id, CancellationToken::new()).with_transport(AttemptTransport::Fallback)
 }
 
+fn overload_context(account_id: &str, policy: Option<(u32, u32)>) -> AttemptContext {
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_overload").expect("request"),
+            ClientApiKeyId::new("key_openai_contract").expect("key"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy().with_overload_cooldown(policy.map(|(threshold, seconds)| {
+            (
+                NonZeroU32::new(threshold).expect("threshold"),
+                NonZeroU32::new(seconds).expect("seconds"),
+            )
+        })),
+        AccountAttemptContext::new(
+            BTreeSet::new(),
+            Some(ProviderAccountId::new(account_id).expect("account")),
+            None,
+        )
+        .with_account_scope(contract_account_scope()),
+        None,
+        CancellationToken::new(),
+    )
+    .with_transport(AttemptTransport::Fallback)
+}
+
+async fn overload_request(
+    provider: &CodexProvider,
+    account_id: &str,
+    policy: Option<(u32, u32)>,
+) -> Result<(), gateway_core::error::ProviderError> {
+    let mut stream = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            overload_context(account_id, policy),
+        )
+        .await?;
+    while let Some(event) = stream.next().await {
+        event?;
+    }
+    Ok(())
+}
+
+async fn overload_response(server: &MockServer, response: ResponseTemplate) {
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn natural_missing_state_captures_before_replaying_an_invalid_header_response_once() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let server = MockServer::start().await;
+    let captured_value = "P".repeat(292);
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("x-codex-turn-state", captured_value.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", captured_value.as_str())
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", "invalid")
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .with_priority(10)
+        .mount(&server)
+        .await;
+
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-natural-capture".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 1,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: captured_value.clone(),
+            sha256: "d".repeat(64),
+            generation: 31,
+            candidate_id: Some("candidate-natural-capture".to_owned()),
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: None,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let provider = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_natural_capture", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare natural capture request");
+    while let Some(event) = stream.next().await {
+        event.expect("captured replay response");
+    }
+
+    let calls = capture.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].account_id, ACCOUNT_ID);
+    assert_eq!(calls[0].identity_revision, 1);
+    assert_eq!(calls[0].effective_model, "gpt-5.4");
+    assert!(turn_state.invalidations.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn natural_capture_drops_the_invalid_source_before_waiting_or_resending() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind HTTP server");
+    let base_url = format!("http://{}", listener.local_addr().expect("HTTP address"));
+    let old_source_dropped = Arc::new(Notify::new());
+    let captured_value = "X".repeat(292);
+    let server = tokio::spawn({
+        let old_source_dropped = Arc::clone(&old_source_dropped);
+        let captured_value = captured_value.clone();
+        async move {
+            let (mut first, _) = listener.accept().await.expect("accept natural request");
+            read_http_request(&mut first).await;
+            first
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nx-codex-turn-state: invalid\r\ncontent-length: 1048576\r\n\r\n",
+                )
+                .await
+                .expect("write invalid headers");
+            let mut byte = [0_u8; 1];
+            let read = timeout(Duration::from_secs(2), first.read(&mut byte))
+                .await
+                .expect("old source is dropped before capture")
+                .expect("read old source close");
+            assert_eq!(read, 0, "old response connection must close before capture");
+            old_source_dropped.notify_one();
+
+            let (mut second, _) = listener.accept().await.expect("accept replay request");
+            let replay = capture_http_request(&mut second).await;
+            assert!(
+                String::from_utf8_lossy(&replay).contains(&captured_value),
+                "replay sends the captured state"
+            );
+            second
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nx-codex-turn-state: {captured_value}\r\ncontent-length: {}\r\n\r\n{CAPTURE_COMPLETED_SSE}",
+                        CAPTURE_COMPLETED_SSE.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write replay response");
+        }
+    });
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-drop-before-capture".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 1,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: captured_value,
+            sha256: "5".repeat(64),
+            generation: 61,
+            candidate_id: None,
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: Some(old_source_dropped),
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider =
+        provider_with_base_url(&accounts, base_url).with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_drop_before_capture", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare drop-before-capture request");
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            event.expect("drop-before-capture replay response");
+        }
+    })
+    .await
+    .expect("drop-before-capture recovery is bounded");
+    server.await.expect("HTTP server");
+    assert_eq!(capture.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn natural_missing_state_recovers_from_late_http_metadata_before_delivery() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let server = MockServer::start().await;
+    let captured_value = "T".repeat(292);
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("x-codex-turn-state", captured_value.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", captured_value.as_str())
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "event: response.metadata\ndata: {{\"type\":\"response.metadata\",\"headers\":{{\"x-codex-turn-state\":\"invalid\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
+                )),
+        )
+        .with_priority(10)
+        .mount(&server)
+        .await;
+
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-late-http-capture".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 1,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: captured_value,
+            sha256: "1".repeat(64),
+            generation: 43,
+            candidate_id: Some("candidate-late-http".to_owned()),
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: None,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_late_http_capture", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare late HTTP metadata request");
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            event.expect("late HTTP metadata recovery response");
+        }
+    })
+    .await
+    .expect("late HTTP recovery is bounded");
+    assert_eq!(capture.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn http_same_chunk_later_invalid_state_retires_the_sent_generation() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let active_value = "A".repeat(292);
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("x-codex-turn-state", active_value.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "event: response.metadata\ndata: {{\"type\":\"response.metadata\",\"headers\":{{\"x-codex-turn-state\":\"{active_value}\"}}}}\n\nevent: response.metadata\ndata: {{\"type\":\"response.metadata\",\"headers\":{{\"x-codex-turn-state\":\"invalid\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
+                )),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: active_value,
+        sha256: "8".repeat(64),
+        generation: 73,
+        candidate_id: Some("candidate-http-two-states".to_owned()),
+        source: "capture".to_owned(),
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_http_two_states", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare HTTP dual-state response");
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            event.expect("HTTP dual-state response");
+        }
+    })
+    .await
+    .expect("HTTP dual-state response is bounded");
+
+    assert_eq!(
+        turn_state.invalidations.lock().unwrap().as_slice(),
+        [CapturedModelPinInvalidation {
+            account_id: ACCOUNT_ID.to_owned(),
+            identity_revision: 1,
+            effective_model: "gpt-5.4".to_owned(),
+            config_revision: 73,
+            candidate_id: Some("candidate-http-two-states".to_owned()),
+            sha256: "8".repeat(64),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn late_http_metadata_after_business_delivery_does_not_replay_the_request() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind HTTP server");
+    let base_url = format!("http://{}", listener.local_addr().expect("HTTP address"));
+    let (release, released) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept HTTP request");
+        read_http_request(&mut stream).await;
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n",
+            )
+            .await
+            .expect("write HTTP headers");
+        write_http_chunk(
+            &mut stream,
+            concat!(
+                "event: response.created\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_late_http\",\"model\":\"gpt-5.4\",\"status\":\"in_progress\"}}\n\n",
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello\"}\n\n"
+            ),
+        )
+        .await;
+        released.await.expect("release late HTTP metadata");
+        write_http_chunk(
+            &mut stream,
+            &format!(
+                "event: response.metadata\ndata: {{\"type\":\"response.metadata\",\"headers\":{{\"x-codex-turn-state\":\"invalid\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
+            ),
+        )
+        .await;
+        stream
+            .write_all(b"0\r\n\r\n")
+            .await
+            .expect("finish HTTP response");
+    });
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-late-http-delivered".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 1,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: "W".repeat(292),
+            sha256: "4".repeat(64),
+            generation: 59,
+            candidate_id: None,
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: None,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider =
+        provider_with_base_url(&accounts, base_url).with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_late_http_delivered", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare delivered HTTP stream");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = stream
+                .next()
+                .await
+                .expect("pre-metadata event")
+                .expect("valid pre-metadata event");
+            if event.has_client_event() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("business delivery boundary");
+    release.send(()).expect("release late metadata");
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            event.expect("late metadata response remains deliverable");
+        }
+    })
+    .await
+    .expect("late metadata completion is bounded");
+    server.await.expect("HTTP server");
+    assert!(capture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn late_websocket_metadata_before_delivery_drops_then_replays_once() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WS server");
+    let base_url = format!("http://{}", listener.local_addr().expect("WS address"));
+    let first_exchange_dropped = Arc::new(Notify::new());
+    let captured_value = "Y".repeat(292);
+    let server = tokio::spawn({
+        let first_exchange_dropped = Arc::clone(&first_exchange_dropped);
+        let captured_value = captured_value.clone();
+        async move {
+            let (stream, _) = listener.accept().await.expect("accept first WS");
+            let mut first = accept_codex_test_websocket(stream).await;
+            first
+                .next()
+                .await
+                .expect("first create")
+                .expect("first create frame");
+            first
+                .send(Message::Text(
+                    json!({"type":"response.created","response":{"id":"resp_ws_late_first","model":"gpt-5.4","status":"in_progress"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send first created");
+            sleep(Duration::from_millis(100)).await;
+            first
+                .send(Message::Text(
+                    json!({"type":"response.metadata","headers":{"x-codex-turn-state":"invalid"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send invalid metadata");
+            timeout(Duration::from_secs(2), first.next())
+                .await
+                .expect("first WS exchange is dropped before capture");
+            first_exchange_dropped.notify_one();
+
+            let (stream, _) = listener.accept().await.expect("accept replay WS");
+            let mut second = accept_codex_test_websocket(stream).await;
+            let create = second
+                .next()
+                .await
+                .expect("replay create")
+                .expect("replay create frame")
+                .into_text()
+                .expect("replay create text");
+            let create: Value = serde_json::from_str(&create).expect("replay create JSON");
+            assert_eq!(
+                create.pointer("/client_metadata/x-codex-turn-state"),
+                Some(&json!(captured_value))
+            );
+            second
+                .send(Message::Text(
+                    json!({"type":"response.metadata","headers":{"x-codex-turn-state":captured_value}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send replay metadata");
+            second
+                .send(Message::Text(
+                    json!({"type":"response.completed","response":{"id":"resp_ws_late_second","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .expect("send replay completion");
+        }
+    });
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-late-ws-capture".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 1,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: captured_value,
+            sha256: "6".repeat(64),
+            generation: 67,
+            candidate_id: None,
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: Some(first_exchange_dropped),
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider =
+        provider_with_base_url(&accounts, base_url).with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", generate_operation()),
+            context("req_late_ws_capture", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare late WS metadata request");
+    let mut delivered = Vec::new();
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            delivered.push(event.expect("late WS recovery response"));
+        }
+    })
+    .await
+    .expect("late WS recovery is bounded");
+    server.await.expect("WS server");
+    assert!(delivered.iter().all(|event| {
+        event
+            .wire_event()
+            .and_then(|wire| wire.raw_json_body())
+            .is_none_or(|raw| {
+                !raw.windows(b"resp_ws_late_first".len())
+                    .any(|window| window == b"resp_ws_late_first")
+            })
+    }));
+    assert_eq!(capture.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn websocket_metadata_wakeup_preserves_buffered_lifecycle_prelude_once() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WS server");
+    let base_url = format!("http://{}", listener.local_addr().expect("WS address"));
+    let turn_state = "C".repeat(292);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept WS");
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket
+            .next()
+            .await
+            .expect("response.create")
+            .expect("valid response.create");
+        for event in [
+            json!({"type":"response.created","response":{"id":"resp_ws_prelude","model":"gpt-5.4","status":"in_progress"}}),
+            json!({"type":"response.in_progress","response":{"id":"resp_ws_prelude","model":"gpt-5.4","status":"in_progress"}}),
+            json!({"type":"response.metadata","headers":{"x-codex-turn-state":turn_state}}),
+            json!({"type":"response.completed","response":{"id":"resp_ws_prelude","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
+        ] {
+            websocket
+                .send(Message::Text(event.to_string().into()))
+                .await
+                .expect("send WS event");
+        }
+    });
+
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .execute(
+            planned_request("openai", generate_operation()),
+            context("req_ws_prelude_metadata", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare WS metadata response");
+    let mut wire_types = Vec::new();
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            let event = event.expect("WS metadata response");
+            if let Some(event_type) = event.wire_event().and_then(|wire| wire.event_type()) {
+                wire_types.push(event_type.to_owned());
+            }
+        }
+    })
+    .await
+    .expect("WS metadata response is bounded");
+    server.await.expect("WS server");
+    assert_eq!(
+        wire_types,
+        [
+            "response.created",
+            "response.in_progress",
+            "response.completed"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn late_websocket_metadata_after_delivery_does_not_replay() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WS server");
+    let base_url = format!("http://{}", listener.local_addr().expect("WS address"));
+    let (release, released) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept WS");
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        websocket
+            .next()
+            .await
+            .expect("create")
+            .expect("create frame");
+        websocket
+            .send(Message::Text(
+                json!({"type":"response.created","response":{"id":"resp_ws_delivered","model":"gpt-5.4","status":"in_progress"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send created");
+        websocket
+            .send(Message::Text(
+                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"delivered"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send delivered delta");
+        released.await.expect("release late WS metadata");
+        websocket
+            .send(Message::Text(
+                json!({"type":"response.metadata","headers":{"x-codex-turn-state":"invalid"}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send late invalid metadata");
+        websocket
+            .send(Message::Text(
+                json!({"type":"response.completed","response":{"id":"resp_ws_delivered","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send completion");
+    });
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-late-ws-delivered".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 1,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: "Z".repeat(292),
+            sha256: "7".repeat(64),
+            generation: 71,
+            candidate_id: None,
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: None,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider =
+        provider_with_base_url(&accounts, base_url).with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", generate_operation()),
+            context("req_late_ws_delivered", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare delivered WS stream");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = stream
+                .next()
+                .await
+                .expect("pre-metadata WS event")
+                .expect("valid pre-metadata WS event");
+            if event.has_client_event() {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("WS business delivery boundary");
+    release.send(()).expect("release late WS metadata");
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            event.expect("late WS metadata remains deliverable");
+        }
+    })
+    .await
+    .expect("late WS completion is bounded");
+    server.await.expect("WS server");
+    assert!(capture.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn websocket_later_invalid_state_retires_the_sent_generation() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let active_value = "B".repeat(292);
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind WS server");
+    let base_url = format!("http://{}", listener.local_addr().expect("WS address"));
+    let expected_value = active_value.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept WS");
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        let request = websocket
+            .next()
+            .await
+            .expect("response.create")
+            .expect("valid response.create")
+            .into_text()
+            .expect("text response.create");
+        let request: Value = serde_json::from_str(&request).expect("response.create JSON");
+        assert_eq!(
+            request.pointer("/client_metadata/x-codex-turn-state"),
+            Some(&json!(expected_value))
+        );
+        for event in [
+            json!({"type":"response.created","response":{"id":"resp_ws_two_states","model":"gpt-5.4","status":"in_progress"}}),
+            json!({"type":"response.metadata","headers":{"x-codex-turn-state":expected_value}}),
+            json!({"type":"response.metadata","headers":{"x-codex-turn-state":"invalid"}}),
+            json!({"type":"response.completed","response":{"id":"resp_ws_two_states","model":"gpt-5.4","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
+        ] {
+            websocket
+                .send(Message::Text(event.to_string().into()))
+                .await
+                .expect("send WS event");
+        }
+    });
+
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: active_value,
+        sha256: "9".repeat(64),
+        generation: 79,
+        candidate_id: Some("candidate-ws-two-states".to_owned()),
+        source: "capture".to_owned(),
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", generate_operation()),
+            context("req_ws_two_states", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare WS dual-state response");
+    timeout(Duration::from_secs(5), async {
+        while let Some(event) = stream.next().await {
+            event.expect("WS dual-state response");
+        }
+    })
+    .await
+    .expect("WS dual-state response is bounded");
+    server.await.expect("WS server");
+
+    assert_eq!(
+        turn_state.invalidations.lock().unwrap().as_slice(),
+        [CapturedModelPinInvalidation {
+            account_id: ACCOUNT_ID.to_owned(),
+            identity_revision: 1,
+            effective_model: "gpt-5.4".to_owned(),
+            config_revision: 79,
+            candidate_id: Some("candidate-ws-two-states".to_owned()),
+            sha256: "9".repeat(64),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn capture_first_waits_for_a_pin_before_the_only_business_send() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let server = MockServer::start().await;
+    let captured_value = "Q".repeat(292);
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("x-codex-turn-state", captured_value.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", captured_value.as_str())
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::CaptureFirst,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: captured_value,
+            sha256: "e".repeat(64),
+            generation: 37,
+            candidate_id: Some("candidate-capture-first".to_owned()),
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: None,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_capture_first", CancellationToken::new()),
+        )
+        .await
+        .expect("capture-first prepares a pinned request");
+    while let Some(event) = stream.next().await {
+        event.expect("capture-first response");
+    }
+    assert_eq!(capture.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn capture_without_lock_keeps_the_business_request_fail_open() {
+    const ACCOUNT_ID: &str = "acct_provider_contract";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", "R".repeat(292).as_str())
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: false,
+        capture_enabled: true,
+        action: ModelTurnStateMissingAction::CaptureFirst,
+    });
+    let capture = Arc::new(MemoryCaptureCoordinator {
+        store: Arc::clone(&turn_state),
+        pin: ActiveModelTurnStatePin {
+            value: "S".repeat(292),
+            sha256: "f".repeat(64),
+            generation: 41,
+            candidate_id: None,
+            source: "capture".to_owned(),
+        },
+        calls: Mutex::new(Vec::new()),
+        wait_for: None,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port));
+    let capture_port: Arc<dyn ModelTurnStateCaptureCoordinator> = capture.clone();
+    provider.set_turn_state_capture_coordinator(Some(capture_port));
+    let mut stream = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_capture_without_lock", CancellationToken::new()),
+        )
+        .await
+        .expect("capture-only policy remains fail-open");
+    while let Some(event) = stream.next().await {
+        event.expect("capture-only response");
+    }
+    assert!(capture.calls.lock().unwrap().is_empty());
+}
+
+fn overloaded_response() -> ResponseTemplate {
+    ResponseTemplate::new(503).set_body_json(json!({
+        "error": {
+            "type": "server_error",
+            "message": "Our servers are currently overloaded. Please try again later."
+        }
+    }))
+}
+
+fn overload_success_response() -> ResponseTemplate {
+    ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(format!(
+            "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
+        ))
+}
+
+#[tokio::test]
+async fn overload_cooldown_is_opt_in_consecutive_and_account_scoped() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    create_account(&store, "acct_scope_new").await;
+    let server = MockServer::start().await;
+    let provider = provider_with_base_url(&store, server.uri());
+    let account = "acct_provider_contract";
+    overload_response(&server, overloaded_response()).await;
+    for _ in 0..3 {
+        let error = overload_request(&provider, account, None)
+            .await
+            .expect_err("upstream overload");
+        assert_eq!(error.send_state(), UpstreamSendState::Sent);
+        assert_eq!(error.upstream_status(), Some(503));
+    }
+    let policy = Some((2, 120));
+    assert!(overload_request(&provider, account, policy).await.is_err());
+    overload_response(&server, overload_success_response()).await;
+    overload_request(&provider, account, policy)
+        .await
+        .expect("success resets streak");
+    overload_response(&server, overloaded_response()).await;
+    assert!(overload_request(&provider, account, policy).await.is_err());
+    // 仅 code/status 相似不算匹配，也必须打断连续次数。
+    overload_response(
+        &server,
+        ResponseTemplate::new(503).set_body_json(json!({
+            "error": { "code": "server_is_overloaded", "message": "A different server failure" }
+        })),
+    )
+    .await;
+    assert!(overload_request(&provider, account, policy).await.is_err());
+    overload_response(&server, overloaded_response()).await;
+    assert!(overload_request(&provider, account, policy).await.is_err());
+    assert!(
+        overload_request(&provider, "acct_scope_new", policy)
+            .await
+            .is_err()
+    );
+    overload_response(
+        &server,
+        ResponseTemplate::new(503).set_body_string(
+            "Upstream rejected the request: Selected model is at capacity. Retry later.",
+        ),
+    )
+    .await;
+    let second = overload_request(&provider, account, policy)
+        .await
+        .expect_err("second upstream failure");
+    assert_eq!(second.upstream_status(), Some(503), "{second:?}");
+    let before = server.received_requests().await.expect("requests").len();
+    // 关闭新触发并不提前解除已有冷号；指定账号和诊断都不会再发送上游请求。
+    let blocked = overload_request(&provider, account, None)
+        .await
+        .expect_err("cold account");
+    assert_eq!(blocked.send_state(), UpstreamSendState::NotSent);
+    assert!(
+        provider
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                diagnostic_context("req_cold_diagnostic", account),
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        server.received_requests().await.expect("requests").len(),
+        before
+    );
+    overload_response(&server, overload_success_response()).await;
+    overload_request(&provider, "acct_scope_new", policy)
+        .await
+        .expect("other account remains eligible");
+}
+
+#[tokio::test]
+async fn overload_cooldown_expiry_and_late_success_preserve_the_configured_interval() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let provider = provider_with_base_url(&store, server.uri());
+    let account = "acct_provider_contract";
+    let policy = Some((1, 1));
+    overload_response(&server, overload_success_response()).await;
+    let mut in_flight = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            overload_context(account, policy),
+        )
+        .await
+        .expect("admitted before cooldown");
+    in_flight
+        .next()
+        .await
+        .expect("response observation")
+        .expect("successful opening");
+    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
+    // SSE 的错误事件走同一个过载检测入口；阈值 1 立即冷号。
+    overload_response(&server, ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string(concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}}\n\n"
+        ))).await;
+    assert!(overload_request(&provider, account, policy).await.is_err());
+    while let Some(event) = in_flight.next().await {
+        event.expect("in-flight success still finishes");
+    }
+    let blocked = overload_request(&provider, account, policy)
+        .await
+        .expect_err("late success cannot clear cooldown");
+    assert_eq!(blocked.send_state(), UpstreamSendState::NotSent);
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    overload_response(&server, overload_success_response()).await;
+    overload_request(&provider, account, policy)
+        .await
+        .expect("expiry restores admission");
+}
+
 fn diagnostic_context(request_id: &str, account_id: &str) -> AttemptContext {
     AttemptContext::new(
         RequestAttemptContext::new(
@@ -1341,6 +2490,7 @@ async fn capture_turn_state_request(
     previous_turn_id: Option<&str>,
     current_turn_id: Option<&str>,
     client_turn_state: Option<&str>,
+    managed_lock_enabled: Option<bool>,
 ) -> wiremock::Request {
     let account_id = "acct_session_affinity";
     let store = Arc::new(MemoryAccountStore::default());
@@ -1365,6 +2515,9 @@ async fn capture_turn_state_request(
     if let Some(previous_turn_id) = previous_turn_id {
         session_state.insert("client_turn_id".to_owned(), json!(previous_turn_id));
     }
+    if managed_lock_enabled.is_some() {
+        session_state.insert("managed_model_turn_state".to_owned(), json!(true));
+    }
     let mut protocol_context = Map::from_iter([("use_websocket".to_owned(), json!(false))]);
     if let Some(current_turn_id) = current_turn_id {
         protocol_context.insert("turn_id".to_owned(), json!(current_turn_id));
@@ -1388,7 +2541,18 @@ async fn capture_turn_state_request(
             ProviderSessionState::new("openai", session_state).expect("provider session state"),
         ),
     );
-    let mut stream = provider_with_base_url(&store, server.uri())
+    let mut provider = provider_with_base_url(&store, server.uri());
+    if let Some(lock_enabled) = managed_lock_enabled {
+        let turn_state = Arc::new(MemoryTurnStateStore::default());
+        *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+            lock_enabled,
+            capture_enabled: false,
+            action: ModelTurnStateMissingAction::NaturalThenCapture,
+        });
+        let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+        provider = provider.with_turn_state_store(Some(turn_state_port));
+    }
+    let mut stream = provider
         .execute(
             planned_request("openai", operation),
             context(request_id, CancellationToken::new()),
@@ -4515,6 +5679,18 @@ async fn websocket_model_pin_overrides_client_state_and_records_final_payload() 
     assert_eq!(sent[0].source, "capture");
     assert_eq!(sent[0].generation, Some(23));
     assert_eq!(sent[0].candidate_id.as_deref(), Some("candidate-ws-sent"));
+    drop(sent);
+    assert_eq!(
+        turn_state.invalidations.lock().unwrap().as_slice(),
+        [CapturedModelPinInvalidation {
+            account_id: ACCOUNT_ID.to_owned(),
+            identity_revision: 1,
+            effective_model: "gpt-5.4".to_owned(),
+            config_revision: 23,
+            candidate_id: Some("candidate-ws-sent".to_owned()),
+            sha256: "b".repeat(64),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -5424,6 +6600,7 @@ async fn matching_turn_id_should_restore_previous_turn_state() {
         Some("turn-same"),
         Some("turn-same"),
         None,
+        None,
     )
     .await;
 
@@ -5440,6 +6617,187 @@ async fn matching_turn_id_should_prefer_an_explicit_client_echo_over_saved_provi
         Some("turn-same"),
         Some("turn-same"),
         Some("client-turn-state"),
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        captured_header_values(&request, "x-codex-turn-state"),
+        vec![b"client-turn-state".to_vec()]
+    );
+}
+
+#[tokio::test]
+async fn retired_managed_session_state_is_not_restored_without_an_active_model_pin() {
+    let request = capture_turn_state_request(
+        "req_retired_managed_turn_state",
+        Some("turn-same"),
+        Some("turn-same"),
+        None,
+        Some(true),
+    )
+    .await;
+
+    assert!(captured_header_values(&request, "x-codex-turn-state").is_empty());
+}
+
+#[tokio::test]
+async fn managed_session_state_is_preserved_while_model_lock_is_disabled() {
+    let request = capture_turn_state_request(
+        "req_managed_turn_state_without_lock",
+        Some("turn-same"),
+        Some("turn-same"),
+        None,
+        Some(false),
+    )
+    .await;
+
+    assert_eq!(
+        captured_header_values(&request, "x-codex-turn-state"),
+        vec![b"previous-turn-state".to_vec()]
+    );
+}
+
+#[tokio::test]
+async fn lock_disabled_session_uses_the_first_received_state_on_the_next_same_turn_request() {
+    const ACCOUNT_ID: &str = "acct_session_affinity";
+    const TURN_ID: &str = "turn-lock-disabled-refresh";
+    let outbound = "A".repeat(292);
+    let received = "B".repeat(292);
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("x-codex-turn-state", outbound.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "event: response.metadata\ndata: {{\"type\":\"response.metadata\",\"headers\":{{\"x-codex-turn-state\":\"{received}\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
+                )),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("x-codex-turn-state", received.as_str()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: false,
+        capture_enabled: false,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port));
+    let request = || {
+        GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                "openai",
+                Map::from_iter([
+                    ("model".to_owned(), json!("gpt-5.4")),
+                    ("input".to_owned(), json!("hello")),
+                ]),
+            )
+            .expect("lock-disabled payload")
+            .with_context(Map::from_iter([
+                ("use_websocket".to_owned(), json!(false)),
+                ("session_id".to_owned(), json!("session-lock-disabled")),
+                ("thread_id".to_owned(), json!("thread-lock-disabled")),
+                ("turn_id".to_owned(), json!(TURN_ID)),
+            ])),
+        )
+    };
+    let initial_session = ProviderSessionState::new(
+        "openai",
+        Map::from_iter([
+            ("account_id".to_owned(), json!(ACCOUNT_ID)),
+            (
+                "conversation_id".to_owned(),
+                json!("conversation-lock-disabled"),
+            ),
+            ("turn_state".to_owned(), json!(outbound)),
+            ("client_turn_id".to_owned(), json!(TURN_ID)),
+            ("continuation_scope".to_owned(), json!("persisted")),
+            ("managed_model_turn_state".to_owned(), json!(true)),
+        ]),
+    )
+    .expect("initial lock-disabled session");
+    let mut first = provider
+        .execute(
+            planned_request(
+                "openai",
+                Operation::Generate(request().with_provider_session_state(initial_session)),
+            ),
+            context("req_lock_disabled_refresh_first", CancellationToken::new()),
+        )
+        .await
+        .expect("first lock-disabled request");
+    let mut updated_session = None;
+    while let Some(event) = first.next().await {
+        let event = event.expect("first lock-disabled response");
+        if let Some(update) = event.session_update() {
+            updated_session = Some(update.clone());
+        }
+    }
+    let updated_session = updated_session.expect("updated lock-disabled session");
+    assert_eq!(
+        updated_session
+            .payload()
+            .get("turn_state")
+            .and_then(Value::as_str),
+        Some(received.as_str())
+    );
+
+    let mut second = provider
+        .execute(
+            planned_request(
+                "openai",
+                Operation::Generate(request().with_provider_session_state(updated_session)),
+            ),
+            context("req_lock_disabled_refresh_second", CancellationToken::new()),
+        )
+        .await
+        .expect("second lock-disabled request");
+    while let Some(event) = second.next().await {
+        event.expect("second lock-disabled response");
+    }
+    let requests = server
+        .received_requests()
+        .await
+        .expect("captured lock-disabled requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        captured_header_values(&requests[0], "x-codex-turn-state"),
+        vec!["A".repeat(292).into_bytes()]
+    );
+    assert_eq!(
+        captured_header_values(&requests[1], "x-codex-turn-state"),
+        vec![received.into_bytes()]
+    );
+}
+
+#[tokio::test]
+async fn explicit_client_state_survives_a_retired_managed_session_fallback() {
+    let request = capture_turn_state_request(
+        "req_client_state_after_managed_retirement",
+        Some("turn-same"),
+        Some("turn-same"),
+        Some("client-turn-state"),
+        Some(true),
     )
     .await;
 
@@ -5849,6 +7207,111 @@ async fn slow_http_error_turn_state_is_enqueued_before_body_and_keeps_receipt_or
 }
 
 #[tokio::test]
+async fn sent_http_errors_retire_the_exact_generation_for_missing_or_invalid_state() {
+    for (case, returned) in [("missing", None), ("invalid", Some("short"))] {
+        let accounts = Arc::new(MemoryAccountStore::default());
+        create_account(&accounts, "acct_session_affinity").await;
+        let turn_state = Arc::new(MemoryTurnStateStore::default());
+        *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+            value: "U".repeat(292),
+            sha256: "2".repeat(64),
+            generation: 47,
+            candidate_id: Some("candidate-http-error".to_owned()),
+            source: "capture".to_owned(),
+        });
+        let server = MockServer::start().await;
+        let mut response = ResponseTemplate::new(500)
+            .insert_header("content-type", "application/json")
+            .set_body_json(json!({"error":{"message":"synthetic"}}));
+        if let Some(returned) = returned {
+            response = response.insert_header("x-codex-turn-state", returned);
+        }
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .respond_with(response)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+        let mut stream = provider_with_base_url(&accounts, server.uri())
+            .with_turn_state_store(Some(turn_state_port))
+            .execute(
+                planned_request("openai", http_generate_operation()),
+                context(&format!("req_http_error_{case}"), CancellationToken::new()),
+            )
+            .await
+            .expect("prepare HTTP error stream");
+        let error = timeout(Duration::from_secs(5), async {
+            loop {
+                match stream.next().await {
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => break error,
+                    None => panic!("HTTP error stream ended without an error"),
+                }
+            }
+        })
+        .await
+        .expect("HTTP error is bounded");
+        assert_eq!(error.send_state(), UpstreamSendState::Sent);
+        assert_eq!(
+            turn_state.invalidations.lock().unwrap().as_slice(),
+            [CapturedModelPinInvalidation {
+                account_id: "acct_session_affinity".to_owned(),
+                identity_revision: 1,
+                effective_model: "gpt-5.4".to_owned(),
+                config_revision: 47,
+                candidate_id: Some("candidate-http-error".to_owned()),
+                sha256: "2".repeat(64),
+            }]
+        );
+    }
+}
+
+#[tokio::test]
+async fn pre_send_http_failure_does_not_retire_a_model_generation() {
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, "acct_session_affinity").await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: "V".repeat(292),
+        sha256: "3".repeat(64),
+        generation: 53,
+        candidate_id: None,
+        source: "capture".to_owned(),
+    });
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve port");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("reserved address")
+    );
+    drop(listener);
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            context("req_http_not_sent", CancellationToken::new()),
+        )
+        .await
+        .expect("prepare pre-send failure stream");
+    let error = timeout(Duration::from_secs(5), async {
+        loop {
+            match stream.next().await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => break error,
+                None => panic!("pre-send stream ended without an error"),
+            }
+        }
+    })
+    .await
+    .expect("pre-send failure is bounded");
+    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+    assert!(turn_state.invalidations.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn new_or_unidentified_turn_should_not_restore_previous_turn_state() {
     for (request_id, previous_turn_id, current_turn_id, client_turn_state) in [
         (
@@ -5870,6 +7333,7 @@ async fn new_or_unidentified_turn_should_not_restore_previous_turn_state() {
             previous_turn_id,
             current_turn_id,
             client_turn_state,
+            None,
         )
         .await;
         assert!(captured_header_values(&request, "x-codex-turn-state").is_empty());
@@ -5911,6 +7375,100 @@ async fn completed_response_session_state_should_not_copy_the_conversation_trans
             .expect("completed response session update")
             .contains_key("transcript")
     );
+}
+
+#[tokio::test]
+async fn naturally_learned_session_state_does_not_return_after_the_model_pin_is_unavailable() {
+    const ACCOUNT_ID: &str = "acct_session_affinity";
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let server = MockServer::start().await;
+    let learned = "L".repeat(292);
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .insert_header("x-codex-turn-state", learned.as_str())
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.missing_policy.lock().unwrap() = Some(ModelTurnStateMissingPolicy {
+        lock_enabled: true,
+        capture_enabled: false,
+        action: ModelTurnStateMissingAction::NaturalThenCapture,
+    });
+    *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-natural-session".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 1,
+    });
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state;
+    let provider = provider_with_base_url(&accounts, server.uri())
+        .with_turn_state_store(Some(turn_state_port));
+    let request = || {
+        GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                "openai",
+                Map::from_iter([
+                    ("model".to_owned(), json!("gpt-5.4")),
+                    ("input".to_owned(), json!("hello")),
+                ]),
+            )
+            .expect("natural session payload")
+            .with_context(Map::from_iter([
+                ("use_websocket".to_owned(), json!(false)),
+                ("session_id".to_owned(), json!("session-natural-state")),
+                ("thread_id".to_owned(), json!("thread-natural-state")),
+                ("turn_id".to_owned(), json!("turn-natural-state")),
+            ])),
+        )
+    };
+    let mut first = provider
+        .execute(
+            planned_request("openai", Operation::Generate(request())),
+            context("req_natural_session_first", CancellationToken::new()),
+        )
+        .await
+        .expect("first natural session request");
+    let mut learned_session = None;
+    while let Some(event) = first.next().await {
+        let event = event.expect("first natural response");
+        if let Some(update) = event.session_update() {
+            learned_session = Some(update.clone());
+        }
+    }
+    let learned_session = learned_session.expect("natural response session state");
+    assert_eq!(
+        learned_session
+            .payload()
+            .get("managed_model_turn_state")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let mut second = provider
+        .execute(
+            planned_request(
+                "openai",
+                Operation::Generate(request().with_provider_session_state(learned_session)),
+            ),
+            context("req_natural_session_second", CancellationToken::new()),
+        )
+        .await
+        .expect("second natural session request");
+    while let Some(event) = second.next().await {
+        event.expect("second natural response");
+    }
+    let requests = server.received_requests().await.expect("natural requests");
+    assert_eq!(requests.len(), 2);
+    assert!(captured_header_values(&requests[1], "x-codex-turn-state").is_empty());
 }
 
 #[tokio::test]

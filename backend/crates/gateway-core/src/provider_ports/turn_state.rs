@@ -17,6 +17,33 @@ pub const DEFAULT_CAPTURE_REFRESH_LEAD_SECONDS: u32 = 900;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ModelTurnStateMissingAction {
+    #[default]
+    NaturalThenCapture,
+    CaptureFirst,
+}
+
+impl ModelTurnStateMissingAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NaturalThenCapture => "natural_then_capture",
+            Self::CaptureFirst => "capture_first",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "natural_then_capture" => Some(Self::NaturalThenCapture),
+            "capture_first" => Some(Self::CaptureFirst),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelTurnStateCaptureTriggerMode {
     BeforeExpiryIfUsed,
     #[default]
@@ -162,6 +189,7 @@ pub struct AccountTurnStatePolicyUpdate {
     pub reuse_window_seconds: u32,
     pub refresh_lead_seconds: u32,
     pub capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
+    pub missing_state_action: ModelTurnStateMissingAction,
     pub capture_proxy_id: Option<String>,
     pub max_attempts: u8,
     pub attempt_timeout_seconds: u16,
@@ -185,6 +213,7 @@ impl std::fmt::Debug for AccountTurnStatePolicyUpdate {
             .field("reuse_window_seconds", &self.reuse_window_seconds)
             .field("refresh_lead_seconds", &self.refresh_lead_seconds)
             .field("capture_trigger_mode", &self.capture_trigger_mode)
+            .field("missing_state_action", &self.missing_state_action)
             .field("capture_proxy_id", &self.capture_proxy_id)
             .field("max_attempts", &self.max_attempts)
             .field("attempt_timeout_seconds", &self.attempt_timeout_seconds)
@@ -267,6 +296,7 @@ pub struct ModelTurnStateView {
     pub reuse_window_seconds: u32,
     pub refresh_lead_seconds: u32,
     pub capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
+    pub missing_state_action: ModelTurnStateMissingAction,
     pub capture_proxy_id: Option<String>,
     pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
     pub capture_policy: ModelTurnStateCapturePolicy,
@@ -291,6 +321,7 @@ pub struct AccountTurnStatePolicyView {
     pub reuse_window_seconds: u32,
     pub refresh_lead_seconds: u32,
     pub capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
+    pub missing_state_action: ModelTurnStateMissingAction,
     pub capture_proxy_id: Option<String>,
     pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
     pub capture_policy: ModelTurnStateCapturePolicy,
@@ -316,6 +347,41 @@ pub struct ModelTurnStateCaptureScope {
     pub capture_enabled: bool,
     pub capture_proxy_id: Option<String>,
     pub capture_policy: ModelTurnStateCapturePolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTurnStateCaptureActivation {
+    ActivateImmediately,
+    StageIfActiveFresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelTurnStateCaptureCommitOutcome {
+    Committed(ModelTurnStateView),
+    Unchanged(ModelTurnStateView),
+    RejectedValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelTurnStateCaptureRequest {
+    pub account_id: String,
+    pub requested_model: String,
+    pub identity_revision: u64,
+    pub effective_model: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelTurnStateCaptureWaitError {
+    Disabled,
+    ScopeChanged,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelTurnStateMissingPolicy {
+    pub lock_enabled: bool,
+    pub capture_enabled: bool,
+    pub action: ModelTurnStateMissingAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -557,6 +623,16 @@ pub trait TurnStateStore: Send + Sync {
         Err(TurnStateStoreError::Unavailable)
     }
 
+    /// 数据面在账号身份和实际发送模型均已确定后，为有界捕获准备精确 scope。
+    async fn load_model_capture_scope(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+        _effective_model: &str,
+    ) -> Result<ModelTurnStateCaptureScope, TurnStateStoreError> {
+        Err(TurnStateStoreError::Unavailable)
+    }
+
     /// 最终账号与 effective model 已确定后读取；只访问启动 hydrate/提交发布的内存快照。
     fn active_model_pin(
         &self,
@@ -564,6 +640,15 @@ pub trait TurnStateStore: Send + Sync {
         _identity_revision: u64,
         _effective_model: &str,
     ) -> Option<ActiveModelTurnStatePin> {
+        None
+    }
+
+    /// 最终账号身份边界上的缺值策略；只读取启动 hydrate/提交发布的内存快照。
+    fn model_missing_state_policy(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+    ) -> Option<ModelTurnStateMissingPolicy> {
         None
     }
 
@@ -599,7 +684,8 @@ pub trait TurnStateStore: Send + Sync {
         &self,
         _scope: &ModelTurnStateCaptureScope,
         _value: &str,
-    ) -> Result<ModelTurnStateView, TurnStateStoreError> {
+        _activation: ModelTurnStateCaptureActivation,
+    ) -> Result<ModelTurnStateCaptureCommitOutcome, TurnStateStoreError> {
         Err(TurnStateStoreError::Unavailable)
     }
 
@@ -624,4 +710,13 @@ pub trait TurnStateStore: Send + Sync {
     ) -> Result<bool, TurnStateStoreError> {
         Ok(false)
     }
+}
+
+#[async_trait]
+pub trait ModelTurnStateCaptureCoordinator: Send + Sync {
+    /// 把当前客户端请求并入既有有界捕获队列，并等待该次触发收敛。
+    async fn capture_for_request(
+        &self,
+        request: ModelTurnStateCaptureRequest,
+    ) -> Result<ActiveModelTurnStatePin, ModelTurnStateCaptureWaitError>;
 }

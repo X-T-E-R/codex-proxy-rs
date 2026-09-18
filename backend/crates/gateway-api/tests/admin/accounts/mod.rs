@@ -157,7 +157,8 @@ mod turn_state {
     };
     use gateway_core::provider_ports::turn_state::{
         AccountTurnStatePolicyView, ModelTurnStateCapturePolicy, ModelTurnStateCaptureProxy,
-        ModelTurnStateCaptureTriggerMode, ModelTurnStatePin, ModelTurnStateView,
+        ModelTurnStateCaptureTriggerMode, ModelTurnStateMissingAction, ModelTurnStatePin,
+        ModelTurnStateView,
     };
     use serde_json::json;
 
@@ -246,6 +247,10 @@ mod turn_state {
             update.capture_trigger_mode,
             ModelTurnStateCaptureTriggerMode::OnAttributedFailure
         );
+        assert_eq!(
+            update.missing_state_action,
+            ModelTurnStateMissingAction::NaturalThenCapture
+        );
         assert_eq!(update.attempt_timeout_seconds, 30);
         assert_eq!(update.job_timeout_seconds, 8);
 
@@ -258,6 +263,7 @@ mod turn_state {
             reuse_window_seconds: 7_200,
             refresh_lead_seconds: 900,
             capture_trigger_mode: ModelTurnStateCaptureTriggerMode::OnAttributedFailure,
+            missing_state_action: Default::default(),
             capture_proxy_id: None,
             capture_proxy: None,
             capture_policy: ModelTurnStateCapturePolicy {
@@ -274,6 +280,7 @@ mod turn_state {
         assert_eq!(value["lockEnabled"], true);
         assert_eq!(value["captureEnabled"], true);
         assert_eq!(value["captureTriggerMode"], "on_attributed_failure");
+        assert_eq!(value["missingStateAction"], "natural_then_capture");
         assert_eq!(value["configRevision"], 8);
     }
 
@@ -293,6 +300,7 @@ mod turn_state {
                 reuse_window_seconds: 3_600,
                 refresh_lead_seconds: 900,
                 capture_trigger_mode: ModelTurnStateCaptureTriggerMode::BeforeExpiryIfUsed,
+                missing_state_action: Default::default(),
                 capture_proxy_id: Some("proxy_saved".to_owned()),
                 capture_proxy: Some(ModelTurnStateCaptureProxy {
                     id: "proxy_saved".to_owned(),

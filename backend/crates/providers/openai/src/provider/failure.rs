@@ -70,6 +70,7 @@ impl MappedProviderFailure {
 
 pub(super) enum PreCommitPoll<T> {
     Upstream(T),
+    TurnStateUpdated,
     GraceElapsed,
 }
 

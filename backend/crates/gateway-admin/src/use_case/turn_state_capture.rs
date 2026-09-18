@@ -11,12 +11,15 @@ use gateway_core::{
     account::ProviderAccountId,
     lifecycle::CancellationToken,
     provider_ports::turn_state::{
-        ModelTurnStateCaptureCursor, ModelTurnStateCaptureScope, ModelTurnStateView,
-        TurnStateStore, TurnStateStoreError, valid_model_turn_state,
+        ActiveModelTurnStatePin, ModelTurnStateCaptureActivation,
+        ModelTurnStateCaptureCommitOutcome, ModelTurnStateCaptureCoordinator,
+        ModelTurnStateCaptureCursor, ModelTurnStateCaptureRequest, ModelTurnStateCaptureScope,
+        ModelTurnStateCaptureWaitError, ModelTurnStateView, TurnStateStore, TurnStateStoreError,
+        valid_model_turn_state,
     },
     task::{DaemonTask, WorkerTaskError},
 };
-use tokio::sync::{Mutex as AsyncMutex, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use uuid::Uuid;
 
 use crate::{
@@ -71,8 +74,17 @@ struct ScopeKey {
 struct JobState {
     view: ModelTurnStateCaptureJob,
     scope: ModelTurnStateCaptureScope,
+    activation: ModelTurnStateCaptureActivation,
     cancellation: CancellationToken,
     commit_guard: Arc<AsyncMutex<()>>,
+    completion: Arc<Notify>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureOrigin {
+    Manual,
+    Automatic,
+    Request,
 }
 
 impl ModelTurnStateCaptureManager {
@@ -116,7 +128,8 @@ impl ModelTurnStateCaptureManager {
         {
             return Err(AdminError::conflict("Turn State 已变化，请刷新后重试"));
         }
-        self.enqueue(scope_from_view(&view), true).await
+        self.enqueue(scope_from_view(&view), CaptureOrigin::Manual)
+            .await
     }
 
     pub(crate) fn get(&self, job_id: &str) -> Result<ModelTurnStateCaptureJob, AdminError> {
@@ -157,7 +170,7 @@ impl ModelTurnStateCaptureManager {
         };
         cancellation.cancel();
         let _commit = commit_guard.lock().await;
-        {
+        let completion = {
             let mut state = lock(&self.inner.state);
             let job = state
                 .jobs
@@ -174,7 +187,9 @@ impl ModelTurnStateCaptureManager {
             job.view.status = ModelTurnStateCaptureStatus::Cancelled;
             job.view.reason = Some("cancelled".to_owned());
             job.view.finished_at = Some(Utc::now());
-        }
+            Arc::clone(&job.completion)
+        };
+        completion.notify_waiters();
         self.release_active(job_id);
         self.get(job_id)
     }
@@ -238,7 +253,7 @@ impl ModelTurnStateCaptureManager {
     async fn enqueue(
         &self,
         scope: ModelTurnStateCaptureScope,
-        manual: bool,
+        origin: CaptureOrigin,
     ) -> Result<ModelTurnStateCaptureJob, AdminError> {
         let proxy_id = scope
             .capture_proxy_id
@@ -271,11 +286,16 @@ impl ModelTurnStateCaptureManager {
                     .get(active)
                     .ok_or_else(|| AdminError::conflict("账号已有捕获任务"))?;
                 if ScopeKey::from_scope(&active.scope) == key {
+                    if origin == CaptureOrigin::Manual
+                        && active.activation == ModelTurnStateCaptureActivation::StageIfActiveFresh
+                    {
+                        return Err(AdminError::conflict("账号已有自动捕获任务，请先取消后重试"));
+                    }
                     return Ok(active.view.clone());
                 }
                 return Err(AdminError::conflict("账号已有其他模型的捕获任务"));
             }
-            if !manual
+            if origin != CaptureOrigin::Manual
                 && state.cooldowns.get(&key).is_some_and(|finished_at| {
                     *finished_at
                         + chrono::Duration::seconds(i64::from(
@@ -295,8 +315,15 @@ impl ModelTurnStateCaptureManager {
                 JobState {
                     view: view.clone(),
                     scope,
+                    activation: if matches!(origin, CaptureOrigin::Manual | CaptureOrigin::Request)
+                    {
+                        ModelTurnStateCaptureActivation::ActivateImmediately
+                    } else {
+                        ModelTurnStateCaptureActivation::StageIfActiveFresh
+                    },
                     cancellation: CancellationToken::new(),
                     commit_guard: Arc::new(AsyncMutex::new(())),
+                    completion: Arc::new(Notify::new()),
                 },
             );
             trim_finished(&mut state);
@@ -353,7 +380,7 @@ impl ModelTurnStateCaptureManager {
                 "model turn state capture cooldown could not be persisted"
             );
         }
-        let key = {
+        let (key, completion) = {
             let mut state = lock(&self.inner.state);
             let Some(job) = state.jobs.get_mut(job_id) else {
                 return;
@@ -364,8 +391,12 @@ impl ModelTurnStateCaptureManager {
             job.view.status = status;
             job.view.reason = reason.map(str::to_owned);
             job.view.finished_at = Some(now);
-            ScopeKey::from_scope(&job.scope)
+            (
+                ScopeKey::from_scope(&job.scope),
+                Arc::clone(&job.completion),
+            )
         };
+        completion.notify_waiters();
         let mut state = lock(&self.inner.state);
         state.cooldowns.insert(key, now);
         drop(state);
@@ -373,7 +404,7 @@ impl ModelTurnStateCaptureManager {
     }
 
     async fn run_job(&self, job_id: String) {
-        let (scope, cancellation, commit_guard, created_at) = {
+        let (scope, activation, cancellation, commit_guard, created_at) = {
             let mut state = lock(&self.inner.state);
             let Some(job) = state.jobs.get_mut(&job_id) else {
                 return;
@@ -385,6 +416,7 @@ impl ModelTurnStateCaptureManager {
             job.view.started_at = Some(Utc::now());
             (
                 job.scope.clone(),
+                job.activation,
                 job.cancellation.clone(),
                 Arc::clone(&job.commit_guard),
                 job.view.created_at,
@@ -530,13 +562,25 @@ impl ModelTurnStateCaptureManager {
                         let commit_result = self
                             .inner
                             .store
-                            .commit_model_capture(&scope, &candidate)
+                            .commit_model_capture(&scope, &candidate, activation)
                             .await;
                         match commit_result {
-                            Ok(_) => {
+                            Ok(ModelTurnStateCaptureCommitOutcome::Committed(_)) => {
                                 self.finish(&job_id, ModelTurnStateCaptureStatus::Succeeded, None)
                                     .await;
                                 return;
+                            }
+                            Ok(ModelTurnStateCaptureCommitOutcome::Unchanged(_)) => {
+                                self.finish(
+                                    &job_id,
+                                    ModelTurnStateCaptureStatus::Succeeded,
+                                    Some("unchanged_value"),
+                                )
+                                .await;
+                                return;
+                            }
+                            Ok(ModelTurnStateCaptureCommitOutcome::RejectedValue) => {
+                                reason = "rejected_value";
                             }
                             Err(TurnStateStoreError::Conflict | TurnStateStoreError::NotFound) => {
                                 self.finish(
@@ -617,13 +661,87 @@ impl ModelTurnStateCaptureManager {
         for scope in scopes {
             let account_id = scope.account_id.clone();
             let effective_model = scope.effective_model.clone();
-            if let Err(error) = self.enqueue(scope, false).await {
+            if let Err(error) = self.enqueue(scope, CaptureOrigin::Automatic).await {
                 tracing::debug!(
                     account_id,
                     effective_model,
                     reason = error.message(),
                     "automatic model turn state capture is waiting for prerequisites"
                 );
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelTurnStateCaptureCoordinator for ModelTurnStateCaptureManager {
+    async fn capture_for_request(
+        &self,
+        request: ModelTurnStateCaptureRequest,
+    ) -> Result<ActiveModelTurnStatePin, ModelTurnStateCaptureWaitError> {
+        let scope = self
+            .inner
+            .store
+            .load_model_capture_scope(
+                &request.account_id,
+                request.identity_revision,
+                &request.effective_model,
+            )
+            .await
+            .map_err(|_| ModelTurnStateCaptureWaitError::Unavailable)?;
+        if scope.identity_revision != request.identity_revision
+            || scope.effective_model != request.effective_model
+        {
+            return Err(ModelTurnStateCaptureWaitError::ScopeChanged);
+        }
+        if !scope.capture_enabled {
+            return Err(ModelTurnStateCaptureWaitError::Disabled);
+        }
+        if let Some(pin) = self.inner.store.active_model_pin(
+            &request.account_id,
+            request.identity_revision,
+            &request.effective_model,
+        ) {
+            return Ok(pin);
+        }
+        let job = self
+            .enqueue(scope, CaptureOrigin::Request)
+            .await
+            .map_err(|_| ModelTurnStateCaptureWaitError::Unavailable)?;
+        let completion = {
+            let state = lock(&self.inner.state);
+            Arc::clone(
+                &state
+                    .jobs
+                    .get(&job.job_id)
+                    .ok_or(ModelTurnStateCaptureWaitError::Unavailable)?
+                    .completion,
+            )
+        };
+        loop {
+            let notified = completion.notified();
+            let status = self
+                .get(&job.job_id)
+                .map_err(|_| ModelTurnStateCaptureWaitError::Unavailable)?
+                .status;
+            match status {
+                ModelTurnStateCaptureStatus::Succeeded => {
+                    return self
+                        .inner
+                        .store
+                        .active_model_pin(
+                            &request.account_id,
+                            request.identity_revision,
+                            &request.effective_model,
+                        )
+                        .ok_or(ModelTurnStateCaptureWaitError::Unavailable);
+                }
+                ModelTurnStateCaptureStatus::Failed | ModelTurnStateCaptureStatus::Cancelled => {
+                    return Err(ModelTurnStateCaptureWaitError::Unavailable);
+                }
+                ModelTurnStateCaptureStatus::Queued | ModelTurnStateCaptureStatus::Running => {
+                    notified.await;
+                }
             }
         }
     }

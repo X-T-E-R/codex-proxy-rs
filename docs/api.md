@@ -406,11 +406,20 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 模型 Turn State 统一兼容上游 HTTP/SSE 与 WebSocket。手动值支持 1–16384 个可打印 ASCII 字节；普通观测和自动捕获
 仍只接纳正好 292 字节的可打印 ASCII。官方客户端把该值用于
 单 turn sticky routing；跨 turn 模型锁是本网关的实验性本地策略，不代表上游提供了同等持久性保证。数据面优先级为
-未过本地复用窗口的 active、正常 continuation；旧版账号覆盖不再作为 runtime fallback，只能在选择模型后
-显式导入。`reuseWindowSeconds` 默认 7200 秒；candidate 晋升不重置自己的 deadline；没有候选时业务继续走普通请求。
+未过本地复用窗口的 active、正常 continuation；已过期或被拒绝的托管值不会从 provider session state
+回流，无关的显式客户端 continuation 仍保留。关闭模型锁时，同一 turn 已携带的托管 continuation 也保留；
+重新开启锁后，没有可用模型 pin 时才抑制该托管 fallback。旧版账号覆盖不再作为 runtime fallback，只能在
+选择模型后显式导入。`reuseWindowSeconds` 默认 7200 秒；candidate 晋升不重置自己的 deadline。
 账号策略的 `captureTriggerMode` 支持 `on_attributed_failure`（默认）、`before_expiry_if_used`、
-`first_request_after_expiry` 与 `failure_or_first_after_expiry`。只有提前捕获模式使用
-`refreshLeadSeconds`，且 active 从未在最终 HTTP/WS 发送边界实际使用时不会探测。
+`first_request_after_expiry` 与 `failure_or_first_after_expiry`。模式控制提前或到期首请求等额外来源；任何模式下
+已经确认的实际发送值失效都会在自动捕获开启时补值。只有提前捕获模式使用 `refreshLeadSeconds`，且 active
+从未在最终 HTTP/WS 发送边界实际使用时不会探测。
+`missingStateAction` 支持 `natural_then_capture`（默认）和 `capture_first`。该字段只在
+`lockEnabled` 与 `captureEnabled` 同时开启时控制数据面；只开捕获仍允许后台或手动收集，普通业务保持
+fail-open。`capture_first` 先等待现有有界捕获任务成功，再发送一次业务请求；失败或超时不发送业务。
+`natural_then_capture` 先发送一个全新无托管 state 的自然请求：收到合格 292 值时直接使用该响应；首次
+业务交付前明确收到非 292 值，或直到终态/错误仍无值时，先取消并释放源流，再等待捕获成功后最多重发
+一次。业务已经交付后不透明重放。
 
 模型状态响应包含实际映射后的 `effectiveModel`、独立的 `identityRevision`、模型配置
 `configRevision`、`pin`、`candidate`、`nextCaptureAt`、`nextActivationAt`、`captureNotBefore`、
@@ -425,24 +434,27 @@ envelope timestamp，不是 expiry；长度或多一个 16 字节 ciphertext blo
 保留已有值并缩短 `reuseWindowSeconds` 时只收紧 deadline，不刷新 `capturedAt`；放大窗口也不延长既有
 deadline。`attemptTimeoutSeconds` 范围为 1–60，`jobTimeoutSeconds` 范围为 1–300，且前者不得大于后者。
 普通 access-token refresh 只推进 credential revision，不改变账号身份代次；真实身份替换才隔离旧模型锁。
-EMPTY 的普通请求按 bootstrap 规则运行：返回 292 字节可打印 ASCII 时直接学习，明确非 292 字节时只登记一次捕获。
-AGED 值不会继续发送；是否由首请求或归因拒绝捕获取决于 `captureTriggerMode`。实际 HTTP 响应头或
+EMPTY/AGED/INVALID 都表示当前没有可用托管值；已保存的过期值只保留审计，不阻止重新学习或捕获。
+实际 HTTP 响应头或
 WebSocket metadata 事件返回 292 字节可打印 ASCII 值时，
 按 account identity、effective model 和配置 revision 直接保存为 `observation` pin；只有 encoded byte length
-明确不等于 292 时，才登记一次自动捕获请求。正好 292 字节但不可打印的值只保留为 suspect，
-不保存模型锁也不消耗住宅代理。没有返回 Turn State 或通用密文错误均不登记。
+明确不等于 292 时立即取消尚未交付的源流并登记捕获。已过期或已拒绝值的同值普通观测不会重置
+`capturedAt`、deadline 或使其复活；正好 292 字节但不可打印的值只保留为 suspect，不保存模型锁也不消耗
+住宅代理。HTTP headers 缺少该字段不表示失败，因为 SSE/WS metadata 可能稍后返回；只有实际发送完成后在
+terminal、错误或超时边界仍没有值，才按 generation/candidate ID fence 退役该次实际发送值。
 请求先尝试 WebSocket、后在发送 payload 前回退到 HTTP 时，按实际 HTTP 响应执行同一观察状态机。自动任务
 使用选定且最近 24 小时测试成功的已管理代理；每次尝试
-创建独立 HTTP 连接，收到首个 Turn State header 或 SSE event 后立即释放剩余响应。
+创建独立 HTTP 连接，只在成功 HTTP 状态后接纳 Turn State header；收到首个合格 header 或 SSE event 后立即释放剩余响应。
 非 292 字节候选与其他可重试失败使用同一退避。任务在取得 commit guard 后最后检查 deadline 和取消；
 检查通过并开始 Store commit 后进入不可取消区，必须等待数据库结果与进程内 pin 发布完成。此后到达的
 取消请求属于 best-effort，job deadline 也不丢弃已开始的 commit；提交成功时任务最终返回 `succeeded`。
-捕获不创建模型请求、用量、额度、限流、账号健康、circuit、feedback 或账号最近观测。失败冷却持久化，
-重启后不会立刻重复付费探测。
-普通上游失败不自动失效模型锁。只有 Responses HTTP/WS 请求确实注入了当前模型锁，且结构化错误的
-`param`/`target` 明确指向 `x-codex-turn-state` 时，后端才按当前 pin fingerprint 与配置版本 CAS 标记
-INVALID；仅出现 `invalid_encrypted_content`、`Encrypted content could not be ...` 文本或长度变化时只保留失败事实。
-默认模式下，明确归因拒绝会失效当前版本并登记一次捕获；通用 429、5xx、网络错误或只有错误文本均不会触发。
+捕获不创建模型请求、用量、额度、限流、账号健康、circuit、feedback 或账号最近观测。仍可用的同值捕获
+以 `succeeded / unchanged_value` 结束当前任务，不续期也不执行下一次付费尝试；过期或已拒绝的同值才进入
+剩余 attempt。一次触发耗尽后清除请求信号并进入冷却，没有新的业务发送或失败信号时不会自动永动。
+Responses HTTP/WS 请求确实注入当前模型锁后，明确非 292 返回、实际发送后的终态无值，以及结构化错误的
+`param`/`target` 明确指向 `x-codex-turn-state`，都会按 pin fingerprint、generation 与 candidate ID CAS
+退役实际发送值；迟到的 A 反馈不会淘汰已切换的 B。有可用 candidate 时原子晋升且不续期；没有 candidate
+时按账号开关进入捕获。发送前网络失败、通用错误文本或无法确认是否发送的失败不据此退役模型锁。
 
 账号列表支持以下稳定值：
 

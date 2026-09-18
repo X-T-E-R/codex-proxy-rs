@@ -361,6 +361,10 @@ export type ModelTurnStateCaptureTriggerMode
     | 'first_request_after_expiry'
     | 'failure_or_first_after_expiry'
 
+export type ModelTurnStateMissingStateAction
+  = 'natural_then_capture'
+    | 'capture_first'
+
 export interface ModelTurnStateCapturePolicy {
   maxAttempts: number
   attemptTimeoutSeconds: number
@@ -397,6 +401,7 @@ export interface AccountModelTurnStateResponse {
   reuseWindowSeconds: number
   refreshLeadSeconds: number
   captureTriggerMode: ModelTurnStateCaptureTriggerMode
+  missingStateAction?: ModelTurnStateMissingStateAction
   captureProxyId: string | null
   captureProxy: null | {
     id: string
@@ -451,6 +456,7 @@ export interface AccountTurnStatePolicyResponse {
   reuseWindowSeconds: number
   refreshLeadSeconds: number
   captureTriggerMode: ModelTurnStateCaptureTriggerMode
+  missingStateAction?: ModelTurnStateMissingStateAction
   captureProxyId: string | null
   captureProxy: null | {
     id: string
@@ -532,6 +538,7 @@ interface AccountTurnStatePolicyUpdateParam extends AccountIdParam {
   reuseWindowSeconds: number
   refreshLeadSeconds: number
   captureTriggerMode: ModelTurnStateCaptureTriggerMode
+  missingStateAction: ModelTurnStateMissingStateAction
   captureProxyId: string | null
   maxAttempts: number
   attemptTimeoutSeconds: number

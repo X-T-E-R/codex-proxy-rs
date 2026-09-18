@@ -70,13 +70,10 @@ pub(super) fn reduce_websocket_event(
         websocket_metadata_headers(&value),
     );
     let turn_state_observation = websocket_metadata_turn_state(&value);
-    let turn_state_update = turn_state_observation.clone().and_then(|turn_state| {
-        if metadata.turn_state.is_some() {
-            return None;
-        }
-        metadata.turn_state = Some(turn_state.clone());
-        Some(turn_state)
-    });
+    let turn_state_update = turn_state_observation.clone();
+    if metadata.turn_state.is_none() {
+        metadata.turn_state.clone_from(&turn_state_observation);
+    }
 
     let event = websocket_event_type(&value);
     let completed_response_id = websocket_response_completed_id(&value);

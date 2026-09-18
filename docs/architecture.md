@@ -435,35 +435,47 @@ hydrate 模型状态到进程内快照，HTTP attempt 在最终账号与模型�
 active 在 `deadline - refresh lead`（默认提前 900 秒）进入有界捕获队列。捕获成功且 active 仍有效时保存
 candidate；active 到期或明确失效时原子晋升仍有效且不同的 candidate，candidate 的 deadline 保持
 `capturedAt + reuse window`，晋升不续期。热路径在到期瞬间可直接解析 candidate，后台事务只整理持久状态。
-没有 candidate 时停止注入并继续普通业务。EMPTY 与明确 INVALID 先等待普通 Responses 流量。
-账号捕获模式决定自动队列来源：默认 `on_attributed_failure` 只接受实际发送版本的结构化归因拒绝；
-`before_expiry_if_used` 仅在当前 active 曾从最终 HTTP/WS 边界实际发送后执行提前捕获；
-`first_request_after_expiry` 在到期后的首个业务请求发出非阻塞 CAS 信号；
-`failure_or_first_after_expiry` 合并后两类事件。自动捕获关闭时只保留手动任务。active/candidate 换代会重置
+没有 candidate 时停止注入。已过期或明确 INVALID 的托管值只保留审计，不会从 provider session state
+回流，也不会因同值普通观测重置 TTL；无关的显式客户端 continuation 仍保留。关闭模型锁本身不清除
+同一 turn 已携带的托管 continuation；重新开启锁后，没有可用模型 pin 时才抑制该托管 fallback。
+账号捕获模式决定额外的主动队列来源：默认 `on_attributed_failure` 只处理实际发送版本已确认的失败；
+`before_expiry_if_used` 在当前 active 曾从最终 HTTP/WS 边界实际发送后增加提前捕获；
+`first_request_after_expiry` 在到期后的首个业务请求增加非阻塞 CAS 信号；
+`failure_or_first_after_expiry` 合并失败与到期首请求。任何模式下，已经确认的实际发送值失效都会在自动捕获
+开启时补值；自动捕获关闭时只保留手动任务。active/candidate 换代会重置
 各自使用计数，迟到 sent receipt 必须同时匹配 generation、candidate ID 与值才会计入。
+缺少可用值时的账号策略为 `natural_then_capture`（默认）或 `capture_first`，且只在锁定与自动捕获同时开启时
+进入数据面门控；只开捕获不改变普通业务。前者先用全新无 state 请求自然学习，首次业务交付前明确收到
+非 292 值，或直到终态/错误仍无值时，先取消并释放源流，再等待同一有界队列成功后最多重发一次；后者在
+首次业务发送前等待捕获。捕获失败或超时结束本次门控，已有业务交付后不透明重放。
 实际 HTTP 响应头或 SSE metadata 事件返回 292 字节可打印 ASCII 值时，按当前
 identity/model/config fence 直接发布 `observation` pin；只有 encoded byte length 明确不等于 292 时才写入
 持久捕获信号，随后进入 Admin-owned 有界队列。正好 292 字节但不可打印的值只记为 suspect；Fernet
 envelope 解析结果仅作为观测 metadata，不参与 pin 准入。
-观察 scope 随请求准备，由实际 HTTP 或 WebSocket transport 返回值消费；未返回值与无法归因的错误不推进状态机。SSE/WS 观察只旁路解析已交付字节，不修改
-业务流内容或顺序。
+观察 scope 随请求准备，由实际 HTTP 或 WebSocket transport 返回值消费。HTTP headers 缺值不会提前裁决；
+SSE/WS 等到 metadata 或 terminal/error/timeout。当前 generation 确实发送后仍无值，或明确返回非 292 值，
+会按 generation/candidate fence 退役实际发送值；发送前网络失败不推进该状态机。SSE/WS 观察只旁路解析
+已接收字节，不修改已经交付的业务流内容或顺序。
 
 捕获执行任务驻留进程内，排队时机、失败冷却和候选值持久化；按账号与模型 singleflight、全局最多并发 2 个。每个 attempt 使用选定且最近测试
 成功的 managed proxy 创建新的无池 HTTP/SSE client，并以当前账号 credential 和 effective model 发送固定
-最小探针；首个 Turn State header/event 到达即取消剩余 body。只有精确 292 字节可打印 ASCII 值能经
+最小探针；只有成功 HTTP 状态的 header 才可接纳，首个 Turn State header/event 到达即取消剩余 body。只有精确 292 字节可打印 ASCII 值能经
 identity/model/config fence 提交；配置关闭、取消、身份或映射变化使迟到结果失效。捕获绕过普通 Core
 执行链，因此不创建 `model_requests`、usage、request/账号 Turn State observation，也不改变 quota、
-rate limit、账号健康、circuit 或 feedback。手动获取到与 active/candidate 相同的值不延长原 `capturedAt` 和 deadline；
-已明确拒绝的同值也不能作为 candidate 恢复。
+rate limit、账号健康、circuit 或 feedback。获取到仍可用 active 的同值以 `unchanged_value` 结束当前任务，
+不执行下一 attempt，也不延长原 `capturedAt` 和 deadline；与 candidate 相同的值也不延长其期限，已明确拒绝的同值不能作为
+candidate 恢复。手动获取到不同的有效值时立即替换 active；自动提前捕获在当前 active 仍有效时仍保留同值
+幂等，并只将不同值暂存为 candidate。
 普通 292 字节观测是新的本地锁定起点，并清除等待中的住宅捕获信号。
-普通上游错误不失效 pin。只有当前 Responses attempt 确实注入模型 pin，结构化错误的 `param` 或
-`target` 明确指向 `x-codex-turn-state`，并且 fingerprint、identity、model 与 active generation/candidate ID
-仍匹配时，Store 才 CAS 失效当前实际发送值并晋升可用候选；通用密文错误码或文本只能作为
-SUSPECT，不能触发自动轮换。
+只有当前 Responses attempt 确实注入模型 pin，明确非 292 返回、实际发送后的终态无值，或结构化错误的
+`param` / `target` 明确指向 `x-codex-turn-state`，并且 fingerprint、identity、model 与 active
+generation/candidate ID 仍匹配时，Store 才 CAS 失效当前实际发送值并晋升可用候选；发送前网络失败和
+通用密文错误文本不能触发轮换。
 管理端 mutation 同时回传读取时的 config revision、identity revision 与 effective model；三项共同 fence
 alias 映射和身份切换。手动替换、清除、失效和旧值导入都操作同一 active/candidate 状态。
 捕获在取得 commit guard 后设置明确线性化点：点前 deadline/cancel 阻止提交；点后 Store commit 不可取消，
-必须等待数据库结果和缓存发布，再以真实结果收敛任务。非 292 候选也必须经过统一退避。
+必须等待数据库结果和缓存发布，再以真实结果收敛任务。非 292 候选也必须经过统一退避。一次触发失败后
+清除持久请求信号并进入冷却；没有新的发送或失败触发时不自动重复。
 保存某个 scope 只取消同一 identity/effective-model 的任务。自动扫描按稳定 scope cursor 每轮读取最多 64 项，
 即使当前页全部因代理、冷却或 active job 被跳过，下一轮也会继续后页并在末页后回绕。
 

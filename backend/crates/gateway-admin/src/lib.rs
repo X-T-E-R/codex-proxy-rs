@@ -7,6 +7,7 @@ use std::{fmt, path::Path, sync::Arc, time::Duration};
 use gateway_core::{
     engine::execution::ClientKeyVerifier,
     engine::probe::AccountProbe,
+    provider_ports::turn_state::ModelTurnStateCaptureCoordinator,
     routing::ProviderKind,
     runtime::SnapshotControl,
     task::{
@@ -280,6 +281,7 @@ impl AdminServices {
 pub struct AdminBundle {
     services: AdminServices,
     worker_contributions: Vec<WorkerContribution>,
+    turn_state_capture: Option<Arc<dyn ModelTurnStateCaptureCoordinator>>,
 }
 
 impl AdminBundle {
@@ -288,7 +290,14 @@ impl AdminBundle {
         self.services.clone()
     }
 
-    /// 取出 Admin Worker 贡献；只能调用一次，与其它 Bundle 的贡献一并交给 Host。
+    #[must_use]
+    pub fn turn_state_capture_coordinator(
+        &self,
+    ) -> Option<Arc<dyn ModelTurnStateCaptureCoordinator>> {
+        self.turn_state_capture.clone()
+    }
+
+    /// 取出 Backup Worker 贡献；只能调用一次，与其它 Bundle 的贡献一并交给 Host。
     pub fn take_worker_contributions(&mut self) -> Vec<WorkerContribution> {
         std::mem::take(&mut self.worker_contributions)
     }
@@ -444,12 +453,16 @@ pub async fn initialize(
         backups,
     };
     let mut worker_contributions = backup_worker_contribution(backup_task)?;
-    if let Some(manager) = turn_state_capture {
+    if let Some(manager) = turn_state_capture.clone() {
         worker_contributions.push(turn_state_capture_worker_contribution(manager)?);
     }
+    let turn_state_capture_coordinator = turn_state_capture
+        .as_ref()
+        .map(|manager| Arc::new(manager.clone()) as Arc<dyn ModelTurnStateCaptureCoordinator>);
     Ok(AdminBundle {
         services,
         worker_contributions,
+        turn_state_capture: turn_state_capture_coordinator,
     })
 }
 

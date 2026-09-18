@@ -91,6 +91,7 @@ pub async fn run() -> Result<(), BootstrapError> {
         },
     )
     .await?;
+    openai.set_turn_state_capture_coordinator(admin.turn_state_capture_coordinator());
     host.report_startup_ready("Admin");
 
     let mut probes = store.health_probes();

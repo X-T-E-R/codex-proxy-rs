@@ -199,22 +199,17 @@ impl OpenAiResponseObservationState {
     }
 
     pub(super) fn merge_client_header(&mut self, name: &str, value: &str) -> bool {
-        let value = Bytes::copy_from_slice(value.as_bytes());
-        if let Some((_, existing)) = self
+        if self
             .response_metadata
             .client_headers
-            .iter_mut()
-            .find(|(existing_name, _)| existing_name.eq_ignore_ascii_case(name))
+            .iter()
+            .any(|(existing_name, _)| existing_name.eq_ignore_ascii_case(name))
         {
-            if *existing == value {
-                return false;
-            }
-            *existing = value;
-            return true;
+            return false;
         }
         self.response_metadata
             .client_headers
-            .push((name.to_owned(), value));
+            .push((name.to_owned(), Bytes::copy_from_slice(value.as_bytes())));
         true
     }
 
