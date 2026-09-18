@@ -658,11 +658,17 @@ pub struct UsageRecordDetail {
 pub struct TurnStateSummary {
     pub classification: String,
     pub bytes: Option<u64>,
+    pub relation: String,
+    pub sent_bytes: Option<u64>,
+    pub returned_bytes: Option<u64>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct TurnStateDetail {
     pub summary: TurnStateSummary,
+    pub relation: String,
+    pub sent: Option<TurnStateEvidence>,
+    pub returned: Option<TurnStateEvidence>,
     pub value: Option<String>,
     pub sha256: Option<String>,
     pub observed_at: Option<DateTime<Utc>>,
@@ -672,11 +678,43 @@ pub struct TurnStateDetail {
     pub changed: bool,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct TurnStateEvidence {
+    pub value: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub timestamp: DateTime<Utc>,
+    pub source: String,
+    pub transport: String,
+    pub token_version: Option<u8>,
+    pub issued_at: Option<DateTime<Utc>>,
+    pub account_id: Option<String>,
+    pub identity_revision: Option<u64>,
+    pub effective_model: Option<String>,
+    pub generation: Option<u64>,
+    pub candidate_id: Option<String>,
+    pub upstream_response_id: Option<String>,
+    pub changed: bool,
+}
+
+impl std::fmt::Debug for TurnStateEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnStateEvidence")
+            .field("value", &"[REDACTED]")
+            .field("sha256", &self.sha256)
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for TurnStateDetail {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TurnStateDetail")
             .field("summary", &self.summary)
+            .field("relation", &self.relation)
+            .field("sent", &self.sent)
+            .field("returned", &self.returned)
             .field("value", &self.value.as_ref().map(|_| "[REDACTED]"))
             .field("sha256", &self.sha256)
             .field("observed_at", &self.observed_at)
@@ -694,6 +732,14 @@ pub struct TurnStateCounts {
     pub observed_other: u64,
     pub unobserved: u64,
     pub not_collected: u64,
+    pub same: u64,
+    pub different: u64,
+    pub only_sent: u64,
+    pub only_returned: u64,
+    pub neither: u64,
+    pub unknown: u64,
+    pub sent_count: u64,
+    pub returned_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

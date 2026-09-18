@@ -307,6 +307,7 @@ export interface AccountModelTurnStateResponse {
   lockEnabled: boolean
   captureEnabled: boolean
   reuseWindowSeconds: number
+  refreshLeadSeconds: number
   captureProxyId: string | null
   captureProxy: null | {
     id: string
@@ -316,29 +317,38 @@ export interface AccountModelTurnStateResponse {
     ready: boolean
   }
   capturePolicy: ModelTurnStateCapturePolicy
-  pin: null | {
-    value: string
-    encodedBytes: number
-    rawBytes: number | null
-    decodedBytes: number | null
-    ciphertextBytes: number | null
-    tokenVersion: number | null
-    envelopeFormat: 'fernet_v0x80_candidate' | null
-    issuedAt: string | null
-    timestampVerified: boolean
-    sha256: string
-    capturedAt: string
-    reuseDeadline: string
-    source: 'manual' | 'capture' | 'observation'
-    compatibleTransport: 'http'
-    status: 'fresh' | 'aged'
-  }
+  pin: null | ModelTurnStateValue
+  candidate: null | ModelTurnStateValue
+  nextCaptureAt: string | null
+  nextActivationAt: string | null
+  captureNotBefore: string | null
+  waitingReason: string | null
   legacyOverride: {
     enabled: boolean
     configured: boolean
-    willApplyWhenModelPinUnavailable: boolean
+    value: string | null
   }
   capture: ModelTurnStateCaptureJob | null
+}
+
+export interface ModelTurnStateValue {
+  value: string
+  encodedBytes: number
+  rawBytes: number | null
+  decodedBytes: number | null
+  ciphertextBytes: number | null
+  tokenVersion: number | null
+  envelopeFormat: 'fernet_v0x80_candidate' | null
+  issuedAt: string | null
+  timestampVerified: boolean
+  sha256: string
+  capturedAt: string
+  reuseDeadline: string
+  source: 'manual' | 'capture' | 'observation'
+  compatibleTransport: 'http'
+  status: 'fresh' | 'aged'
+  generation: number
+  id: string | null
 }
 
 export interface AccountTurnStatePolicyResponse {
@@ -348,6 +358,7 @@ export interface AccountTurnStatePolicyResponse {
   lockEnabled: boolean
   captureEnabled: boolean
   reuseWindowSeconds: number
+  refreshLeadSeconds: number
   captureProxyId: string | null
   captureProxy: null | {
     id: string
@@ -417,7 +428,7 @@ interface AccountModelTurnStateUpdateParam extends AccountModelTurnStateParam {
   expectedRevision: number
   expectedIdentityRevision: number
   expectedEffectiveModel: string
-  pinAction: 'keep' | 'replace' | 'clear' | 'invalidate'
+  pinAction: 'keep' | 'replace' | 'clear' | 'invalidate' | 'importLegacy'
   value?: string
 }
 
@@ -427,6 +438,7 @@ interface AccountTurnStatePolicyUpdateParam extends AccountIdParam {
   lockEnabled: boolean
   captureEnabled: boolean
   reuseWindowSeconds: number
+  refreshLeadSeconds: number
   captureProxyId: string | null
   maxAttempts: number
   attemptTimeoutSeconds: number

@@ -55,13 +55,45 @@ const items = computed(() => [
   },
 ])
 
-const turnStateItems = computed<{ label: string, value: string, hint?: string }[]>(() => [
-  { label: '292 B 命中', value: props.summary.turnState.observed292.toLocaleString('zh-CN') },
-  { label: '其他长度', value: props.summary.turnState.observedOther.toLocaleString('zh-CN') },
-  { label: '未观测', value: props.summary.turnState.unobserved.toLocaleString('zh-CN') },
-  { label: '历史未采集', value: props.summary.turnState.notCollected.toLocaleString('zh-CN') },
-  { label: '命中率', value: rateDisplay(props.summary.turnState.hitRate), hint: '292 B 命中 ÷（292 B 命中 + 其他长度）；分母为 0 时显示无数据' },
-  { label: '覆盖率', value: rateDisplay(props.summary.turnState.coverageRate), hint: '（292 B 命中 + 其他长度）÷（二者 + 未观测）；只含已启用请求级采集的请求，历史未采集不计入。分母为 0 时显示无数据' },
+interface TurnStateStat {
+  label: string
+  value: string
+  hint?: string
+}
+
+const turnStateGroups = computed<{ title: string, description: string, items: TurnStateStat[] }[]>(() => [
+  {
+    title: '实际发送给上游',
+    description: '从最终 HTTP Header 或 WebSocket 载荷记录，不从账号当前配置倒推。',
+    items: [
+      { label: '已保存发送值', value: props.summary.turnState.sentCount.toLocaleString('zh-CN') },
+      { label: '仅发送、未返回', value: props.summary.turnState.onlySent.toLocaleString('zh-CN') },
+      { label: '历史发送证据未知', value: props.summary.turnState.unknown.toLocaleString('zh-CN') },
+    ],
+  },
+  {
+    title: '上游实际返回',
+    description: '按上游响应中的 X-Codex-Turn-State 统计，与发送值分开计数。',
+    items: [
+      { label: '已保存返回值', value: props.summary.turnState.returnedCount.toLocaleString('zh-CN') },
+      { label: '返回 292 B', value: props.summary.turnState.observed292.toLocaleString('zh-CN') },
+      { label: '返回其他长度', value: props.summary.turnState.observedOther.toLocaleString('zh-CN') },
+      { label: '无返回值', value: props.summary.turnState.unobserved.toLocaleString('zh-CN') },
+      { label: '历史未采集返回值', value: props.summary.turnState.notCollected.toLocaleString('zh-CN') },
+      { label: '返回 292 B 比例', value: rateDisplay(props.summary.turnState.hitRate), hint: '返回 292 B ÷（返回 292 B + 返回其他长度）；分母为 0 时显示无数据' },
+      { label: '返回采集覆盖率', value: rateDisplay(props.summary.turnState.coverageRate), hint: '（返回 292 B + 返回其他长度）÷（二者 + 无返回值）；历史未采集不计入' },
+    ],
+  },
+  {
+    title: '同一次请求的收发关系',
+    description: '只比较同一请求、同一 attempt 的实际发送值与实际返回值。',
+    items: [
+      { label: '收发相同', value: props.summary.turnState.same.toLocaleString('zh-CN') },
+      { label: '收发不同', value: props.summary.turnState.different.toLocaleString('zh-CN') },
+      { label: '仅返回、未发送', value: props.summary.turnState.onlyReturned.toLocaleString('zh-CN') },
+      { label: '收发均无', value: props.summary.turnState.neither.toLocaleString('zh-CN') },
+    ],
+  },
 ])
 </script>
 
@@ -95,7 +127,7 @@ const turnStateItems = computed<{ label: string, value: string, hint?: string }[
       请求级 Turn State
     </h2>
     <p class="mt-1 mb-3 text-cp-sm text-cp-text-secondary">
-      仅统计筛选范围内已结束的 OpenAI 请求；292 B 是 UTF-8 字节长度的暂定观察规则，不代表模型质量或档位。
+      仅统计筛选范围内已结束的 OpenAI 请求；发送值与返回值独立记录。292 B 是 UTF-8 字节长度的暂定观察规则，不代表模型质量或档位。
     </p>
     <p v-if="loading" role="status" class="m-0 text-cp-sm text-cp-text-secondary">
       正在加载观测统计…
@@ -103,16 +135,26 @@ const turnStateItems = computed<{ label: string, value: string, hint?: string }[
     <p v-else-if="error" role="alert" class="m-0 text-cp-sm text-cp-error-text">
       {{ error }}
     </p>
-    <div v-else class="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
-      <div v-for="item in turnStateItems" :key="item.label" class="min-w-0 rounded-cp bg-cp-fill-quaternary px-3 py-2">
-        <div class="text-cp-xs font-bold text-cp-text-secondary">
-          {{ item.label }}
-        </div>
-        <strong class="mt-1 block font-mono text-lg tabular-nums text-cp-text">{{ item.value }}</strong>
-        <p v-if="item.hint" class="mt-1 mb-0 text-cp-xs text-cp-text-secondary">
-          {{ item.hint }}
+    <div v-else class="grid gap-3 xl:grid-cols-3">
+      <section v-for="group in turnStateGroups" :key="group.title" class="min-w-0 rounded-cp border border-cp-border-subtle p-3">
+        <h3 class="m-0 text-cp-sm font-heavy text-cp-text">
+          {{ group.title }}
+        </h3>
+        <p class="mt-1 mb-3 text-cp-xs text-cp-text-secondary">
+          {{ group.description }}
         </p>
-      </div>
+        <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-2 2xl:grid-cols-3">
+          <div v-for="item in group.items" :key="item.label" class="min-w-0 rounded-cp bg-cp-fill-quaternary px-3 py-2">
+            <div class="text-cp-xs font-bold text-cp-text-secondary">
+              {{ item.label }}
+            </div>
+            <strong class="mt-1 block font-mono text-lg tabular-nums text-cp-text">{{ item.value }}</strong>
+            <p v-if="item.hint" class="mt-1 mb-0 text-cp-xs text-cp-text-secondary">
+              {{ item.hint }}
+            </p>
+          </div>
+        </div>
+      </section>
     </div>
   </section>
 </template>

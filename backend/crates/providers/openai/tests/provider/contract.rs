@@ -34,7 +34,7 @@ use gateway_core::operation::{
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::turn_state::{
     ActiveModelTurnStatePin, ModelTurnStateObservationScope, TurnStateObservation,
-    TurnStateOverride, TurnStateStore, TurnStateStoreError, TurnStateView,
+    TurnStateOverride, TurnStateSent, TurnStateStore, TurnStateStoreError, TurnStateView,
 };
 use gateway_core::routing::{
     ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities, ProviderKind,
@@ -83,6 +83,7 @@ struct MemoryTurnStateStore {
     model_pin: Mutex<Option<ActiveModelTurnStatePin>>,
     model_observation_scope: Mutex<Option<ModelTurnStateObservationScope>>,
     invalidations: Mutex<Vec<CapturedModelPinInvalidation>>,
+    sent: Mutex<Vec<TurnStateSent>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -163,6 +164,10 @@ impl TurnStateStore for MemoryTurnStateStore {
             });
     }
 
+    fn enqueue_sent(&self, sent: TurnStateSent) {
+        self.sent.lock().unwrap().push(sent);
+    }
+
     fn active_override(&self, account_id: &str) -> Option<String> {
         self.overrides.lock().unwrap().get(account_id).cloned()
     }
@@ -190,7 +195,8 @@ impl TurnStateStore for MemoryTurnStateStore {
         account_id: &str,
         identity_revision: u64,
         effective_model: &str,
-        expected_config_revision: u64,
+        expected_generation: u64,
+        _expected_candidate_id: Option<&str>,
         expected_sha256: &str,
     ) -> Result<bool, TurnStateStoreError> {
         self.invalidations
@@ -200,7 +206,7 @@ impl TurnStateStore for MemoryTurnStateStore {
                 account_id: account_id.to_owned(),
                 identity_revision,
                 effective_model: effective_model.to_owned(),
-                config_revision: expected_config_revision,
+                config_revision: expected_generation,
                 sha256: expected_sha256.to_owned(),
             });
         Ok(true)
@@ -600,6 +606,7 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
         "acct_websocket_fast_path",
         "acct_websocket_busy_replay",
         "acct_websocket_metadata_close",
+        "acct_websocket_sent_turn_state",
         "acct_websocket_turn_state",
     ]
     .into_iter()
@@ -3544,11 +3551,6 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
     const ACCOUNT_ID: &str = "acct_websocket_turn_state";
     create_account(&store, ACCOUNT_ID).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
-    turn_state
-        .overrides
-        .lock()
-        .unwrap()
-        .insert(ACCOUNT_ID.to_owned(), "manual-ws-value".to_owned());
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind WebSocket listener");
@@ -3682,10 +3684,7 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
     let request = request_receiver.await.expect("captured request");
 
     assert!(observed_turn_state);
-    assert_eq!(
-        request.pointer("/client_metadata/x-codex-turn-state"),
-        Some(&json!("manual-ws-value"))
-    );
+    assert_eq!(request.pointer("/client_metadata/x-codex-turn-state"), None);
     assert_eq!(session_turn_state.as_deref(), Some("handshake-state"));
     let observations = turn_state.observations.lock().unwrap();
     assert!(observations.iter().all(|observation| {
@@ -3711,6 +3710,108 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
     assert_eq!(enriched.len(), 32);
     assert!(!enriched.contains("stress-turn-0"));
     assert!(enriched.contains("stress-turn-39"));
+    drop(observations);
+    assert!(
+        turn_state.sent.lock().unwrap().is_empty(),
+        "a response.create without client_metadata turn state must not create a sent receipt"
+    );
+}
+
+#[tokio::test]
+async fn websocket_sent_receipt_uses_final_response_create_client_metadata() {
+    const ACCOUNT_ID: &str = "acct_websocket_sent_turn_state";
+    const REQUEST_ID: &str = "req_websocket_sent_turn_state";
+    const TURN_STATE: &str = "turn-sent-in-response-create";
+
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        let request = websocket
+            .next()
+            .await
+            .expect("response.create request")
+            .expect("valid response.create")
+            .into_text()
+            .expect("text response.create");
+        let request: Value = serde_json::from_str(&request).expect("response.create JSON");
+        assert_eq!(request["type"], "response.create");
+        assert_eq!(
+            request.pointer("/client_metadata/x-codex-turn-state"),
+            Some(&json!(TURN_STATE))
+        );
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_websocket_sent_turn_state",
+                        "model": "gpt-5.4",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        websocket.close(None).await.unwrap();
+    });
+
+    let generation = GenerateRequest::from_protocol_payload(
+        ProtocolPayload::json_object(
+            "openai",
+            Map::from_iter([
+                ("model".to_owned(), json!("gpt-5.4")),
+                ("input".to_owned(), json!("hello")),
+                ("session_id".to_owned(), json!("session-ws-sent")),
+                ("thread_id".to_owned(), json!("thread-ws-sent")),
+                ("turn_id".to_owned(), json!("turn-ws-sent")),
+                ("turnState".to_owned(), json!(TURN_STATE)),
+            ]),
+        )
+        .unwrap(),
+    )
+    .with_provider_session_state(
+        ProviderSessionState::new(
+            "openai",
+            Map::from_iter([
+                ("account_id".to_owned(), json!(ACCOUNT_ID)),
+                ("conversation_id".to_owned(), json!("conversation-ws-sent")),
+                ("turn_state".to_owned(), json!(TURN_STATE)),
+                ("client_turn_id".to_owned(), json!("turn-ws-sent")),
+                ("continuation_scope".to_owned(), json!("persisted")),
+            ]),
+        )
+        .unwrap(),
+    );
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url(&accounts, base_url)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", Operation::Generate(generation)),
+            context(REQUEST_ID, CancellationToken::new()),
+        )
+        .await
+        .expect("prepare WebSocket stream");
+    while let Some(event) = stream.next().await {
+        event.expect("WebSocket response");
+    }
+    server.await.unwrap();
+
+    let sent = turn_state.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].request_id, REQUEST_ID);
+    assert_eq!(sent[0].account_id, ACCOUNT_ID);
+    assert_eq!(sent[0].value, TURN_STATE);
+    assert_eq!(sent[0].transport, "websocket");
+    assert_eq!(sent[0].source, "continuation");
 }
 
 #[tokio::test]
@@ -4561,7 +4662,7 @@ async fn matching_turn_id_should_prefer_an_explicit_client_echo_over_saved_provi
 }
 
 #[tokio::test]
-async fn account_override_replaces_outbound_value_without_becoming_an_observation() {
+async fn model_pin_uses_final_http_header_and_ignores_passthrough_duplicates() {
     let account_id = "acct_session_affinity";
     let accounts = Arc::new(MemoryAccountStore::default());
     create_account(&accounts, account_id).await;
@@ -4573,11 +4674,13 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
         config_revision: 7,
         policy_revision: 1,
     });
-    turn_state
-        .overrides
-        .lock()
-        .unwrap()
-        .insert(account_id.to_owned(), "manual-outbound".to_owned());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: "manual-outbound".to_owned(),
+        sha256: "a".repeat(64),
+        generation: 7,
+        candidate_id: None,
+        source: "manual".to_owned(),
+    });
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/codex/responses"))
@@ -4647,12 +4750,7 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
     assert!(observations.iter().any(|observation| {
         observation.value == "event-upstream"
             && observation.transport == "http"
-            && observation.model_scope.as_ref().is_some_and(|scope| {
-                scope.account_id == account_id
-                    && scope.identity_revision == 1
-                    && scope.effective_model == "gpt-5.4"
-                    && scope.config_revision == 7
-            })
+            && observation.model_scope.is_none()
     }));
     assert!(observations.iter().all(|observation| {
         observation
@@ -4669,15 +4767,17 @@ async fn account_override_replaces_outbound_value_without_becoming_an_observatio
             .any(|observation| observation.account_id == account_id
                 && observation.value == "real-upstream"
                 && observation.transport == "http"
-                && observation.model_scope.as_ref().is_some_and(|scope| {
-                    scope.account_id == account_id
-                        && scope.identity_revision == 1
-                        && scope.effective_model == "gpt-5.4"
-                        && scope.config_revision == 7
-                })
+                && observation.model_scope.is_none()
                 && observation.client_turn_id.as_deref() == Some("client-turn")),
         "observations: {observations:?}"
     );
+    drop(observations);
+    let sent = turn_state.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].value, "manual-outbound");
+    assert_eq!(sent[0].transport, "http");
+    assert_eq!(sent[0].source, "manual");
+    assert_eq!(sent[0].generation, Some(7));
 }
 
 #[tokio::test]
@@ -4689,7 +4789,9 @@ async fn only_attributable_http_pin_rejection_requests_cas_invalidation() {
     *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
         value: "P".repeat(292),
         sha256: "a".repeat(64),
-        config_revision: 9,
+        generation: 9,
+        candidate_id: None,
+        source: "manual".to_owned(),
     });
 
     for (explicit_target, expected_invalidations) in [(true, 1), (false, 1)] {
@@ -4812,6 +4914,13 @@ async fn http_turn_state_is_enqueued_at_headers_before_stream_cancellation() {
     let accounts = Arc::new(MemoryAccountStore::default());
     create_account(&accounts, account_id).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: "sent-before-cancel".to_owned(),
+        sha256: "b".repeat(64),
+        generation: 11,
+        candidate_id: None,
+        source: "manual".to_owned(),
+    });
     let (base_url, release, headers_received, server) = paused_turn_state_headers_server().await;
     let cancellation = CancellationToken::new();
     let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
@@ -4843,6 +4952,12 @@ async fn http_turn_state_is_enqueued_at_headers_before_stream_cancellation() {
             && observation.value == "received-before-cancel"
             && observation.transport == "http"
     }));
+    drop(observations);
+    let sent = turn_state.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].request_id, "req_turn_state_cancel");
+    assert_eq!(sent[0].value, "sent-before-cancel");
+    assert_eq!(sent[0].generation, Some(11));
 }
 
 #[tokio::test]
@@ -4851,6 +4966,13 @@ async fn slow_http_error_turn_state_is_enqueued_before_body_and_keeps_receipt_or
     let accounts = Arc::new(MemoryAccountStore::default());
     create_account(&accounts, account_id).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: "sent-on-error".to_owned(),
+        sha256: "c".repeat(64),
+        generation: 13,
+        candidate_id: None,
+        source: "manual".to_owned(),
+    });
     let (base_url, release, mut headers_received, server) =
         paused_error_turn_state_headers_server().await;
     let cancellation = CancellationToken::new();
@@ -4888,6 +5010,9 @@ async fn slow_http_error_turn_state_is_enqueued_before_body_and_keeps_receipt_or
     })
     .await
     .expect("header receipt before body");
+    assert!(turn_state.sent.lock().unwrap().iter().any(|sent| {
+        sent.request_id == "req_slow_error_turn_state" && sent.value == "sent-on-error"
+    }));
     cancellation.cancel();
     let error = next
         .await

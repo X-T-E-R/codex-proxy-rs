@@ -5,15 +5,17 @@ import { computed } from 'vue'
 const props = defineProps<{ state: UsageTurnStateSummary }>()
 
 const label = computed(() => {
-  switch (props.state.classification) {
-    case 'observed292': return '292 B 命中'
-    case 'observedOther': return props.state.bytes === null ? '其他长度（长度未提供）' : `${props.state.bytes} B 其他长度`
-    case 'unobserved': return '未观测'
-    case 'notCollected': return '历史未采集'
-    case 'pending': return '采集中'
-    case 'notApplicable': return '不适用'
-    default: return '未知'
-  }
+  const relation = {
+    'same': '收发相同',
+    'different': '收发不同',
+    'only-sent': '仅发送',
+    'only-returned': '仅返回',
+    'neither': '均无',
+    'unknown': '发送未知',
+  }[props.state.relation]
+  const sent = props.state.sentBytes === null ? '发 —' : `发 ${props.state.sentBytes} B`
+  const returned = props.state.returnedBytes === null ? '回 —' : `回 ${props.state.returnedBytes} B`
+  return `${sent} / ${returned} · ${relation ?? '关系未知'}`
 })
 const tone = computed(() => {
   switch (props.state.classification) {
@@ -29,7 +31,7 @@ const tone = computed(() => {
   <span
     class="inline-flex max-w-full items-center rounded-cp px-2 py-1 text-cp-xs leading-none font-bold whitespace-nowrap"
     :class="tone"
-    :title="state.classification === 'observed292' ? '按 UTF-8 字节长度暂定命中 292 B；不代表模型质量或档位' : label"
+    :title="`实际发送给上游：${state.sentBytes ?? '—'} B；上游实际返回：${state.returnedBytes ?? '—'} B；${label}`"
   >
     {{ label }}
   </span>

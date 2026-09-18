@@ -97,6 +97,19 @@ pub fn websocket_metadata_turn_state(value: &Value) -> Option<String> {
         })
 }
 
+/// 从最终编码的 Responses WebSocket `response.create` 帧中提取实际发送的
+/// `client_metadata.x-codex-turn-state`。
+pub fn websocket_response_create_turn_state(value: &Value) -> Option<String> {
+    (websocket_event_type(value) == Some("response.create"))
+        .then(|| {
+            value
+                .pointer("/client_metadata/x-codex-turn-state")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .flatten()
+}
+
 fn is_websocket_metadata_event(event: Option<&str>) -> bool {
     matches!(event, Some("response.metadata" | "codex.response.metadata"))
 }

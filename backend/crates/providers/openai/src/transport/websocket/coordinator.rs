@@ -599,6 +599,7 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
         "headers": gateway_core::diagnostics::diagnostic_headers(metadata.diagnostics.trace_headers.iter().map(|(name, value)| (name.as_str(), value.as_str()))),
     }));
     trace.capture("upstream.request.body", request.payload_text().as_bytes());
+    let sent_at = chrono::Utc::now();
     if let Err(error) = send_websocket_request(&websocket, request.payload_text()).await {
         let observation = websocket
             .observation()
@@ -618,6 +619,9 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
         return Err(post_send_ambiguous(
             error.with_connection_observation(observation),
         ));
+    }
+    if let Some(observer) = &turn_state_observer {
+        observer.sent(request.payload_text(), sent_at);
     }
     trace.record("upstream.payload.sent", serde_json::json!({}));
     let connection_local_available = lease.is_some();

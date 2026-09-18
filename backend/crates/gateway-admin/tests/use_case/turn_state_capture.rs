@@ -43,6 +43,7 @@ struct CaptureStore {
     commit_calls: AtomicUsize,
     commits: Mutex<Vec<String>>,
     published: AtomicUsize,
+    maintenance_calls: AtomicUsize,
 }
 
 impl CaptureStore {
@@ -61,6 +62,7 @@ impl CaptureStore {
             commit_calls: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
             published: AtomicUsize::new(0),
+            maintenance_calls: AtomicUsize::new(0),
         })
     }
 
@@ -74,6 +76,7 @@ impl CaptureStore {
             commit_calls: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
             published: AtomicUsize::new(0),
+            maintenance_calls: AtomicUsize::new(0),
         })
     }
 
@@ -87,6 +90,7 @@ impl CaptureStore {
             commit_calls: AtomicUsize::new(0),
             commits: Mutex::new(Vec::new()),
             published: AtomicUsize::new(0),
+            maintenance_calls: AtomicUsize::new(0),
         })
     }
 
@@ -201,6 +205,14 @@ impl TurnStateStore for CaptureStore {
             .take(usize::from(limit))
             .cloned()
             .collect())
+    }
+
+    async fn maintain_model_turn_state_candidates(
+        &self,
+        _: u16,
+    ) -> Result<(), TurnStateStoreError> {
+        self.maintenance_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn commit_model_capture(
@@ -464,6 +476,7 @@ async fn automatic_scan_advances_past_sixty_four_unusable_candidates() {
     spin_until("fair candidate commit", || !store.commits().is_empty()).await;
     let queries = store.candidate_queries();
     assert_eq!(queries.len(), 2);
+    assert!(store.maintenance_calls.load(Ordering::SeqCst) >= 2);
     assert_eq!(
         queries[1].as_ref().map(|cursor| cursor.account_id.as_str()),
         Some("acct_fair_063")
@@ -574,12 +587,19 @@ fn view(
         lock_enabled: false,
         capture_enabled: true,
         reuse_window_seconds: 3_600,
+        refresh_lead_seconds: 900,
         capture_proxy_id: Some("proxy_capture".to_owned()),
         capture_proxy: None,
         capture_policy,
         pin: None,
+        candidate: None,
+        next_capture_at: None,
+        next_activation_at: None,
+        capture_not_before: None,
+        waiting_reason: None,
         legacy_override_enabled: false,
         legacy_override_configured: false,
+        legacy_override_value: None,
     }
 }
 

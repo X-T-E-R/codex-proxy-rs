@@ -112,8 +112,8 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
   return {
     id: options.id,
     turnState: options.provider === 'openai'
-      ? { classification: 'observed292', bytes: 292 }
-      : { classification: 'notApplicable', bytes: null },
+      ? { classification: 'observed292', bytes: 292, relation: 'same', sentBytes: 292, returnedBytes: 292 }
+      : { classification: 'notApplicable', bytes: null, relation: 'neither', sentBytes: null, returnedBytes: null },
     provider: options.provider,
     authenticationKind: options.authenticationKind,
     accountId: `account_${options.id}`,

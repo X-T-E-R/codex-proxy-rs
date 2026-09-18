@@ -592,6 +592,9 @@ pub(crate) fn admin_usage_detail(
         request: admin_usage_record(detail.request)?,
         turn_state: admin_observability::TurnStateDetail {
             summary: admin_turn_state_summary(detail.turn_state.summary),
+            relation: detail.turn_state.relation,
+            sent: detail.turn_state.sent.map(admin_turn_state_evidence),
+            returned: detail.turn_state.returned.map(admin_turn_state_evidence),
             value: detail.turn_state.value,
             sha256: detail.turn_state.sha256,
             observed_at: detail.turn_state.observed_at,
@@ -606,6 +609,28 @@ pub(crate) fn admin_usage_detail(
             .map(admin_usage_attempt)
             .collect::<AdminStoreResult<_>>()?,
     })
+}
+
+fn admin_turn_state_evidence(
+    evidence: TurnStateEvidence,
+) -> admin_observability::TurnStateEvidence {
+    admin_observability::TurnStateEvidence {
+        value: evidence.value,
+        bytes: evidence.bytes,
+        sha256: evidence.sha256,
+        timestamp: evidence.timestamp,
+        source: evidence.source,
+        transport: evidence.transport,
+        token_version: evidence.token_version,
+        issued_at: evidence.issued_at,
+        account_id: evidence.account_id,
+        identity_revision: evidence.identity_revision,
+        effective_model: evidence.effective_model,
+        generation: evidence.generation,
+        candidate_id: evidence.candidate_id,
+        upstream_response_id: evidence.upstream_response_id,
+        changed: evidence.changed,
+    }
 }
 
 pub(crate) fn admin_usage_attempt(
@@ -659,6 +684,14 @@ pub(crate) fn admin_usage_overview(
             observed_other: overview.turn_state.observed_other,
             unobserved: overview.turn_state.unobserved,
             not_collected: overview.turn_state.not_collected,
+            same: overview.turn_state.same,
+            different: overview.turn_state.different,
+            only_sent: overview.turn_state.only_sent,
+            only_returned: overview.turn_state.only_returned,
+            neither: overview.turn_state.neither,
+            unknown: overview.turn_state.unknown,
+            sent_count: overview.turn_state.sent_count,
+            returned_count: overview.turn_state.returned_count,
         },
         providers: overview
             .providers
@@ -672,6 +705,9 @@ fn admin_turn_state_summary(state: TurnStateSummary) -> admin_observability::Tur
     admin_observability::TurnStateSummary {
         classification: state.classification,
         bytes: state.bytes,
+        relation: state.relation,
+        sent_bytes: state.sent_bytes,
+        returned_bytes: state.returned_bytes,
     }
 }
 
@@ -913,6 +949,9 @@ fn turn_state_summary_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<TurnS
     Ok(TurnStateSummary {
         classification: get(row, "turn_state_classification")?,
         bytes: optional_unsigned(row, "turn_state_bytes")?,
+        relation: get(row, "turn_state_relation")?,
+        sent_bytes: optional_unsigned(row, "turn_state_sent_bytes")?,
+        returned_bytes: optional_unsigned(row, "turn_state_returned_bytes")?,
     })
 }
 

@@ -8,13 +8,17 @@ use std::{pin::Pin, sync::Arc};
 
 use bytes::Bytes;
 use futures::Stream;
-use gateway_core::provider_ports::turn_state::{TurnStateObservation, TurnStateStore};
+use gateway_core::provider_ports::turn_state::{
+    TurnStateObservation, TurnStateSent, TurnStateStore,
+};
 use gateway_protocol::openai::events::ParsedRateLimits;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::transport::{
-    client::CodexObservedTurnState, diagnostics::CodexUpstreamDiagnostics,
+    client::{CodexObservedTurnState, CodexTurnStateSendContext},
+    diagnostics::CodexUpstreamDiagnostics,
+    protocol::websocket::websocket_response_create_turn_state,
     response_meta::CodexResponseMetadata,
 };
 
@@ -70,6 +74,16 @@ pub(crate) struct CodexWebSocketTurnStateObserver {
     request_id: String,
     attempt_index: u32,
     client_turn_id: Option<String>,
+    sent: Option<WebSocketSentContext>,
+}
+
+#[derive(Clone)]
+struct WebSocketSentContext {
+    identity_revision: u64,
+    effective_model: String,
+    source: String,
+    generation: Option<u64>,
+    candidate_id: Option<String>,
 }
 
 impl CodexWebSocketTurnStateObserver {
@@ -79,6 +93,7 @@ impl CodexWebSocketTurnStateObserver {
         request_id: &str,
         attempt_index: u32,
         client_turn_id: Option<&str>,
+        sent: Option<CodexTurnStateSendContext<'_>>,
     ) -> Self {
         Self {
             store,
@@ -86,6 +101,13 @@ impl CodexWebSocketTurnStateObserver {
             request_id: request_id.to_owned(),
             attempt_index,
             client_turn_id: client_turn_id.map(str::to_owned),
+            sent: sent.map(|sent| WebSocketSentContext {
+                identity_revision: sent.identity_revision,
+                effective_model: sent.effective_model.to_owned(),
+                source: sent.source.to_owned(),
+                generation: sent.generation,
+                candidate_id: sent.candidate_id.map(str::to_owned),
+            }),
         }
     }
 
@@ -105,6 +127,29 @@ impl CodexWebSocketTurnStateObserver {
             upstream_response_id: upstream_response_id.map(str::to_owned),
             client_turn_id: self.client_turn_id.clone(),
             model_scope: None,
+        });
+    }
+
+    pub(crate) fn sent(&self, payload_text: &str, sent_at: chrono::DateTime<chrono::Utc>) {
+        let (Some(sent), Ok(payload)) = (self.sent.as_ref(), serde_json::from_str(payload_text))
+        else {
+            return;
+        };
+        let Some(value) = websocket_response_create_turn_state(&payload) else {
+            return;
+        };
+        self.store.enqueue_sent(TurnStateSent {
+            request_id: self.request_id.clone(),
+            attempt_index: self.attempt_index,
+            account_id: self.account_id.clone(),
+            identity_revision: sent.identity_revision,
+            effective_model: sent.effective_model.clone(),
+            value,
+            sent_at,
+            transport: "websocket".to_owned(),
+            source: sent.source.clone(),
+            generation: sent.generation,
+            candidate_id: sent.candidate_id.clone(),
         });
     }
 }

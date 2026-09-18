@@ -263,6 +263,9 @@ pub struct UsageRecordDetailView {
 pub struct TurnStateSummaryView {
     pub classification: String,
     pub bytes: Option<u64>,
+    pub relation: String,
+    pub sent_bytes: Option<u64>,
+    pub returned_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -270,12 +273,37 @@ pub struct TurnStateSummaryView {
 pub struct TurnStateDetailView {
     pub classification: String,
     pub bytes: Option<u64>,
+    pub relation: String,
+    pub sent_bytes: Option<u64>,
+    pub returned_bytes: Option<u64>,
+    pub sent: Option<TurnStateEvidenceView>,
+    pub returned: Option<TurnStateEvidenceView>,
     pub value: Option<String>,
     pub sha256: Option<String>,
     pub observed_at: Option<DateTime<Utc>>,
     pub source: Option<String>,
     pub upstream_response_id: Option<String>,
     pub attempt_index: Option<u32>,
+    pub changed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnStateEvidenceView {
+    pub value: String,
+    pub bytes: u64,
+    pub sha256: String,
+    pub timestamp: DateTime<Utc>,
+    pub source: String,
+    pub transport: String,
+    pub token_version: Option<u8>,
+    pub issued_at: Option<DateTime<Utc>>,
+    pub account_id: Option<String>,
+    pub identity_revision: Option<u64>,
+    pub effective_model: Option<String>,
+    pub generation: Option<u64>,
+    pub candidate_id: Option<String>,
+    pub upstream_response_id: Option<String>,
     pub changed: bool,
 }
 
@@ -286,6 +314,14 @@ pub struct TurnStateCountsView {
     pub observed_other: u64,
     pub unobserved: u64,
     pub not_collected: u64,
+    pub same: u64,
+    pub different: u64,
+    pub only_sent: u64,
+    pub only_returned: u64,
+    pub neither: u64,
+    pub unknown: u64,
+    pub sent_count: u64,
+    pub returned_count: u64,
     pub hit_rate: Option<f64>,
     pub coverage_rate: Option<f64>,
 }

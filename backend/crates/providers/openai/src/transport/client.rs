@@ -483,6 +483,8 @@ pub struct CodexRequestContext<'a> {
     pub attempt_index: Option<u32>,
     /// 普通 HTTP Responses 请求可提交模型级观察时的 CAS scope。
     pub model_turn_state_observation_scope: Option<&'a ModelTurnStateObservationScope>,
+    /// 最终编码边界记录发送值所需的稳定归属；值本身必须从最终 header/body 读取。
+    pub turn_state_send: Option<CodexTurnStateSendContext<'a>>,
     /// 当前账号同一 turn 内的 opaque sticky-routing 状态。
     pub turn_state: Option<&'a str>,
     /// 客户端 turn metadata；其中 installation ID 已按当前账号处理。
@@ -528,6 +530,7 @@ impl<'a> CodexRequestContext<'a> {
             request_id,
             attempt_index: None,
             model_turn_state_observation_scope: None,
+            turn_state_send: None,
             turn_state: None,
             turn_metadata: None,
             beta_features: None,
@@ -559,6 +562,24 @@ impl<'a> CodexRequestContext<'a> {
         self.model_turn_state_observation_scope = scope;
         self
     }
+
+    #[must_use]
+    pub const fn with_turn_state_send(
+        mut self,
+        context: Option<CodexTurnStateSendContext<'a>>,
+    ) -> Self {
+        self.turn_state_send = context;
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct CodexTurnStateSendContext<'a> {
+    pub identity_revision: u64,
+    pub effective_model: &'a str,
+    pub source: &'a str,
+    pub generation: Option<u64>,
+    pub candidate_id: Option<&'a str>,
 }
 
 impl fmt::Debug for CodexRequestContext<'_> {

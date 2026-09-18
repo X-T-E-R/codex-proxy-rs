@@ -261,6 +261,9 @@ pub(crate) fn usage_list_record_view(record: domain::UsageListRecord) -> UsageLi
         turn_state: TurnStateSummaryView {
             classification: record.turn_state.classification,
             bytes: record.turn_state.bytes,
+            relation: record.turn_state.relation,
+            sent_bytes: record.turn_state.sent_bytes,
+            returned_bytes: record.turn_state.returned_bytes,
         },
         provider: record.provider_kind,
         authentication_kind: record.provider_account_authentication_kind,
@@ -519,6 +522,11 @@ pub(crate) fn usage_detail_view(detail: domain::UsageDetail) -> UsageRecordDetai
         turn_state: TurnStateDetailView {
             classification: detail.turn_state.summary.classification,
             bytes: detail.turn_state.summary.bytes,
+            relation: detail.turn_state.relation,
+            sent_bytes: detail.turn_state.summary.sent_bytes,
+            returned_bytes: detail.turn_state.summary.returned_bytes,
+            sent: detail.turn_state.sent.map(turn_state_evidence_view),
+            returned: detail.turn_state.returned.map(turn_state_evidence_view),
             value: detail.turn_state.value,
             sha256: detail.turn_state.sha256,
             observed_at: detail.turn_state.observed_at,
@@ -533,6 +541,26 @@ pub(crate) fn usage_detail_view(detail: domain::UsageDetail) -> UsageRecordDetai
             .map(usage_attempt_view)
             .collect(),
         attempts_complete: false,
+    }
+}
+
+fn turn_state_evidence_view(evidence: domain::TurnStateEvidence) -> TurnStateEvidenceView {
+    TurnStateEvidenceView {
+        value: evidence.value,
+        bytes: evidence.bytes,
+        sha256: evidence.sha256,
+        timestamp: evidence.timestamp,
+        source: evidence.source,
+        transport: evidence.transport,
+        token_version: evidence.token_version,
+        issued_at: evidence.issued_at,
+        account_id: evidence.account_id,
+        identity_revision: evidence.identity_revision,
+        effective_model: evidence.effective_model,
+        generation: evidence.generation,
+        candidate_id: evidence.candidate_id,
+        upstream_response_id: evidence.upstream_response_id,
+        changed: evidence.changed,
     }
 }
 
@@ -1030,6 +1058,14 @@ pub fn turn_state_counts_view(state: domain::TurnStateCounts) -> TurnStateCounts
         observed_other: state.observed_other,
         unobserved: state.unobserved,
         not_collected: state.not_collected,
+        same: state.same,
+        different: state.different,
+        only_sent: state.only_sent,
+        only_returned: state.only_returned,
+        neither: state.neither,
+        unknown: state.unknown,
+        sent_count: state.sent_count,
+        returned_count: state.returned_count,
         hit_rate: (observed != 0).then(|| state.observed_292 as f64 / observed as f64),
         coverage_rate: (eligible != 0).then(|| observed as f64 / eligible as f64),
     }

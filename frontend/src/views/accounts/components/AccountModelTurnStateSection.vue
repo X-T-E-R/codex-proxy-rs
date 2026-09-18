@@ -35,7 +35,7 @@ import { useCopyText } from '@/composables/useCopyText'
 import { errorMessage } from '@/utils/async'
 import { formatDateTime } from '@/utils/date'
 
-type PinAction = 'keep' | 'replace' | 'clear' | 'invalidate'
+type PinAction = 'keep' | 'replace' | 'clear' | 'invalidate' | 'importLegacy'
 type CaptureJobState = ModelTurnStateCaptureAccepted | ModelTurnStateCaptureJob
 
 const props = defineProps<{
@@ -51,6 +51,7 @@ const POLL_INTERVAL_MS = 2_000
 const MAX_POLL_FAILURES = 3
 const CAPTURE_PROXY_TEST_MAX_AGE_MS = 24 * 60 * 60 * 1_000
 const RECOMMENDED_REUSE_WINDOW_SECONDS = 7_200
+const RECOMMENDED_REFRESH_LEAD_SECONDS = 900
 const RECOMMENDED_CAPTURE_POLICY = {
   maxAttempts: 3,
   attemptTimeoutSeconds: 8,
@@ -84,11 +85,13 @@ const actionError = ref('')
 const captureError = ref('')
 const showPin = ref(false)
 const showPinDraft = ref(false)
+const showLegacy = ref(false)
 const captureConfirmOpen = ref(false)
 
 const draftLockEnabled = ref(false)
 const draftCaptureEnabled = ref(false)
 const draftReuseWindowSeconds = ref(7_200)
+const draftRefreshLeadSeconds = ref(900)
 const draftCaptureProxyId = ref('')
 const draftMaxAttempts = ref(3)
 const draftAttemptTimeoutSeconds = ref(8)
@@ -172,6 +175,7 @@ const policyChanged = computed(() => {
     draftLockEnabled.value !== current.lockEnabled
     || draftCaptureEnabled.value !== current.captureEnabled
     || draftReuseWindowSeconds.value !== current.reuseWindowSeconds
+    || draftRefreshLeadSeconds.value !== current.refreshLeadSeconds
     || draftCaptureProxyId.value !== (current.captureProxyId ?? '')
     || draftMaxAttempts.value !== current.capturePolicy.maxAttempts
     || draftAttemptTimeoutSeconds.value !== current.capturePolicy.attemptTimeoutSeconds
@@ -184,8 +188,8 @@ const policyChanged = computed(() => {
 const modelChanged = computed(() => pinAction.value !== 'keep')
 const pinValidationError = computed(() => {
   if (pinAction.value === 'replace') {
-    if (pinDraftBytes.value !== 292)
-      return `手动值必须正好为 292 个 UTF-8 字节；当前 ${pinDraftBytes.value} 字节`
+    if (pinDraftBytes.value < 1 || pinDraftBytes.value > 16_384)
+      return `手动值需为 1–16384 个 UTF-8 字节；当前 ${pinDraftBytes.value} 字节`
     if (/[^\x20-\x7E]/.test(pinDraftValue.value))
       return '手动值仅支持可打印 ASCII 字符，不含换行或控制字符'
   }
@@ -195,7 +199,7 @@ const setupStatus = computed(() => {
   if (!draftLockEnabled.value)
     return '锁定未启用：请求不会注入模型级 Turn State。'
   if (modelState.value?.pin?.status === 'fresh')
-    return '锁定已就绪：普通 HTTP 请求会注入当前 292 字节值。'
+    return '锁定已就绪：普通 HTTP 请求会注入当前模型值。'
   if (draftCaptureEnabled.value && selectedProxyReady.value)
     return '待获取并自动锁定：先走账号正常出口；只有明确观测到非 292 字节值后，才使用所选代理捕获。'
   return '待获取并自动锁定：先走账号正常出口；观测到 292 字节值后会直接锁定。'
@@ -247,6 +251,7 @@ function resetModel() {
   captureError.value = ''
   showPin.value = false
   showPinDraft.value = false
+  showLegacy.value = false
   pinDraftValue.value = ''
   pinAction.value = 'keep'
   modelLoading.value = false
@@ -335,6 +340,7 @@ function applyModelState(result: AccountModelTurnStateResponse) {
   pinDraftValue.value = ''
   showPin.value = false
   showPinDraft.value = false
+  showLegacy.value = false
   pollingStopped.value = false
   if (isCaptureActive(result.capture)) {
     pollDeadline = Date.now() + ((accountPolicy.value?.capturePolicy.jobTimeoutSeconds ?? 30) + 30) * 1_000
@@ -348,6 +354,7 @@ function applyPolicy(result: AccountTurnStatePolicyResponse) {
   draftLockEnabled.value = result.lockEnabled
   draftCaptureEnabled.value = result.captureEnabled
   draftReuseWindowSeconds.value = result.reuseWindowSeconds
+  draftRefreshLeadSeconds.value = result.refreshLeadSeconds
   draftCaptureProxyId.value = result.captureProxyId ?? ''
   draftMaxAttempts.value = result.capturePolicy.maxAttempts
   draftAttemptTimeoutSeconds.value = result.capturePolicy.attemptTimeoutSeconds
@@ -441,6 +448,7 @@ function handleCaptureToggle(enabled: boolean) {
 
 function applyRecommendedDefaults() {
   draftReuseWindowSeconds.value = RECOMMENDED_REUSE_WINDOW_SECONDS
+  draftRefreshLeadSeconds.value = RECOMMENDED_REFRESH_LEAD_SECONDS
   draftMaxAttempts.value = RECOMMENDED_CAPTURE_POLICY.maxAttempts
   draftAttemptTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.attemptTimeoutSeconds
   draftJobTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.jobTimeoutSeconds
@@ -516,6 +524,19 @@ function formatTokenVersion(version: number | null) {
 
 function formatByteCount(value: number | null) {
   return value === null ? '未识别' : `${value} 字节`
+}
+
+function waitingReasonLabel(reason: string) {
+  return {
+    disabled: '自动捕获已关闭',
+    candidate_ready: '候选值已就绪',
+    waiting_proxy: '等待选择捕获代理',
+    proxy_not_ready: '等待代理测试成功',
+    cooldown: '失败冷却中',
+    queued: '已进入捕获队列',
+    scheduled: '等待提前捕获时间',
+    waiting_normal_observation: '等待普通请求观测',
+  }[reason] ?? reason
 }
 
 function snapshotPinDraft() {
@@ -598,6 +619,7 @@ async function savePolicySettings(): Promise<boolean> {
       lockEnabled: draftLockEnabled.value,
       captureEnabled: draftCaptureEnabled.value,
       reuseWindowSeconds: draftReuseWindowSeconds.value,
+      refreshLeadSeconds: draftRefreshLeadSeconds.value,
       captureProxyId: draftCaptureProxyId.value || null,
       maxAttempts: draftMaxAttempts.value,
       attemptTimeoutSeconds: draftAttemptTimeoutSeconds.value,
@@ -894,13 +916,16 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="grid gap-4 sm:grid-cols-2">
-          <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用期限" description="默认 7200 秒。到期后停止注入并等待普通 HTTP 请求重新观测；Fernet 内嵌时间是未验签签发时间，不是过期时间。">
+          <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用期限" description="默认 7200 秒。当前值到期时会切换到已准备的候选值；没有候选时继续走普通请求。">
             <BaseNumberInput id="model-turn-state-reuse-window" v-model="draftReuseWindowSeconds" aria-describedby="model-turn-state-reuse-window-description" label="本地最大复用期限" :min="1" :max="86400" unit="秒" :disabled="busy" />
             <div class="mt-2 flex flex-wrap gap-1.5" aria-label="复用期限快捷值">
               <BaseButton v-for="hours in [1, 2, 4, 12, 24]" :key="hours" size="sm" variant="ghost" :disabled="busy" @click="draftReuseWindowSeconds = hours * 3600">
                 {{ hours }} 小时
               </BaseButton>
             </div>
+          </BaseFormItem>
+          <BaseFormItem control-id="model-turn-state-refresh-lead" label="提前捕获" description="默认提前 900 秒排队准备下一份值；大于 TTL 时按 TTL−1 秒执行。">
+            <BaseNumberInput id="model-turn-state-refresh-lead" v-model="draftRefreshLeadSeconds" aria-describedby="model-turn-state-refresh-lead-description" label="提前捕获" :min="0" :max="86400" unit="秒" :disabled="busy" />
           </BaseFormItem>
           <BaseFormItem
             label="捕获代理"
@@ -951,14 +976,43 @@ onBeforeUnmount(() => {
           </BaseButton>
         </div>
 
+        <section v-if="modelState.legacyOverride.configured && modelState.legacyOverride.value" class="grid min-w-0 gap-3 rounded-cp bg-cp-fill-quaternary p-4" aria-label="待导入的旧账号值">
+          <div>
+            <h4 class="m-0 font-bold text-cp-text">
+              待导入的旧账号值
+            </h4>
+            <p class="mt-1 mb-0 text-xs text-cp-text-secondary">
+              旧账号覆盖已退出运行时优先级。确认模型后可把它显式导入当前使用值；不会自动复制到其他模型。
+            </p>
+          </div>
+          <div class="flex min-w-0 flex-wrap items-center gap-2">
+            <BaseInput :model-value="modelState.legacyOverride.value" :type="showLegacy ? 'text' : 'password'" readonly aria-label="旧账号 Turn State 值" class="min-w-40 flex-1" />
+            <BaseButton size="sm" @click="showLegacy = !showLegacy">
+              <template #icon>
+                <EyeOff v-if="showLegacy" :size="14" /><Eye v-else :size="14" />
+              </template>
+              {{ showLegacy ? '隐藏' : '显示' }}
+            </BaseButton>
+            <BaseButton size="sm" @click="copyText(modelState.legacyOverride.value!, { successText: '旧账号值已复制' })">
+              <template #icon>
+                <Copy :size="14" />
+              </template>
+              复制
+            </BaseButton>
+            <BaseButton size="sm" :variant="pinAction === 'importLegacy' ? 'primary' : 'secondary'" :disabled="busy" @click="setPinAction('importLegacy')">
+              {{ pinAction === 'importLegacy' ? '等待保存导入' : '导入当前模型' }}
+            </BaseButton>
+          </div>
+        </section>
+
         <section class="grid min-w-0 gap-3 rounded-cp bg-cp-bg-container p-4 shadow-cp-tertiary" aria-label="模型锁定值">
           <div class="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h4 class="m-0 font-bold text-cp-text">
-                模型锁定值
+                当前使用值
               </h4>
               <p class="mt-1 mb-0 text-xs text-cp-text-secondary">
-                保存值必须正好为 292 个 UTF-8 字节，并且只能包含可打印 ASCII 字符。长度规则命中不说明值有效、正常或模型质量；Fernet 字段只解析公开外层结构，不验证密文或 HMAC。
+                手动值支持 1–16384 字节可打印 ASCII；普通观测与自动捕获仍只接纳 292 字节可打印 ASCII。Fernet 字段只解析公开外层结构，不验证密文或 HMAC。
               </p>
             </div>
             <span
@@ -1085,7 +1139,7 @@ onBeforeUnmount(() => {
           </div>
           <BaseFormItem v-if="pinAction === 'replace'" label="新的模型 Turn State 值" :error="pinValidationError">
             <div class="flex min-w-0 flex-wrap items-center gap-2">
-              <BaseInput v-model="pinDraftValue" :type="showPinDraft ? 'text' : 'password'" autocomplete="off" placeholder="输入 292 字节的值" :disabled="busy" class="min-w-40 flex-1" />
+              <BaseInput v-model="pinDraftValue" :type="showPinDraft ? 'text' : 'password'" autocomplete="off" placeholder="输入 1–16384 字节的可打印 ASCII" :disabled="busy" class="min-w-40 flex-1" />
               <BaseButton size="sm" :aria-label="showPinDraft ? '隐藏手动值' : '显示手动值'" @click="showPinDraft = !showPinDraft">
                 <template #icon>
                   <EyeOff v-if="showPinDraft" :size="14" /><Eye v-else :size="14" />
@@ -1099,10 +1153,13 @@ onBeforeUnmount(() => {
                 复制
               </BaseButton>
             </div>
-            <p class="mt-2 mb-0 text-xs" :class="pinDraftBytes === 292 ? 'text-cp-info-text' : 'text-cp-text-quaternary'">
-              当前 {{ pinDraftBytes }} / 292 UTF-8 字节 · {{ pinDraftBytes === 292 ? '长度规则命中' : '长度规则未命中' }}
+            <p class="mt-2 mb-0 text-xs" :class="pinDraftBytes >= 1 && pinDraftBytes <= 16384 ? 'text-cp-info-text' : 'text-cp-text-quaternary'">
+              当前 {{ pinDraftBytes }} / 16384 UTF-8 字节
             </p>
           </BaseFormItem>
+          <p v-else-if="pinAction === 'importLegacy'" role="status" class="m-0 text-xs text-cp-info-text">
+            保存后会把旧账号覆盖导入当前所选模型，立即成为同一个当前使用值；旧值不再作为运行时 fallback。
+          </p>
           <p v-else-if="pinAction === 'invalidate'" role="status" class="m-0 text-xs text-cp-warning-text">
             保存后，这个值会保留用于审计，但不再注入；若锁定开关仍开启，会回到待获取状态。
           </p>
@@ -1111,6 +1168,59 @@ onBeforeUnmount(() => {
           </p>
           <p v-if="modelState.pin?.status === 'aged'" role="status" class="m-0 text-xs text-cp-warning-text">
             这个值已停止注入。下一次普通 HTTP 请求返回 292 字节可打印 ASCII 值时会直接采用；明确返回非 292 字节值时才会触发已配置的住宅代理捕获。也可以手动获取或替换。
+          </p>
+        </section>
+
+        <section class="grid min-w-0 gap-3 rounded-cp bg-cp-bg-container p-4 shadow-cp-tertiary" aria-label="待切换值">
+          <div>
+            <h4 class="m-0 font-bold text-cp-text">
+              待切换值
+            </h4>
+            <p class="mt-1 mb-0 text-xs text-cp-text-secondary">
+              自动捕获会先把新值放在这里；当前值到期或被明确判定失效时再切换，不会重置候选值自己的 TTL。
+            </p>
+          </div>
+          <template v-if="modelState.candidate">
+            <div class="flex min-w-0 flex-wrap items-center gap-2">
+              <BaseInput :model-value="modelState.candidate.value" type="password" readonly aria-label="待切换 Turn State 值" class="min-w-40 flex-1" />
+              <BaseButton size="sm" @click="copyText(modelState.candidate!.value, { successText: '待切换值已复制' })">
+                <template #icon>
+                  <Copy :size="14" />
+                </template>
+                复制
+              </BaseButton>
+            </div>
+            <dl class="m-0 grid gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+              <div>
+                <dt class="text-cp-text-quaternary">
+                  捕获时间
+                </dt><dd class="m-0 text-cp-text">
+                  {{ formatDateTime(modelState.candidate.capturedAt) }}
+                </dd>
+              </div>
+              <div>
+                <dt class="text-cp-text-quaternary">
+                  候选截止
+                </dt><dd class="m-0 text-cp-text">
+                  {{ formatDateTime(modelState.candidate.reuseDeadline) }}
+                </dd>
+              </div>
+              <div>
+                <dt class="text-cp-text-quaternary">
+                  预计切换
+                </dt><dd class="m-0 text-cp-text">
+                  {{ modelState.nextActivationAt ? formatDateTime(modelState.nextActivationAt) : '等待当前值到期' }}
+                </dd>
+              </div>
+            </dl>
+          </template>
+          <p v-else class="m-0 text-cp-text-secondary">
+            暂无待切换值。{{ modelState.nextCaptureAt ? `预计 ${formatDateTime(modelState.nextCaptureAt)} 开始排队` : '系统会按账号策略准备下一份值。' }}
+          </p>
+          <p v-if="modelState.waitingReason" class="m-0 text-xs text-cp-text-quaternary">
+            调度状态：{{ waitingReasonLabel(modelState.waitingReason) }}<template v-if="modelState.captureNotBefore">
+              · 不早于 {{ formatDateTime(modelState.captureNotBefore) }}
+            </template>
           </p>
         </section>
 
@@ -1220,16 +1330,6 @@ onBeforeUnmount(() => {
               {{ modelChanged ? '放弃草稿并刷新' : '刷新模型状态' }}
             </BaseButton>
           </div>
-        </div>
-
-        <div class="grid gap-2 rounded-cp bg-cp-bg-container p-4 text-xs">
-          <p class="m-0 font-bold text-cp-text">
-            Legacy fallback
-          </p>
-          <p class="m-0 text-cp-text-secondary">
-            旧版账号覆盖：{{ modelState.legacyOverride.enabled ? '已启用' : '已停用' }}；{{ modelState.legacyOverride.configured ? '已配置值' : '未配置值' }}。
-            {{ modelState.legacyOverride.willApplyWhenModelPinUnavailable ? '模型值不可用时会回退到旧版覆盖。' : '当前不会作为模型值不可用时的回退。' }}
-          </p>
         </div>
 
         <p v-if="actionError" role="alert" class="m-0 text-cp-error-text">

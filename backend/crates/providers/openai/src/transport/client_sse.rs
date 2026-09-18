@@ -7,7 +7,7 @@ use std::{
 
 use futures::{StreamExt, TryStreamExt};
 use gateway_core::provider_ports::turn_state::{
-    ModelTurnStateObservationScope, TurnStateObservation, TurnStateStore,
+    ModelTurnStateObservationScope, TurnStateObservation, TurnStateSent, TurnStateStore,
 };
 use gateway_protocol::openai::{
     X_OPENAI_MEMGEN_REQUEST_HEADER,
@@ -136,6 +136,13 @@ impl CodexBackendClient {
         trace.capture("upstream.request.body", &body);
         let body = zstd::stream::encode_all(std::io::Cursor::new(body), 3)
             .map_err(CodexClientError::RequestCompression)?;
+        let sent_turn_state = headers
+            .get_all("x-codex-turn-state")
+            .iter()
+            .next_back()
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let sent_at = chrono::Utc::now();
         let response = self
             .client
             .post(endpoint)
@@ -144,6 +151,27 @@ impl CodexBackendClient {
             .body(body)
             .send()
             .await?;
+        if let (Some(store), Some(account_id), Some(attempt_index), Some(send), Some(value)) = (
+            self.turn_state_store.as_ref(),
+            provider_account_id,
+            context.attempt_index,
+            context.turn_state_send,
+            sent_turn_state,
+        ) {
+            store.enqueue_sent(TurnStateSent {
+                request_id: context.request_id.to_owned(),
+                attempt_index,
+                account_id: account_id.to_owned(),
+                identity_revision: send.identity_revision,
+                effective_model: send.effective_model.to_owned(),
+                value,
+                sent_at,
+                transport: "http".to_owned(),
+                source: send.source.to_owned(),
+                generation: send.generation,
+                candidate_id: send.candidate_id.map(str::to_owned),
+            });
+        }
         let upstream_headers_ms = elapsed_duration_millis(headers_started_at.elapsed());
         let http_version = http_version_name(response.version()).to_string();
         let status = response.status();
@@ -592,6 +620,7 @@ impl CodexBackendClient {
                             context.request_id,
                             attempt_index,
                             context.turn_id,
+                            context.turn_state_send,
                         )
                     });
                 let mut exchange = execute_prepared_response_create_request_stream(

@@ -418,7 +418,7 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
         http::{Request, StatusCode, header},
     };
     use chrono::Utc;
-    use gateway_admin::model::observability::{UsageAttempt, UsageDetail};
+    use gateway_admin::model::observability::{TurnStateEvidence, UsageAttempt, UsageDetail};
     use gateway_api::admin::observability;
     use tower::ServiceExt as _;
 
@@ -438,7 +438,45 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
                 summary: gateway_admin::model::observability::TurnStateSummary {
                     classification: "observedOther".to_owned(),
                     bytes: Some(10),
+                    relation: "different".to_owned(),
+                    sent_bytes: Some(8),
+                    returned_bytes: Some(10),
                 },
+                relation: "different".to_owned(),
+                sent: Some(TurnStateEvidence {
+                    value: "state-up".to_owned(),
+                    bytes: 8,
+                    sha256: "sent-digest".to_owned(),
+                    timestamp: now,
+                    source: "continuation".to_owned(),
+                    transport: "websocket".to_owned(),
+                    token_version: None,
+                    issued_at: None,
+                    account_id: Some("acct_snap_a".to_owned()),
+                    identity_revision: Some(1),
+                    effective_model: Some("upstream-model".to_owned()),
+                    generation: Some(7),
+                    candidate_id: None,
+                    upstream_response_id: None,
+                    changed: false,
+                }),
+                returned: Some(TurnStateEvidence {
+                    value: "state-only".to_owned(),
+                    bytes: 10,
+                    sha256: "digest".to_owned(),
+                    timestamp: now,
+                    source: "upstream".to_owned(),
+                    transport: "websocket".to_owned(),
+                    token_version: None,
+                    issued_at: None,
+                    account_id: Some("acct_snap_a".to_owned()),
+                    identity_revision: None,
+                    effective_model: Some("upstream-model".to_owned()),
+                    generation: None,
+                    candidate_id: None,
+                    upstream_response_id: Some("resp-detail".to_owned()),
+                    changed: true,
+                }),
                 value: Some("state-only".to_owned()),
                 sha256: Some("digest".to_owned()),
                 observed_at: Some(now),
@@ -536,6 +574,13 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
     let value: serde_json::Value = serde_json::from_slice(&body).expect("usage detail JSON");
     assert_eq!(value["data"]["turnState"]["value"], "state-only");
     assert_eq!(value["data"]["turnState"]["attemptIndex"], 2);
+    assert_eq!(value["data"]["turnState"]["sentBytes"], 8);
+    assert_eq!(value["data"]["turnState"]["returnedBytes"], 10);
+    assert_eq!(value["data"]["turnState"]["sent"]["value"], "state-up");
+    assert_eq!(
+        value["data"]["turnState"]["returned"]["value"],
+        "state-only"
+    );
     assert_eq!(
         serde_json::json!({
             "accountId": value["data"]["accountId"],
@@ -870,6 +915,9 @@ fn usage_record_with_account(
         turn_state: gateway_admin::model::observability::TurnStateSummary {
             classification: "unobserved".to_owned(),
             bytes: None,
+            relation: "neither".to_owned(),
+            sent_bytes: None,
+            returned_bytes: None,
         },
         client_api_key_ref: "key_detail".to_owned(),
         config_revision: 1,
@@ -951,7 +999,13 @@ fn empty_turn_state_detail() -> gateway_admin::model::observability::TurnStateDe
         summary: TurnStateSummary {
             classification: "unobserved".to_owned(),
             bytes: None,
+            relation: "neither".to_owned(),
+            sent_bytes: None,
+            returned_bytes: None,
         },
+        relation: "neither".to_owned(),
+        sent: None,
+        returned: None,
         value: None,
         sha256: None,
         observed_at: None,
@@ -972,6 +1026,14 @@ fn usage_summary_turn_state_rates_exclude_historical_and_have_null_empty_denomin
         observed_other: 1,
         unobserved: 2,
         not_collected: 11,
+        same: 2,
+        different: 1,
+        only_sent: 1,
+        only_returned: 1,
+        neither: 1,
+        unknown: 11,
+        sent_count: 4,
+        returned_count: 4,
     }))
     .unwrap();
     assert_eq!(value["hitRate"], 0.75);
@@ -1049,6 +1111,9 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             turn_state: gateway_admin::model::observability::TurnStateSummary {
                 classification: "notApplicable".to_owned(),
                 bytes: None,
+                relation: "neither".to_owned(),
+                sent_bytes: None,
+                returned_bytes: None,
             },
             endpoint: "/v1/responses".to_owned(),
             client_transport: "websocket".to_owned(),

@@ -71,15 +71,38 @@ export type UsageTurnStateClassification = 'observed292' | 'observedOther' | 'un
 export interface UsageTurnStateSummary {
   classification: UsageTurnStateClassification
   bytes: number | null
+  relation: 'same' | 'different' | 'only-sent' | 'only-returned' | 'neither' | 'unknown'
+  sentBytes: number | null
+  returnedBytes: number | null
 }
 
 export interface UsageTurnStateDetail extends UsageTurnStateSummary {
+  sent: UsageTurnStateEvidence | null
+  returned: UsageTurnStateEvidence | null
   value: string | null
   sha256: string | null
   observedAt: string | null
   source: 'http' | 'websocket' | null
   upstreamResponseId: string | null
   attemptIndex: number | null
+  changed: boolean
+}
+
+export interface UsageTurnStateEvidence {
+  value: string
+  bytes: number
+  sha256: string
+  timestamp: string
+  source: string
+  transport: 'http' | 'websocket'
+  tokenVersion: number | null
+  issuedAt: string | null
+  accountId: string | null
+  identityRevision: number | null
+  effectiveModel: string | null
+  generation: number | null
+  candidateId: string | null
+  upstreamResponseId: string | null
   changed: boolean
 }
 
@@ -331,6 +354,14 @@ export interface UsageSummaryResponse {
     observedOther: number
     unobserved: number
     notCollected: number
+    same: number
+    different: number
+    onlySent: number
+    onlyReturned: number
+    neither: number
+    unknown: number
+    sentCount: number
+    returnedCount: number
     hitRate: number | null
     coverageRate: number | null
   }

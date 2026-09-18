@@ -498,6 +498,13 @@ impl AccountsService for DefaultAccountsService {
             .map_err(map_turn_state_error)?;
         let capture = if let Some(manager) = &self.turn_state_capture {
             view.capture_proxy = manager.capture_proxy(&view).await;
+            if view.capture_enabled {
+                if view.capture_proxy_id.is_none() {
+                    view.waiting_reason = Some("waiting_proxy".to_owned());
+                } else if view.capture_proxy.as_ref().is_none_or(|proxy| !proxy.ready) {
+                    view.waiting_reason = Some("proxy_not_ready".to_owned());
+                }
+            }
             manager.current(&view)
         } else {
             None
@@ -569,6 +576,13 @@ impl AccountsService for DefaultAccountsService {
         }
         let capture = if let Some(manager) = &self.turn_state_capture {
             view.capture_proxy = manager.capture_proxy(&view).await;
+            if view.capture_enabled {
+                if view.capture_proxy_id.is_none() {
+                    view.waiting_reason = Some("waiting_proxy".to_owned());
+                } else if view.capture_proxy.as_ref().is_none_or(|proxy| !proxy.ready) {
+                    view.waiting_reason = Some("proxy_not_ready".to_owned());
+                }
+            }
             manager.current(&view)
         } else {
             None

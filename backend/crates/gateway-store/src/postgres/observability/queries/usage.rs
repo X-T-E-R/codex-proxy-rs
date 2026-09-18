@@ -1,6 +1,7 @@
 //! Usage 明细、诊断与过滤查询族。
 
 use super::super::*;
+use gateway_core::provider_ports::turn_state::model_turn_state_token_metadata;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -16,6 +17,14 @@ const TURN_STATE_CLASSIFICATION_SQL: &str =
           when ts.value is null then 'unobserved'
           when octet_length(ts.value) = 292 then 'observed292'
           else 'observedOther' end";
+
+const TURN_STATE_RELATION_SQL: &str =
+    "case when not mr.turn_state_sent_collection_enabled then 'unknown'
+          when ts.sent_value is not null and ts.value is not null
+            then case when ts.sent_value = ts.value then 'same' else 'different' end
+          when ts.sent_value is not null then 'only-sent'
+          when ts.value is not null then 'only-returned'
+          else 'neither' end";
 
 pub(crate) fn push_usage_filter(
     query: &mut QueryBuilder<Postgres>,
@@ -141,8 +150,19 @@ pub(crate) async fn turn_state_counts(
         "select count(*) filter (where classification = 'observed292')::bigint as observed_292,
                 count(*) filter (where classification = 'observedOther')::bigint as observed_other,
                 count(*) filter (where classification = 'unobserved')::bigint as unobserved,
-                count(*) filter (where classification = 'notCollected')::bigint as not_collected
-           from (select {TURN_STATE_CLASSIFICATION_SQL} as classification
+                count(*) filter (where classification = 'notCollected')::bigint as not_collected,
+                count(*) filter (where classification <> 'notApplicable' and relation = 'same')::bigint as relation_same,
+                count(*) filter (where classification <> 'notApplicable' and relation = 'different')::bigint as relation_different,
+                count(*) filter (where classification <> 'notApplicable' and relation = 'only-sent')::bigint as only_sent,
+                count(*) filter (where classification <> 'notApplicable' and relation = 'only-returned')::bigint as only_returned,
+                count(*) filter (where classification <> 'notApplicable' and relation = 'neither')::bigint as neither,
+                count(*) filter (where classification <> 'notApplicable' and relation = 'unknown')::bigint as unknown,
+                count(*) filter (where classification <> 'notApplicable' and sent_present)::bigint as sent_count,
+                count(*) filter (where classification <> 'notApplicable' and returned_present)::bigint as returned_count
+           from (select {TURN_STATE_CLASSIFICATION_SQL} as classification,
+                        {TURN_STATE_RELATION_SQL} as relation,
+                        ts.sent_value is not null as sent_present,
+                        ts.value is not null as returned_present
                    from model_requests mr
                    left join request_turn_state_observations ts
                      on ts.request_id = mr.id and ts.attempt_index = mr.attempt_count
@@ -164,6 +184,14 @@ pub(crate) async fn turn_state_counts(
         observed_other: unsigned(&row, "observed_other")?,
         unobserved: unsigned(&row, "unobserved")?,
         not_collected: unsigned(&row, "not_collected")?,
+        same: unsigned(&row, "relation_same")?,
+        different: unsigned(&row, "relation_different")?,
+        only_sent: unsigned(&row, "only_sent")?,
+        only_returned: unsigned(&row, "only_returned")?,
+        neither: unsigned(&row, "neither")?,
+        unknown: unsigned(&row, "unknown")?,
+        sent_count: unsigned(&row, "sent_count")?,
+        returned_count: unsigned(&row, "returned_count")?,
     })
 }
 
@@ -187,7 +215,10 @@ fn usage_list_record_select() -> String {
             mr.reasoning_effort, mr.reasoning_preset, mr.subagent_kind, mr.compact,
             mr.started_at,
             {TURN_STATE_CLASSIFICATION_SQL} as turn_state_classification,
-            octet_length(ts.value)::bigint as turn_state_bytes
+            octet_length(ts.value)::bigint as turn_state_bytes,
+            {TURN_STATE_RELATION_SQL} as turn_state_relation,
+            octet_length(ts.sent_value)::bigint as turn_state_sent_bytes,
+            octet_length(ts.value)::bigint as turn_state_returned_bytes
      from model_requests mr
      left join request_turn_state_observations ts
        on ts.request_id = mr.id and ts.attempt_index = mr.attempt_count"
@@ -208,6 +239,7 @@ fn usage_record_detail_select() -> String {
             mr.upstream_model_id, mr.upstream_transport, mr.http_version, mr.websocket_pool,
             mr.service_tier, mr.provider_observation_json, mr.diagnostic_trace_json,
             mr.attempt_count, mr.upstream_send_state, mr.downstream_committed_at,
+            mr.turn_state_sent_collection_enabled,
             mr.outcome, mr.client_status_code, mr.upstream_status_code,
             mr.client_response_id, mr.upstream_request_id, mr.upstream_response_id,
             mr.error_kind, mr.provider_error_code, mr.error_message, mr.retry_after_ms,
@@ -224,10 +256,21 @@ fn usage_record_detail_select() -> String {
             mr.image_generation_succeeded, mr.started_at, mr.deadline_at, mr.completed_at,
             {TURN_STATE_CLASSIFICATION_SQL} as turn_state_classification,
             octet_length(ts.value)::bigint as turn_state_bytes,
+            {TURN_STATE_RELATION_SQL} as turn_state_relation,
+            octet_length(ts.sent_value)::bigint as turn_state_sent_bytes,
+            octet_length(ts.value)::bigint as turn_state_returned_bytes,
             ts.value as turn_state_value, ts.observed_at as turn_state_observed_at,
             ts.source as turn_state_source,
             ts.upstream_response_id as turn_state_upstream_response_id,
-            ts.attempt_index as turn_state_attempt_index, ts.changed as turn_state_changed
+            ts.attempt_index as turn_state_attempt_index, ts.changed as turn_state_changed,
+            ts.sent_value as turn_state_sent_value, ts.sent_at as turn_state_sent_at,
+            ts.sent_source as turn_state_sent_source,
+            ts.sent_transport as turn_state_sent_transport,
+            ts.sent_account_id as turn_state_sent_account_id,
+            ts.sent_identity_revision as turn_state_sent_identity_revision,
+            ts.sent_effective_model as turn_state_sent_effective_model,
+            ts.sent_generation as turn_state_sent_generation,
+            ts.sent_candidate_id as turn_state_sent_candidate_id
      from model_requests mr
      left join request_turn_state_observations ts
        on ts.request_id = mr.id and ts.attempt_index = mr.attempt_count"
@@ -319,9 +362,71 @@ pub(crate) async fn usage_record_detail(
         })?;
     let request = usage_record_from_row(&row)?;
     let value: Option<String> = get(&row, "turn_state_value")?;
+    let returned = value
+        .as_ref()
+        .map(|value| {
+            let metadata = model_turn_state_token_metadata(value);
+            Ok::<_, StoreError>(TurnStateEvidence {
+                value: value.clone(),
+                bytes: u64::try_from(value.len()).unwrap_or(u64::MAX),
+                sha256: hex::encode(Sha256::digest(value.as_bytes())),
+                timestamp: get(&row, "turn_state_observed_at")?,
+                source: "upstream".to_owned(),
+                transport: get(&row, "turn_state_source")?,
+                token_version: metadata.token_version,
+                issued_at: metadata.issued_at,
+                account_id: request.provider_account_ref.clone(),
+                identity_revision: None,
+                effective_model: request.upstream_model_id.clone(),
+                generation: None,
+                candidate_id: None,
+                upstream_response_id: get(&row, "turn_state_upstream_response_id")?,
+                changed: get(&row, "turn_state_changed")?,
+            })
+        })
+        .transpose()?;
+    let sent_value: Option<String> = get(&row, "turn_state_sent_value")?;
+    let sent = sent_value
+        .as_ref()
+        .map(|value| {
+            let metadata = model_turn_state_token_metadata(value);
+            Ok::<_, StoreError>(TurnStateEvidence {
+                value: value.clone(),
+                bytes: u64::try_from(value.len()).unwrap_or(u64::MAX),
+                sha256: hex::encode(Sha256::digest(value.as_bytes())),
+                timestamp: get(&row, "turn_state_sent_at")?,
+                source: get(&row, "turn_state_sent_source")?,
+                transport: get(&row, "turn_state_sent_transport")?,
+                token_version: metadata.token_version,
+                issued_at: metadata.issued_at,
+                account_id: get(&row, "turn_state_sent_account_id")?,
+                identity_revision: get::<Option<i64>>(&row, "turn_state_sent_identity_revision")?
+                    .and_then(|value| u64::try_from(value).ok()),
+                effective_model: get(&row, "turn_state_sent_effective_model")?,
+                generation: get::<Option<i64>>(&row, "turn_state_sent_generation")?
+                    .and_then(|value| u64::try_from(value).ok()),
+                candidate_id: get(&row, "turn_state_sent_candidate_id")?,
+                upstream_response_id: None,
+                changed: false,
+            })
+        })
+        .transpose()?;
+    let relation = match (&sent, &returned) {
+        (Some(sent), Some(returned)) if sent.value == returned.value => "same",
+        (Some(_), Some(_)) => "different",
+        (Some(_), None) => "only-sent",
+        (None, Some(_)) if !get::<bool>(&row, "turn_state_sent_collection_enabled")? => "unknown",
+        (None, Some(_)) => "only-returned",
+        (None, None) if !get::<bool>(&row, "turn_state_sent_collection_enabled")? => "unknown",
+        (None, None) => "neither",
+    }
+    .to_owned();
     let turn_state = if let Some(value) = value {
         TurnStateDetail {
             summary: request.turn_state.clone(),
+            relation,
+            sent,
+            returned,
             sha256: Some(hex::encode(Sha256::digest(value.as_bytes()))),
             value: Some(value),
             observed_at: Some(get(&row, "turn_state_observed_at")?),
@@ -333,6 +438,9 @@ pub(crate) async fn usage_record_detail(
     } else {
         TurnStateDetail {
             summary: request.turn_state.clone(),
+            relation,
+            sent,
+            returned,
             value: None,
             sha256: None,
             observed_at: None,

@@ -177,6 +177,7 @@ mod turn_state {
             lock_enabled: true,
             capture_enabled: true,
             reuse_window_seconds: 7_200,
+            refresh_lead_seconds: 900,
             capture_proxy_id: None,
             capture_proxy: None,
             capture_policy: ModelTurnStateCapturePolicy {
@@ -209,6 +210,7 @@ mod turn_state {
                 lock_enabled: true,
                 capture_enabled: true,
                 reuse_window_seconds: 3_600,
+                refresh_lead_seconds: 900,
                 capture_proxy_id: Some("proxy_saved".to_owned()),
                 capture_proxy: Some(ModelTurnStateCaptureProxy {
                     id: "proxy_saved".to_owned(),
@@ -240,9 +242,34 @@ mod turn_state {
                     source: "capture".to_owned(),
                     compatible_transport: "http".to_owned(),
                     invalidated: false,
+                    generation: 4,
+                    id: None,
                 }),
+                candidate: Some(ModelTurnStatePin {
+                    value: "C".repeat(292),
+                    encoded_bytes: 292,
+                    raw_bytes: None,
+                    ciphertext_bytes: None,
+                    token_version: None,
+                    envelope_format: None,
+                    issued_at: None,
+                    timestamp_verified: false,
+                    sha256: "candidate-digest".to_owned(),
+                    captured_at: now - Duration::minutes(10),
+                    reuse_deadline: now + Duration::minutes(50),
+                    source: "capture".to_owned(),
+                    compatible_transport: "http".to_owned(),
+                    invalidated: false,
+                    generation: 5,
+                    id: Some("candidate_1".to_owned()),
+                }),
+                next_capture_at: Some(now - Duration::minutes(75)),
+                next_activation_at: Some(now - Duration::hours(1)),
+                capture_not_before: None,
+                waiting_reason: None,
                 legacy_override_enabled: true,
                 legacy_override_configured: true,
+                legacy_override_value: Some("legacy".to_owned()),
             },
             capture: Some(ModelTurnStateCaptureJob {
                 job_id: "job_1".to_owned(),
@@ -258,15 +285,14 @@ mod turn_state {
         assert_eq!(value["pin"]["status"], "aged");
         assert_eq!(value["pin"]["encodedBytes"], 292);
         assert_eq!(value["pin"]["timestampVerified"], false);
+        assert_eq!(value["candidate"]["id"], "candidate_1");
+        assert_eq!(value["candidate"]["generation"], 5);
         assert_eq!(
             value["captureProxy"]["endpoint"],
             "socks5://proxy.example:823"
         );
         assert_eq!(value["legacyOverride"]["configured"], true);
-        assert_eq!(
-            value["legacyOverride"]["willApplyWhenModelPinUnavailable"],
-            true
-        );
+        assert_eq!(value["legacyOverride"]["value"], "legacy");
         assert_eq!(value["capture"]["status"], "running");
     }
 
