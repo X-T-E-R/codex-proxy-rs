@@ -292,6 +292,16 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     .execute(&database.pool)
     .await
     .expect("age pin");
+    let observation_only_policy = store
+        .update_account_policy(
+            "acct_model_state",
+            AccountTurnStatePolicyUpdate {
+                capture_enabled: false,
+                ..account_policy_update(&shortened_policy)
+            },
+        )
+        .await
+        .expect("pause capture while checking ordinary observation");
     let (aged_store, writer) = PgTurnStateStore::initialize(database.pool.clone())
         .await
         .expect("hydrate aged model store");
@@ -351,6 +361,20 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
             .expect("suspect value must not schedule residential capture")
             .is_empty()
     );
+    let capture_policy = aged_store
+        .update_account_policy(
+            "acct_model_state",
+            AccountTurnStatePolicyUpdate {
+                capture_enabled: true,
+                ..account_policy_update(&observation_only_policy)
+            },
+        )
+        .await
+        .expect("resume capture after suspect observation");
+    assert!(capture_policy.capture_enabled);
+    let scope = aged_store
+        .model_observation_scope("acct_model_state", 1, "upstream-codex")
+        .expect("capture-enabled aged pin accepts another ordinary observation");
     aged_store.enqueue_observation(TurnStateObservation {
         id: "obs_non_292".to_owned(),
         account_id: "acct_model_state".to_owned(),
@@ -450,7 +474,8 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
                 "acct_model_state",
                 1,
                 "upstream-codex",
-                captured.config_revision,
+                captured_pin.generation,
+                captured_pin.id.as_deref(),
                 &captured_pin.sha256,
             )
             .await
@@ -462,7 +487,8 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
                 "acct_model_state",
                 1,
                 "upstream-codex",
-                captured.config_revision,
+                captured_pin.generation,
+                captured_pin.id.as_deref(),
                 &captured_pin.sha256,
             )
             .await
@@ -502,10 +528,17 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     })
     .await
     .expect("non-292 observation after invalidation schedules residential capture");
+    assert!(matches!(
+        aged_store
+            .commit_model_capture(&invalid_candidates[0], &observed_value)
+            .await,
+        Err(TurnStateStoreError::Conflict)
+    ));
+    let replacement = "B".repeat(292);
     let recaptured = aged_store
-        .commit_model_capture(&invalid_candidates[0], &observed_value)
+        .commit_model_capture(&invalid_candidates[0], &replacement)
         .await
-        .expect("residential capture renews an inactive value even when bytes match");
+        .expect("residential capture accepts a different value after rejection");
     let recaptured_pin = recaptured.pin.expect("renewed residential pin");
     assert_eq!(recaptured_pin.source, "capture");
     assert!(recaptured_pin.reuse_deadline > Utc::now());
@@ -532,6 +565,184 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
         .await
         .expect("join observation writer")
         .expect("stop observation writer");
+    database.close().await;
+}
+
+#[tokio::test]
+async fn proactive_capture_stages_candidate_and_promotes_without_extending_candidate_ttl() {
+    let Some(database) = TestDatabase::create("model_turn_state_candidate").await else {
+        return;
+    };
+    seed_account(&database.pool, "acct_candidate", "openai").await;
+    sqlx::query(
+        "insert into outbound_proxies
+           (id, name, proxy_url, last_test_at, last_test_success, last_test_latency_ms,
+            last_test_message)
+         values ('proxy_candidate', 'Candidate', 'socks5://127.0.0.1:823',
+                 now(), true, 1, 'ok')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed capture proxy");
+    let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize candidate store");
+    let initial_policy = store
+        .load_account_policy("acct_candidate")
+        .await
+        .expect("load candidate policy");
+    let policy = store
+        .update_account_policy(
+            "acct_candidate",
+            AccountTurnStatePolicyUpdate {
+                lock_enabled: true,
+                capture_enabled: true,
+                reuse_window_seconds: 3_600,
+                refresh_lead_seconds: 900,
+                capture_proxy_id: Some("proxy_candidate".to_owned()),
+                ..account_policy_update(&initial_policy)
+            },
+        )
+        .await
+        .expect("configure proactive capture");
+    let empty = store
+        .load_model_state("acct_candidate", "gpt-5.6-sol")
+        .await
+        .expect("load candidate scope");
+    let active_value = "A".repeat(292);
+    store
+        .update_model_state(
+            "acct_candidate",
+            "gpt-5.6-sol",
+            ModelTurnStateUpdate {
+                expected_identity_revision: empty.identity_revision,
+                expected_effective_model: empty.effective_model.clone(),
+                lock_enabled: true,
+                capture_enabled: true,
+                reuse_window_seconds: 3_600,
+                capture_proxy_id: policy.capture_proxy_id.clone(),
+                max_attempts: policy.capture_policy.max_attempts,
+                attempt_timeout_seconds: policy.capture_policy.attempt_timeout_seconds,
+                job_timeout_seconds: policy.capture_policy.job_timeout_seconds,
+                backoff_seconds: policy.capture_policy.backoff_seconds,
+                max_backoff_seconds: policy.capture_policy.max_backoff_seconds,
+                cooldown_seconds: policy.capture_policy.cooldown_seconds,
+                pin_action: ModelTurnStatePinAction::Replace,
+                value: Some(active_value.clone()),
+                expected_revision: empty.config_revision,
+            },
+        )
+        .await
+        .expect("seed active value");
+    sqlx::query(
+        "update openai_model_turn_states
+            set pin_captured_at = now() - interval '45 minutes',
+                pin_reuse_deadline = now() + interval '15 minutes',
+                active_activated_at = now() - interval '45 minutes'
+          where account_id = 'acct_candidate' and effective_model = 'gpt-5.6-sol'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("move active into refresh lead");
+    let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("restart candidate store");
+    let scopes = store
+        .model_capture_candidates(None, 8)
+        .await
+        .expect("scan proactive candidate");
+    assert_eq!(scopes.len(), 1, "45 minutes enters a 15 minute lead");
+    let candidate_value = "C".repeat(292);
+    let staged = store
+        .commit_model_capture(&scopes[0], &candidate_value)
+        .await
+        .expect("stage candidate while active remains valid");
+    assert_eq!(
+        staged.pin.as_ref().map(|pin| pin.value.as_str()),
+        Some(active_value.as_str())
+    );
+    let candidate = staged.candidate.as_ref().expect("candidate staged");
+    assert_eq!(candidate.value, candidate_value);
+    let candidate_captured_at = candidate.captured_at;
+    let candidate_deadline = candidate.reuse_deadline;
+    let candidate_generation = candidate.generation;
+    let candidate_id = candidate.id.clone().expect("candidate ID");
+    let candidate_sha256 = candidate.sha256.clone();
+    assert_eq!(
+        candidate_deadline,
+        candidate_captured_at + Duration::hours(1)
+    );
+    assert_eq!(
+        staged.next_activation_at,
+        staged.pin.as_ref().map(|pin| pin.reuse_deadline)
+    );
+
+    sqlx::query(
+        "update openai_model_turn_states
+            set pin_reuse_deadline = now() - interval '1 second'
+          where account_id = 'acct_candidate' and effective_model = 'gpt-5.6-sol'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("expire active value");
+    store
+        .maintain_model_turn_state_candidates(8)
+        .await
+        .expect("background maintenance promotes due candidate");
+    let hot = store
+        .active_model_pin("acct_candidate", 1, "gpt-5.6-sol")
+        .expect("background maintenance publishes promoted cache");
+    assert_eq!(hot.value, candidate_value);
+    assert_eq!(hot.candidate_id.as_deref(), Some(candidate_id.as_str()));
+    let promoted = store
+        .load_model_state("acct_candidate", "gpt-5.6-sol")
+        .await
+        .expect("promote due candidate");
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.value.as_str()),
+        Some(candidate_value.as_str())
+    );
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.captured_at),
+        Some(candidate_captured_at)
+    );
+    assert_eq!(
+        promoted.pin.as_ref().map(|pin| pin.reuse_deadline),
+        Some(candidate_deadline)
+    );
+    assert!(promoted.candidate.is_none());
+    let promoted_revision = promoted.config_revision;
+    store
+        .maintain_model_turn_state_candidates(8)
+        .await
+        .expect("second maintenance round is idempotent");
+    let (restarted, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("restart after persisted promotion");
+    let restarted_view = restarted
+        .load_model_state("acct_candidate", "gpt-5.6-sol")
+        .await
+        .expect("load promoted state after restart");
+    assert_eq!(restarted_view.config_revision, promoted_revision);
+    assert_eq!(
+        restarted
+            .active_model_pin("acct_candidate", 1, "gpt-5.6-sol")
+            .map(|pin| pin.value),
+        Some(candidate_value)
+    );
+    assert!(
+        restarted
+            .invalidate_active_model_pin(
+                "acct_candidate",
+                1,
+                "gpt-5.6-sol",
+                candidate_generation,
+                Some(&candidate_id),
+                &candidate_sha256,
+            )
+            .await
+            .expect("in-flight candidate rejection matches after persistent promotion")
+    );
     database.close().await;
 }
 
@@ -830,7 +1041,7 @@ async fn account_policy_observes_a_never_loaded_model_before_proxy_capture() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    assert_eq!(
+    assert!(
         sqlx::query_scalar::<_, bool>(
             "select capture_requested_at is not null
                from openai_model_turn_states
@@ -839,8 +1050,7 @@ async fn account_policy_observes_a_never_loaded_model_before_proxy_capture() {
         )
         .fetch_one(&database.pool)
         .await
-        .expect("non-292 model row exists"),
-        true
+        .expect("non-292 model row exists")
     );
     writer_cancellation.cancel();
     writer_task
@@ -933,6 +1143,7 @@ fn account_policy_update(
         lock_enabled: view.lock_enabled,
         capture_enabled: view.capture_enabled,
         reuse_window_seconds: view.reuse_window_seconds,
+        refresh_lead_seconds: view.refresh_lead_seconds,
         capture_proxy_id: view.capture_proxy_id.clone(),
         max_attempts: view.capture_policy.max_attempts,
         attempt_timeout_seconds: view.capture_policy.attempt_timeout_seconds,

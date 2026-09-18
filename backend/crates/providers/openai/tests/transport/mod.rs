@@ -149,6 +149,7 @@ fn request_context<'a>(
         request_id,
         attempt_index: None,
         model_turn_state_observation_scope: None,
+        turn_state_send: None,
         turn_state: None,
         turn_metadata: None,
         beta_features: None,

@@ -12,6 +12,7 @@ pub const DEFAULT_CAPTURE_JOB_TIMEOUT_SECONDS: u8 = 30;
 pub const DEFAULT_CAPTURE_BACKOFF_SECONDS: u8 = 1;
 pub const DEFAULT_CAPTURE_MAX_BACKOFF_SECONDS: u8 = 4;
 pub const DEFAULT_CAPTURE_COOLDOWN_SECONDS: u32 = 900;
+pub const DEFAULT_CAPTURE_REFRESH_LEAD_SECONDS: u32 = 900;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct TurnStateObserved {
@@ -48,6 +49,7 @@ pub enum ModelTurnStatePinAction {
     Replace,
     Clear,
     Invalidate,
+    ImportLegacy,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -103,6 +105,7 @@ pub struct AccountTurnStatePolicyUpdate {
     pub lock_enabled: bool,
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
+    pub refresh_lead_seconds: u32,
     pub capture_proxy_id: Option<String>,
     pub max_attempts: u8,
     pub attempt_timeout_seconds: u16,
@@ -124,6 +127,7 @@ impl std::fmt::Debug for AccountTurnStatePolicyUpdate {
             .field("lock_enabled", &self.lock_enabled)
             .field("capture_enabled", &self.capture_enabled)
             .field("reuse_window_seconds", &self.reuse_window_seconds)
+            .field("refresh_lead_seconds", &self.refresh_lead_seconds)
             .field("capture_proxy_id", &self.capture_proxy_id)
             .field("max_attempts", &self.max_attempts)
             .field("attempt_timeout_seconds", &self.attempt_timeout_seconds)
@@ -151,6 +155,8 @@ pub struct ModelTurnStatePin {
     pub source: String,
     pub compatible_transport: String,
     pub invalidated: bool,
+    pub generation: u64,
+    pub id: Option<String>,
 }
 
 impl std::fmt::Debug for ModelTurnStatePin {
@@ -171,6 +177,8 @@ impl std::fmt::Debug for ModelTurnStatePin {
             .field("source", &self.source)
             .field("compatible_transport", &self.compatible_transport)
             .field("invalidated", &self.invalidated)
+            .field("generation", &self.generation)
+            .field("id", &self.id)
             .finish()
     }
 }
@@ -196,12 +204,19 @@ pub struct ModelTurnStateView {
     pub lock_enabled: bool,
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
+    pub refresh_lead_seconds: u32,
     pub capture_proxy_id: Option<String>,
     pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
     pub capture_policy: ModelTurnStateCapturePolicy,
     pub pin: Option<ModelTurnStatePin>,
+    pub candidate: Option<ModelTurnStatePin>,
+    pub next_capture_at: Option<DateTime<Utc>>,
+    pub next_activation_at: Option<DateTime<Utc>>,
+    pub capture_not_before: Option<DateTime<Utc>>,
+    pub waiting_reason: Option<String>,
     pub legacy_override_enabled: bool,
     pub legacy_override_configured: bool,
+    pub legacy_override_value: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,6 +227,7 @@ pub struct AccountTurnStatePolicyView {
     pub lock_enabled: bool,
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
+    pub refresh_lead_seconds: u32,
     pub capture_proxy_id: Option<String>,
     pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
     pub capture_policy: ModelTurnStateCapturePolicy,
@@ -270,7 +286,9 @@ impl ModelTurnStateCaptureScope {
 pub struct ActiveModelTurnStatePin {
     pub value: String,
     pub sha256: String,
-    pub config_revision: u64,
+    pub generation: u64,
+    pub candidate_id: Option<String>,
+    pub source: String,
 }
 
 impl std::fmt::Debug for ActiveModelTurnStatePin {
@@ -279,7 +297,9 @@ impl std::fmt::Debug for ActiveModelTurnStatePin {
             .debug_struct("ActiveModelTurnStatePin")
             .field("value", &"<redacted>")
             .field("sha256", &self.sha256)
-            .field("config_revision", &self.config_revision)
+            .field("generation", &self.generation)
+            .field("candidate_id", &self.candidate_id)
+            .field("source", &self.source)
             .finish()
     }
 }
@@ -308,6 +328,22 @@ pub struct TurnStateObservation {
     pub client_turn_id: Option<String>,
     /// 普通 HTTP Responses 请求没有注入有效模型锁，且账号启用锁定或捕获时设置。
     pub model_scope: Option<ModelTurnStateObservationScope>,
+}
+
+/// Provider 在最终上游 transport 成功建立响应边界后确认的实际发送值。
+#[derive(Clone, PartialEq, Eq)]
+pub struct TurnStateSent {
+    pub request_id: String,
+    pub attempt_index: u32,
+    pub account_id: String,
+    pub identity_revision: u64,
+    pub effective_model: String,
+    pub value: String,
+    pub sent_at: DateTime<Utc>,
+    pub transport: String,
+    pub source: String,
+    pub generation: Option<u64>,
+    pub candidate_id: Option<String>,
 }
 
 impl TurnStateObservation {
@@ -408,6 +444,9 @@ pub trait TurnStateStore: Send + Sync {
     /// 数据面非阻塞入队；队列满或关闭时由实现丢弃并记录，不向请求返回错误。
     fn enqueue_observation(&self, observation: TurnStateObservation);
 
+    /// 最终 transport 已实际返回响应边界后写入；捕获探针不经过该端口。
+    fn enqueue_sent(&self, _sent: TurnStateSent) {}
+
     /// 读取启动时 hydrate、管理提交后同步更新的进程内快照。
     fn active_override(&self, account_id: &str) -> Option<String>;
 
@@ -472,6 +511,14 @@ pub trait TurnStateStore: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// 后台整理已到切换点或已过期的 candidate，并同步数据面快照。
+    async fn maintain_model_turn_state_candidates(
+        &self,
+        _limit: u16,
+    ) -> Result<(), TurnStateStoreError> {
+        Ok(())
+    }
+
     /// 以账号身份、模型与配置 revision fence 提交一次捕获结果。
     async fn commit_model_capture(
         &self,
@@ -481,13 +528,23 @@ pub trait TurnStateStore: Send + Sync {
         Err(TurnStateStoreError::Unavailable)
     }
 
+    async fn record_model_capture_failure(
+        &self,
+        _scope: &ModelTurnStateCaptureScope,
+        _reason: &str,
+        _finished_at: DateTime<Utc>,
+    ) -> Result<(), TurnStateStoreError> {
+        Ok(())
+    }
+
     /// 仅由可归因到当前 HTTP 模型锁版本的结构化上游拒绝调用。
     async fn invalidate_active_model_pin(
         &self,
         _account_id: &str,
         _identity_revision: u64,
         _effective_model: &str,
-        _expected_config_revision: u64,
+        _expected_generation: u64,
+        _expected_candidate_id: Option<&str>,
         _expected_sha256: &str,
     ) -> Result<bool, TurnStateStoreError> {
         Ok(false)

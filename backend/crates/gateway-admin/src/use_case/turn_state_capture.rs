@@ -306,7 +306,8 @@ impl ModelTurnStateCaptureManager {
                 &job_id,
                 ModelTurnStateCaptureStatus::Failed,
                 Some("queue_full"),
-            );
+            )
+            .await;
             return Err(AdminError::unavailable("捕获任务队列已满"));
         }
         Ok(view)
@@ -326,8 +327,32 @@ impl ModelTurnStateCaptureManager {
         }
     }
 
-    fn finish(&self, job_id: &str, status: ModelTurnStateCaptureStatus, reason: Option<&str>) {
+    async fn finish(
+        &self,
+        job_id: &str,
+        status: ModelTurnStateCaptureStatus,
+        reason: Option<&str>,
+    ) {
         let now = Utc::now();
+        let scope = lock(&self.inner.state)
+            .jobs
+            .get(job_id)
+            .map(|job| job.scope.clone());
+        if status == ModelTurnStateCaptureStatus::Failed
+            && let (Some(scope), Some(reason)) = (scope.as_ref(), reason)
+            && let Err(error) = self
+                .inner
+                .store
+                .record_model_capture_failure(scope, reason, now)
+                .await
+        {
+            tracing::warn!(
+                account_id = scope.account_id,
+                effective_model = scope.effective_model,
+                error_kind = ?error,
+                "model turn state capture cooldown could not be persisted"
+            );
+        }
         let key = {
             let mut state = lock(&self.inner.state);
             let Some(job) = state.jobs.get_mut(job_id) else {
@@ -373,7 +398,8 @@ impl ModelTurnStateCaptureManager {
                 &job_id,
                 ModelTurnStateCaptureStatus::Failed,
                 Some("job_timeout"),
-            );
+            )
+            .await;
             return;
         }
         let Some(proxy_id) = scope.capture_proxy_id.as_deref() else {
@@ -381,7 +407,8 @@ impl ModelTurnStateCaptureManager {
                 &job_id,
                 ModelTurnStateCaptureStatus::Failed,
                 Some("proxy_unavailable"),
-            );
+            )
+            .await;
             return;
         };
         let proxy_record = match tokio::select! {
@@ -398,7 +425,8 @@ impl ModelTurnStateCaptureManager {
                     &job_id,
                     ModelTurnStateCaptureStatus::Failed,
                     Some("job_timeout"),
-                );
+                )
+                .await;
                 return;
             }
             _ => {
@@ -406,7 +434,8 @@ impl ModelTurnStateCaptureManager {
                     &job_id,
                     ModelTurnStateCaptureStatus::Failed,
                     Some("proxy_unavailable"),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -429,7 +458,8 @@ impl ModelTurnStateCaptureManager {
                     &job_id,
                     ModelTurnStateCaptureStatus::Failed,
                     Some("job_timeout"),
-                );
+                )
+                .await;
                 return;
             }
             _ => {
@@ -437,7 +467,8 @@ impl ModelTurnStateCaptureManager {
                     &job_id,
                     ModelTurnStateCaptureStatus::Failed,
                     Some("proxy_changed"),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -503,7 +534,8 @@ impl ModelTurnStateCaptureManager {
                             .await;
                         match commit_result {
                             Ok(_) => {
-                                self.finish(&job_id, ModelTurnStateCaptureStatus::Succeeded, None);
+                                self.finish(&job_id, ModelTurnStateCaptureStatus::Succeeded, None)
+                                    .await;
                                 return;
                             }
                             Err(TurnStateStoreError::Conflict | TurnStateStoreError::NotFound) => {
@@ -511,7 +543,8 @@ impl ModelTurnStateCaptureManager {
                                     &job_id,
                                     ModelTurnStateCaptureStatus::Failed,
                                     Some("scope_changed"),
-                                );
+                                )
+                                .await;
                                 return;
                             }
                             Err(_)
@@ -522,7 +555,8 @@ impl ModelTurnStateCaptureManager {
                                     &job_id,
                                     ModelTurnStateCaptureStatus::Failed,
                                     Some("store_unavailable"),
-                                );
+                                )
+                                .await;
                                 return;
                             }
                             Err(_) => reason = "store_unavailable",
@@ -552,11 +586,20 @@ impl ModelTurnStateCaptureManager {
             if tokio::time::Instant::now() >= deadline {
                 reason = "job_timeout";
             }
-            self.finish(&job_id, ModelTurnStateCaptureStatus::Failed, Some(reason));
+            self.finish(&job_id, ModelTurnStateCaptureStatus::Failed, Some(reason))
+                .await;
         }
     }
 
     async fn enqueue_automatic(&self) {
+        if let Err(error) = self
+            .inner
+            .store
+            .maintain_model_turn_state_candidates(AUTO_SCAN_LIMIT)
+            .await
+        {
+            tracing::warn!(error_kind = ?error, "model turn state candidate maintenance failed");
+        }
         let after = lock(&self.inner.state).scan_cursor.clone();
         let Ok(scopes) = self
             .inner

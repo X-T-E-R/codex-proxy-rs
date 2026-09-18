@@ -159,7 +159,8 @@ impl RetentionRepository for PgRetentionRepository {
                 "delete from request_turn_state_observations
                  where ctid in (
                    select observation.ctid from request_turn_state_observations observation
-                    where observation.observed_at < $1 - ($2 * interval '1 day')
+                    where coalesce(observation.observed_at, observation.sent_at)
+                            < $1 - ($2 * interval '1 day')
                       and not exists (select 1 from model_requests request
                                        where request.id = observation.request_id)
                     limit $3

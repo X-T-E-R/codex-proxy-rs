@@ -3,6 +3,7 @@ use provider_openai::transport::protocol::websocket::{
     OpeningAuditSnapshot, websocket_audit_artifact_from_attempt, websocket_event_to_sse_frame,
     websocket_metadata_turn_state, websocket_payload_audit_snapshot,
     websocket_response_completed_id, websocket_response_create_payload_text,
+    websocket_response_create_turn_state,
 };
 use serde_json::json;
 
@@ -233,6 +234,33 @@ fn websocket_metadata_turn_state_should_ignore_public_event_metadata() {
 
     assert_eq!(websocket_metadata_turn_state(&event), None);
     assert!(websocket_event_to_sse_frame(&event.to_string()).is_some());
+}
+
+#[test]
+fn websocket_response_create_turn_state_should_read_only_final_client_metadata() {
+    let request = json!({
+        "type": "response.create",
+        "client_metadata": {"x-codex-turn-state": "turn-sent-on-wire"},
+        "headers": {"x-codex-turn-state": "not-a-request-header"}
+    });
+    assert_eq!(
+        websocket_response_create_turn_state(&request).as_deref(),
+        Some("turn-sent-on-wire")
+    );
+
+    for request in [
+        json!({"type": "response.create", "client_metadata": {}}),
+        json!({
+            "type": "response.create",
+            "client_metadata": {"x-codex-turn-state": ["not-a-string"]}
+        }),
+        json!({
+            "type": "response.metadata",
+            "client_metadata": {"x-codex-turn-state": "response-value"}
+        }),
+    ] {
+        assert_eq!(websocket_response_create_turn_state(&request), None);
+    }
 }
 
 #[test]

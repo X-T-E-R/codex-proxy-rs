@@ -191,7 +191,9 @@ pub(super) struct ModelTurnStatePinFence {
     pub(super) account_id: String,
     pub(super) identity_revision: u64,
     pub(super) effective_model: String,
-    pub(super) config_revision: u64,
+    pub(super) generation: u64,
+    pub(super) candidate_id: Option<String>,
+    pub(super) source: String,
     pub(super) sha256: String,
 }
 
@@ -595,7 +597,8 @@ async fn invalidate_rejected_model_pin(
             &fence.account_id,
             fence.identity_revision,
             &fence.effective_model,
-            fence.config_revision,
+            fence.generation,
+            fence.candidate_id.as_deref(),
             &fence.sha256,
         )
         .await
@@ -603,14 +606,14 @@ async fn invalidate_rejected_model_pin(
         Ok(true) => tracing::info!(
             account_id = fence.account_id,
             effective_model = fence.effective_model,
-            config_revision = fence.config_revision,
+            generation = fence.generation,
             "OpenAI model turn state pin was invalidated by an attributable upstream rejection"
         ),
         Ok(false) => {}
         Err(_) => tracing::warn!(
             account_id = fence.account_id,
             effective_model = fence.effective_model,
-            config_revision = fence.config_revision,
+            generation = fence.generation,
             "OpenAI model turn state rejection could not be fenced"
         ),
     }
@@ -762,6 +765,30 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             client_turn_id: request.client_turn_id.as_deref(),
         };
         let trace = context.trace();
+        let turn_state_send = (request.turn_state.is_some()
+            || request
+                .passthrough_headers
+                .contains_key("x-codex-turn-state"))
+        .then(|| CodexTurnStateSendContext {
+            identity_revision: active_account.identity_revision().get(),
+            effective_model: upstream_model.as_str(),
+            source: model_turn_state_fence
+                .as_ref()
+                .map_or_else(
+                    || {
+                        if request.turn_state.is_some() {
+                            "continuation"
+                        } else {
+                            "client_passthrough"
+                        }
+                    },
+                    |fence| fence.source.as_str(),
+                ),
+            generation: model_turn_state_fence.as_ref().map(|fence| fence.generation),
+            candidate_id: model_turn_state_fence
+                .as_ref()
+                .and_then(|fence| fence.candidate_id.as_deref()),
+        });
         let response = create_response_attempt(
             &client,
             &request,
@@ -777,7 +804,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             .with_trace(&trace)
             .with_model_turn_state_observation_scope(
                 model_turn_state_observation_scope.as_ref(),
-            ),
+            )
+            .with_turn_state_send(turn_state_send),
             active_account.id().as_str(),
             context.deadline(),
             &cancellation,

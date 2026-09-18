@@ -46,6 +46,7 @@ pub enum ModelTurnStatePinActionWire {
     Replace,
     Clear,
     Invalidate,
+    ImportLegacy,
 }
 
 impl From<ModelTurnStatePinActionWire> for ModelTurnStatePinAction {
@@ -55,6 +56,7 @@ impl From<ModelTurnStatePinActionWire> for ModelTurnStatePinAction {
             ModelTurnStatePinActionWire::Replace => Self::Replace,
             ModelTurnStatePinActionWire::Clear => Self::Clear,
             ModelTurnStatePinActionWire::Invalidate => Self::Invalidate,
+            ModelTurnStatePinActionWire::ImportLegacy => Self::ImportLegacy,
         }
     }
 }
@@ -122,6 +124,8 @@ pub struct UpdateAccountTurnStatePolicyRequest {
     pub lock_enabled: bool,
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
+    #[serde(default = "default_refresh_lead_seconds")]
+    pub refresh_lead_seconds: u32,
     pub capture_proxy_id: Option<String>,
     pub max_attempts: u8,
     pub attempt_timeout_seconds: u16,
@@ -129,6 +133,10 @@ pub struct UpdateAccountTurnStatePolicyRequest {
     pub backoff_seconds: u8,
     pub max_backoff_seconds: u8,
     pub cooldown_seconds: u32,
+}
+
+const fn default_refresh_lead_seconds() -> u32 {
+    900
 }
 
 impl UpdateAccountTurnStatePolicyRequest {
@@ -139,6 +147,7 @@ impl UpdateAccountTurnStatePolicyRequest {
             lock_enabled: self.lock_enabled,
             capture_enabled: self.capture_enabled,
             reuse_window_seconds: self.reuse_window_seconds,
+            refresh_lead_seconds: self.refresh_lead_seconds,
             capture_proxy_id: self.capture_proxy_id,
             max_attempts: self.max_attempts,
             attempt_timeout_seconds: self.attempt_timeout_seconds,
@@ -162,10 +171,16 @@ pub struct ModelTurnStateData {
     lock_enabled: bool,
     capture_enabled: bool,
     reuse_window_seconds: u32,
+    refresh_lead_seconds: u32,
     capture_proxy_id: Option<String>,
     capture_proxy: Option<ModelTurnStateCaptureProxyData>,
     capture_policy: ModelTurnStateCapturePolicyData,
     pin: Option<ModelTurnStatePinData>,
+    candidate: Option<ModelTurnStatePinData>,
+    next_capture_at: Option<DateTime<Utc>>,
+    next_activation_at: Option<DateTime<Utc>>,
+    capture_not_before: Option<DateTime<Utc>>,
+    waiting_reason: Option<String>,
     legacy_override: LegacyTurnStateData,
     capture: Option<ModelTurnStateCaptureJobData>,
 }
@@ -200,6 +215,7 @@ pub struct AccountTurnStatePolicyData {
     lock_enabled: bool,
     capture_enabled: bool,
     reuse_window_seconds: u32,
+    refresh_lead_seconds: u32,
     capture_proxy_id: Option<String>,
     capture_proxy: Option<ModelTurnStateCaptureProxyData>,
     capture_readiness: &'static str,
@@ -224,6 +240,7 @@ impl From<AccountTurnStatePolicyView> for AccountTurnStatePolicyData {
             lock_enabled: view.lock_enabled,
             capture_enabled: view.capture_enabled,
             reuse_window_seconds: view.reuse_window_seconds,
+            refresh_lead_seconds: view.refresh_lead_seconds,
             capture_proxy_id: view.capture_proxy_id,
             capture_proxy: view
                 .capture_proxy
@@ -265,6 +282,8 @@ struct ModelTurnStatePinData {
     source: String,
     compatible_transport: String,
     status: &'static str,
+    generation: u64,
+    id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -272,18 +291,13 @@ struct ModelTurnStatePinData {
 struct LegacyTurnStateData {
     enabled: bool,
     configured: bool,
-    will_apply_when_model_pin_unavailable: bool,
+    value: Option<String>,
 }
 
 impl From<ModelTurnStateResult> for ModelTurnStateData {
     fn from(result: ModelTurnStateResult) -> Self {
         let view = result.state;
         let now = Utc::now();
-        let model_pin_available = view.lock_enabled
-            && view
-                .pin
-                .as_ref()
-                .is_some_and(|pin| !pin.invalidated && pin.reuse_deadline > now);
         Self {
             account_id: view.account_id,
             requested_model: view.requested_model,
@@ -294,6 +308,7 @@ impl From<ModelTurnStateResult> for ModelTurnStateData {
             lock_enabled: view.lock_enabled,
             capture_enabled: view.capture_enabled,
             reuse_window_seconds: view.reuse_window_seconds,
+            refresh_lead_seconds: view.refresh_lead_seconds,
             capture_proxy_id: view.capture_proxy_id,
             capture_proxy: view
                 .capture_proxy
@@ -332,13 +347,40 @@ impl From<ModelTurnStateResult> for ModelTurnStateData {
                 reuse_deadline: pin.reuse_deadline,
                 source: pin.source,
                 compatible_transport: pin.compatible_transport,
+                generation: pin.generation,
+                id: pin.id,
             }),
+            candidate: view.candidate.map(|pin| ModelTurnStatePinData {
+                status: if pin.invalidated || pin.reuse_deadline <= now {
+                    "aged"
+                } else {
+                    "fresh"
+                },
+                value: pin.value,
+                encoded_bytes: pin.encoded_bytes,
+                raw_bytes: pin.raw_bytes,
+                decoded_bytes: pin.raw_bytes,
+                ciphertext_bytes: pin.ciphertext_bytes,
+                token_version: pin.token_version,
+                envelope_format: pin.envelope_format,
+                issued_at: pin.issued_at,
+                timestamp_verified: pin.timestamp_verified,
+                sha256: pin.sha256,
+                captured_at: pin.captured_at,
+                reuse_deadline: pin.reuse_deadline,
+                source: pin.source,
+                compatible_transport: pin.compatible_transport,
+                generation: pin.generation,
+                id: pin.id,
+            }),
+            next_capture_at: view.next_capture_at,
+            next_activation_at: view.next_activation_at,
+            capture_not_before: view.capture_not_before,
+            waiting_reason: view.waiting_reason,
             legacy_override: LegacyTurnStateData {
                 enabled: view.legacy_override_enabled,
                 configured: view.legacy_override_configured,
-                will_apply_when_model_pin_unavailable: view.legacy_override_enabled
-                    && view.legacy_override_configured
-                    && !model_pin_available,
+                value: view.legacy_override_value,
             },
             capture: result.capture.map(Into::into),
         }

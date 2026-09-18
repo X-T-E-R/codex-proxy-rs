@@ -889,6 +889,9 @@ fn total_record(
         turn_state: gateway_admin::model::observability::TurnStateSummary {
             classification: "notApplicable".to_owned(),
             bytes: None,
+            relation: "neither".to_owned(),
+            sent_bytes: None,
+            returned_bytes: None,
         },
         endpoint: "/v1/responses".to_owned(),
         client_transport: "http_sse".to_owned(),

@@ -71,7 +71,7 @@ use crate::transport::canonical::{
 use crate::transport::catalog::{
     CodexCatalogCapabilityEvidence, CodexCatalogModel, CodexCatalogVisibility,
 };
-use crate::transport::client::CodexObservedTurnState;
+use crate::transport::client::{CodexObservedTurnState, CodexTurnStateSendContext};
 use crate::transport::diagnostics::{
     CodexFailureCategory, CodexUpstreamFailure, CodexUpstreamSendPhase,
 };
@@ -640,7 +640,9 @@ impl Provider for CodexProvider {
             account_id: lease.account_id().as_str().to_owned(),
             identity_revision: lease.account().identity_revision().get(),
             effective_model: upstream_model.as_str().to_owned(),
-            config_revision: pin.config_revision,
+            generation: pin.generation,
+            candidate_id: pin.candidate_id.clone(),
+            source: pin.source.clone(),
             sha256: pin.sha256.clone(),
         });
         let model_turn_state_observation_scope = self.turn_state_store.as_ref().and_then(|store| {
@@ -655,14 +657,10 @@ impl Provider for CodexProvider {
                 })
                 .flatten()
         });
-        let turn_state = model_pin.map(|pin| pin.value).or_else(|| {
-            self.turn_state_store
-                .as_ref()
-                .and_then(|store| store.active_override(lease.account_id().as_str()))
-        });
+        let turn_state = model_pin.map(|pin| pin.value);
         if let Some(value) = turn_state {
             upstream_request.turn_state = Some(value);
-            // HTTP 模型锁优先于账号级覆盖；二者都不能再被客户端透传多值头覆盖。
+            // 统一的模型值不能再被客户端透传多值头覆盖。
             upstream_request
                 .passthrough_headers
                 .remove("x-codex-turn-state");
