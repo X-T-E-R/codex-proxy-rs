@@ -598,17 +598,26 @@ impl ProxyStore for PgProxyRepository {
             .bind(id)
             .bind(i64::try_from(revision.get()).map_err(|_| store_error(invalid()))?)
             .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                // PostgreSQL 18 为 RESTRICT 返回不同于普通外键违规的错误码。
-                if error.as_database_error().is_some_and(|error| {
+            .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                // 失败事务必须显式回滚；仅依赖 Transaction::drop 的异步回滚会让本事务
+                // 已持有的 advisory xact lock 短暂残留，使紧随其后的合法重命名误报冲突。
+                let referenced = error.as_database_error().is_some_and(|error| {
                     error.is_foreign_key_violation() || error.code().as_deref() == Some("23001")
-                }) {
+                });
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|_| store_error(unavailable()))?;
+                return Err(if referenced {
                     store_error(conflict(id))
                 } else {
                     store_error(unavailable())
-                }
-            })?;
+                });
+            }
+        };
         if result.rows_affected() != 1 {
             return Err(store_error(conflict(id)));
         }

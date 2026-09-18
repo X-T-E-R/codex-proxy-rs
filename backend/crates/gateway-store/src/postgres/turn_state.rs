@@ -1021,21 +1021,21 @@ async fn promote_due_candidate(
 ) -> Result<()> {
     sqlx::query(
         "update openai_model_turn_states s
-            set pin_value = candidate_value,
-                pin_token_version = candidate_token_version,
-                pin_issued_at = candidate_issued_at,
-                pin_raw_bytes = candidate_raw_bytes,
-                pin_source = candidate_source, pin_compatible_transport = 'http',
-                pin_captured_at = candidate_captured_at,
-                pin_reuse_deadline = candidate_reuse_deadline,
+            set pin_value = s.candidate_value,
+                pin_token_version = s.candidate_token_version,
+                pin_issued_at = s.candidate_issued_at,
+                pin_raw_bytes = s.candidate_raw_bytes,
+                pin_source = s.candidate_source, pin_compatible_transport = 'http',
+                pin_captured_at = s.candidate_captured_at,
+                pin_reuse_deadline = s.candidate_reuse_deadline,
                 pin_invalidated_at = null, active_activated_at = now(),
-                active_candidate_id = candidate_id,
-                active_generation = active_generation + 1,
+                active_candidate_id = s.candidate_id,
+                active_generation = s.active_generation + 1,
                 candidate_id = null, candidate_value = null,
                 candidate_token_version = null, candidate_issued_at = null,
                 candidate_raw_bytes = null, candidate_source = null,
                 candidate_captured_at = null, candidate_reuse_deadline = null,
-                config_revision = config_revision + 1, updated_at = now()
+                config_revision = s.config_revision + 1, updated_at = now()
            from openai_account_turn_state_policies p
           where s.account_id = $1 and s.identity_revision = $2 and s.effective_model = $3
             and p.account_id = s.account_id and p.identity_revision = s.identity_revision
@@ -2162,7 +2162,7 @@ impl TurnStateStore for PgTurnStateStore {
         }
         sqlx::query(
             "update openai_model_turn_states s
-                set capture_requested_at = coalesce(capture_requested_at, $6),
+                set capture_requested_at = coalesce(s.capture_requested_at, $6),
                     capture_not_before = $6 + $7 * interval '1 second',
                     capture_last_result = $5, capture_last_finished_at = $6,
                     updated_at = now()
