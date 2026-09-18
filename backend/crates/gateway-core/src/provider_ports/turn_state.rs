@@ -625,27 +625,3 @@ pub trait TurnStateStore: Send + Sync {
         Ok(false)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::ModelTurnStateCaptureTriggerMode as Mode;
-
-    #[test]
-    fn capture_trigger_modes_keep_their_distinct_event_sources() {
-        assert!(Mode::BeforeExpiryIfUsed.captures_before_expiry());
-        assert!(!Mode::BeforeExpiryIfUsed.captures_on_failure());
-        assert!(!Mode::BeforeExpiryIfUsed.captures_on_first_request_after_expiry());
-
-        assert!(Mode::OnAttributedFailure.captures_on_failure());
-        assert!(!Mode::OnAttributedFailure.captures_before_expiry());
-        assert!(!Mode::OnAttributedFailure.captures_on_first_request_after_expiry());
-
-        assert!(Mode::FirstRequestAfterExpiry.captures_on_first_request_after_expiry());
-        assert!(!Mode::FirstRequestAfterExpiry.captures_on_failure());
-        assert!(!Mode::FirstRequestAfterExpiry.captures_before_expiry());
-
-        assert!(Mode::FailureOrFirstAfterExpiry.captures_on_failure());
-        assert!(Mode::FailureOrFirstAfterExpiry.captures_on_first_request_after_expiry());
-        assert!(!Mode::FailureOrFirstAfterExpiry.captures_before_expiry());
-    }
-}

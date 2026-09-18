@@ -5,7 +5,9 @@ use std::time::{Duration, SystemTime};
 use gateway_core::account::{
     AccountRuntimeSignals, CredentialRevision, OpaqueProviderData, ProviderAccountId,
 };
-use gateway_core::provider_ports::turn_state::model_turn_state_token_metadata;
+use gateway_core::provider_ports::turn_state::{
+    ModelTurnStateCaptureTriggerMode as CaptureMode, model_turn_state_token_metadata,
+};
 use gateway_core::provider_ports::{
     NewOAuthPendingFlow, OAuthPendingBinding, ProviderRefreshPolicy, ProviderSchedulingState,
     ProviderSessionAffinityKey, ProviderStoreErrorKind, ProviderWebSocketPoolPolicy,
@@ -34,6 +36,25 @@ fn model_turn_state_reads_only_public_fernet_envelope_metadata() {
         Some(1_789_650_773)
     );
     assert!(!metadata.timestamp_verified);
+}
+
+#[test]
+fn capture_trigger_modes_keep_their_distinct_event_sources() {
+    assert!(CaptureMode::BeforeExpiryIfUsed.captures_before_expiry());
+    assert!(!CaptureMode::BeforeExpiryIfUsed.captures_on_failure());
+    assert!(!CaptureMode::BeforeExpiryIfUsed.captures_on_first_request_after_expiry());
+
+    assert!(CaptureMode::OnAttributedFailure.captures_on_failure());
+    assert!(!CaptureMode::OnAttributedFailure.captures_before_expiry());
+    assert!(!CaptureMode::OnAttributedFailure.captures_on_first_request_after_expiry());
+
+    assert!(CaptureMode::FirstRequestAfterExpiry.captures_on_first_request_after_expiry());
+    assert!(!CaptureMode::FirstRequestAfterExpiry.captures_on_failure());
+    assert!(!CaptureMode::FirstRequestAfterExpiry.captures_before_expiry());
+
+    assert!(CaptureMode::FailureOrFirstAfterExpiry.captures_on_failure());
+    assert!(CaptureMode::FailureOrFirstAfterExpiry.captures_on_first_request_after_expiry());
+    assert!(!CaptureMode::FailureOrFirstAfterExpiry.captures_before_expiry());
 }
 
 fn synthetic_fernet_candidate() -> String {
