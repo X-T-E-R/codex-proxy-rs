@@ -952,7 +952,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         &upstream_model,
                     )
                     .await?;
-                    drop(failure_context);
                     let mut replay = cold_response_stream(ColdResponse {
                         client,
                         response_origin,
@@ -1027,7 +1026,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     &upstream_model,
                 )
                 .await?;
-                drop(failure_context);
                 let mut replay = cold_response_stream(ColdResponse {
                     client,
                     response_origin,
@@ -1254,7 +1252,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                                 &upstream_model,
                             )
                             .await?;
-                            drop(failure_context);
                             let mut replay = cold_response_stream(ColdResponse {
                                 client,
                                 response_origin,
@@ -1345,7 +1342,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                             &upstream_model,
                         )
                         .await?;
-                        drop(failure_context);
                         let mut replay = cold_response_stream(ColdResponse {
                             client,
                             response_origin,
@@ -1477,7 +1473,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                             &upstream_model,
                         )
                         .await?;
-                        drop(failure_context);
                         let mut replay = cold_response_stream(ColdResponse {
                             client,
                             response_origin,
@@ -1604,7 +1599,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     &upstream_model,
                 )
                 .await?;
-                drop(failure_context);
                 let mut replay = cold_response_stream(ColdResponse {
                     client,
                     response_origin,
@@ -1837,7 +1831,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 &upstream_model,
             )
             .await?;
-            drop(failure_context);
             let mut replay = cold_response_stream(ColdResponse {
                 client,
                 response_origin,
@@ -1957,10 +1950,10 @@ async fn merge_turn_state_update(
         rejected |= !valid_model_turn_state(&value);
         latest = value;
     }
-    if let Some(capture) = session_capture.as_mut() {
-        if first_received_for_response || capture.turn_state.is_none() {
-            capture.turn_state = Some(first);
-        }
+    if let Some(capture) = session_capture.as_mut()
+        && (first_received_for_response || capture.turn_state.is_none())
+    {
+        capture.turn_state = Some(first);
     }
     Some(MergedTurnStateUpdate {
         changed,
