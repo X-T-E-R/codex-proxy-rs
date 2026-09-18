@@ -92,6 +92,7 @@ struct CapturedModelPinInvalidation {
     identity_revision: u64,
     effective_model: String,
     config_revision: u64,
+    candidate_id: Option<String>,
     sha256: String,
 }
 
@@ -196,7 +197,7 @@ impl TurnStateStore for MemoryTurnStateStore {
         identity_revision: u64,
         effective_model: &str,
         expected_generation: u64,
-        _expected_candidate_id: Option<&str>,
+        expected_candidate_id: Option<&str>,
         expected_sha256: &str,
     ) -> Result<bool, TurnStateStoreError> {
         self.invalidations
@@ -207,6 +208,7 @@ impl TurnStateStore for MemoryTurnStateStore {
                 identity_revision,
                 effective_model: effective_model.to_owned(),
                 config_revision: expected_generation,
+                candidate_id: expected_candidate_id.map(str::to_owned),
                 sha256: expected_sha256.to_owned(),
             });
         Ok(true)
@@ -2458,6 +2460,7 @@ async fn websocket_fast_path_miss_uses_http_and_keeps_background_preconnect() {
     create_account(&store, ACCOUNT_ID).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
     *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-ws-fallback".to_owned(),
         account_id: ACCOUNT_ID.to_owned(),
         identity_revision: 1,
         effective_model: "gpt-5.4".to_owned(),
@@ -3551,6 +3554,15 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
     const ACCOUNT_ID: &str = "acct_websocket_turn_state";
     create_account(&store, ACCOUNT_ID).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
+    let model_scope = ModelTurnStateObservationScope {
+        scope_id: "scope-ws-observation".to_owned(),
+        account_id: ACCOUNT_ID.to_owned(),
+        identity_revision: 1,
+        effective_model: "gpt-5.4".to_owned(),
+        config_revision: 0,
+        policy_revision: 3,
+    };
+    *turn_state.model_observation_scope.lock().unwrap() = Some(model_scope.clone());
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind WebSocket listener");
@@ -3588,7 +3600,7 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
                 json!({
                     "type": "response.metadata",
                     "headers": {
-                        "x-codex-turn-state": ["turn-state-from-websocket"]
+                        "x-codex-turn-state": ["W".repeat(292)]
                     }
                 })
                 .to_string()
@@ -3690,8 +3702,16 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
     assert!(observations.iter().all(|observation| {
         observation.request_id.as_deref() == Some("req_websocket_turn_state")
             && observation.attempt_index == Some(1)
+            && observation.transport == "websocket"
+            && observation.model_scope.as_ref() == Some(&model_scope)
     }));
-    for value in ["handshake-state", "stress-turn-39"] {
+    assert!(
+        observations
+            .iter()
+            .any(|observation| observation.value.len() == 292),
+        "missing 292-byte WebSocket observation: {observations:?}"
+    );
+    for value in ["handshake-state", "turn-state-later", "stress-turn-39"] {
         assert!(
             observations
                 .iter()
@@ -3718,7 +3738,7 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
 }
 
 #[tokio::test]
-async fn websocket_sent_receipt_uses_final_response_create_client_metadata() {
+async fn websocket_model_pin_overrides_client_state_and_records_final_payload() {
     const ACCOUNT_ID: &str = "acct_websocket_sent_turn_state";
     const REQUEST_ID: &str = "req_websocket_sent_turn_state";
     const TURN_STATE: &str = "turn-sent-in-response-create";
@@ -3726,6 +3746,13 @@ async fn websocket_sent_receipt_uses_final_response_create_client_metadata() {
     let accounts = Arc::new(MemoryAccountStore::default());
     create_account(&accounts, ACCOUNT_ID).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: TURN_STATE.to_owned(),
+        sha256: "b".repeat(64),
+        generation: 23,
+        candidate_id: Some("candidate-ws-sent".to_owned()),
+        source: "capture".to_owned(),
+    });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -3773,7 +3800,7 @@ async fn websocket_sent_receipt_uses_final_response_create_client_metadata() {
                 ("session_id".to_owned(), json!("session-ws-sent")),
                 ("thread_id".to_owned(), json!("thread-ws-sent")),
                 ("turn_id".to_owned(), json!("turn-ws-sent")),
-                ("turnState".to_owned(), json!(TURN_STATE)),
+                ("turnState".to_owned(), json!("client-state-must-lose")),
             ]),
         )
         .unwrap(),
@@ -3784,7 +3811,7 @@ async fn websocket_sent_receipt_uses_final_response_create_client_metadata() {
             Map::from_iter([
                 ("account_id".to_owned(), json!(ACCOUNT_ID)),
                 ("conversation_id".to_owned(), json!("conversation-ws-sent")),
-                ("turn_state".to_owned(), json!(TURN_STATE)),
+                ("turn_state".to_owned(), json!("continuation-must-lose")),
                 ("client_turn_id".to_owned(), json!("turn-ws-sent")),
                 ("continuation_scope".to_owned(), json!("persisted")),
             ]),
@@ -3811,7 +3838,96 @@ async fn websocket_sent_receipt_uses_final_response_create_client_metadata() {
     assert_eq!(sent[0].account_id, ACCOUNT_ID);
     assert_eq!(sent[0].value, TURN_STATE);
     assert_eq!(sent[0].transport, "websocket");
-    assert_eq!(sent[0].source, "continuation");
+    assert_eq!(sent[0].source, "capture");
+    assert_eq!(sent[0].generation, Some(23));
+    assert_eq!(sent[0].candidate_id.as_deref(), Some("candidate-ws-sent"));
+}
+
+#[tokio::test]
+async fn attributable_websocket_pin_rejection_uses_the_sent_value_fence() {
+    const ACCOUNT_ID: &str = "acct_websocket_sent_turn_state";
+    const REQUEST_ID: &str = "req_websocket_rejected_turn_state";
+    let value = "W".repeat(292);
+    let accounts = Arc::new(MemoryAccountStore::default());
+    create_account(&accounts, ACCOUNT_ID).await;
+    let turn_state = Arc::new(MemoryTurnStateStore::default());
+    *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+        value: value.clone(),
+        sha256: "c".repeat(64),
+        generation: 29,
+        candidate_id: Some("candidate-ws-rejected".to_owned()),
+        source: "capture".to_owned(),
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let expected_value = value.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(stream).await;
+        let request = websocket
+            .next()
+            .await
+            .expect("response.create request")
+            .expect("valid response.create")
+            .into_text()
+            .expect("text response.create");
+        let request: Value = serde_json::from_str(&request).expect("response.create JSON");
+        assert_eq!(
+            request.pointer("/client_metadata/x-codex-turn-state"),
+            Some(&json!(expected_value))
+        );
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "error",
+                    "status": 400,
+                    "error": {
+                        "code": "invalid_encrypted_content",
+                        "message": "synthetic rejected turn state",
+                        "param": "x-codex-turn-state"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+    });
+
+    let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+    let mut stream = provider_with_base_url_and_retry_budget(&accounts, base_url, 0)
+        .with_turn_state_store(Some(turn_state_port))
+        .execute(
+            planned_request("openai", generate_operation()),
+            context(REQUEST_ID, CancellationToken::new()),
+        )
+        .await
+        .expect("prepare WebSocket stream");
+    let failure = timeout(Duration::from_secs(5), async {
+        loop {
+            match stream.next().await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => break error,
+                None => panic!("expected rejected turn state"),
+            }
+        }
+    })
+    .await
+    .expect("bounded WebSocket rejection");
+    assert_ne!(failure.kind(), ProviderErrorKind::Cancelled);
+    server.await.unwrap();
+
+    assert_eq!(
+        turn_state.invalidations.lock().unwrap().as_slice(),
+        [CapturedModelPinInvalidation {
+            account_id: ACCOUNT_ID.to_owned(),
+            identity_revision: 1,
+            effective_model: "gpt-5.4".to_owned(),
+            config_revision: 29,
+            candidate_id: Some("candidate-ws-rejected".to_owned()),
+            sha256: "c".repeat(64),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -4668,6 +4784,7 @@ async fn model_pin_uses_final_http_header_and_ignores_passthrough_duplicates() {
     create_account(&accounts, account_id).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
     *turn_state.model_observation_scope.lock().unwrap() = Some(ModelTurnStateObservationScope {
+        scope_id: "scope-http-observation".to_owned(),
         account_id: account_id.to_owned(),
         identity_revision: 1,
         effective_model: "gpt-5.4".to_owned(),
@@ -4850,6 +4967,7 @@ async fn only_attributable_http_pin_rejection_requests_cas_invalidation() {
             identity_revision: 1,
             effective_model: "gpt-5.4".to_owned(),
             config_revision: 9,
+            candidate_id: None,
             sha256: "a".repeat(64),
         }]
     );

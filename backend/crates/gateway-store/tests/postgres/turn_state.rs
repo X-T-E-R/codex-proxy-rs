@@ -3,8 +3,8 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::provider_ports::turn_state::{
-    AccountTurnStatePolicyUpdate, ModelTurnStatePinAction, ModelTurnStateUpdate,
-    TurnStateObservation, TurnStateStore, TurnStateStoreError,
+    AccountTurnStatePolicyUpdate, ModelTurnStateCaptureTriggerMode, ModelTurnStatePinAction,
+    ModelTurnStateUpdate, TurnStateObservation, TurnStateStore, TurnStateStoreError,
 };
 use gateway_core::task::DaemonTask;
 use gateway_store::postgres::{PgTurnStateStore, TurnStateObservationWriter};
@@ -372,6 +372,58 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
         .await
         .expect("resume capture after suspect observation");
     assert!(capture_policy.capture_enabled);
+    let first_request_policy = aged_store
+        .update_account_policy(
+            "acct_model_state",
+            AccountTurnStatePolicyUpdate {
+                capture_trigger_mode: ModelTurnStateCaptureTriggerMode::FirstRequestAfterExpiry,
+                ..account_policy_update(&capture_policy)
+            },
+        )
+        .await
+        .expect("select first-request-after-expiry mode");
+    let requested_at = Utc::now();
+    for _ in 0..2 {
+        aged_store.enqueue_capture_after_expiry(
+            "acct_model_state",
+            1,
+            "upstream-codex",
+            requested_at,
+        );
+    }
+    let first_request_candidates = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let candidates = aged_store
+                .model_capture_candidates(None, 8)
+                .await
+                .expect("load first-request candidates");
+            if !candidates.is_empty() {
+                break candidates;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("expired first request queues capture");
+    assert_eq!(
+        first_request_candidates.len(),
+        1,
+        "duplicate signals coalesce"
+    );
+    let failure_policy = aged_store
+        .update_account_policy(
+            "acct_model_state",
+            AccountTurnStatePolicyUpdate {
+                capture_trigger_mode: ModelTurnStateCaptureTriggerMode::OnAttributedFailure,
+                ..account_policy_update(&first_request_policy)
+            },
+        )
+        .await
+        .expect("restore attributed-failure mode and clear the old signal");
+    assert_eq!(
+        failure_policy.capture_trigger_mode,
+        ModelTurnStateCaptureTriggerMode::OnAttributedFailure
+    );
     let scope = aged_store
         .model_observation_scope("acct_model_state", 1, "upstream-codex")
         .expect("capture-enabled aged pin accepts another ordinary observation");
@@ -387,21 +439,31 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
         client_turn_id: None,
         model_scope: Some(scope.clone()),
     });
-    let candidates = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
-            let candidates = aged_store
-                .model_capture_candidates(None, 8)
+            let observed = aged_store
+                .load("acct_model_state")
                 .await
-                .expect("load observation-triggered candidates");
-            if !candidates.is_empty() {
-                break candidates;
+                .expect("load expired non-292 observation");
+            if observed
+                .observed
+                .as_ref()
+                .is_some_and(|value| value.id == "obs_non_292")
+            {
+                break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("non-292 observation schedules residential capture");
-    assert_eq!(candidates.len(), 1);
+    .expect("expired non-292 observation is persisted");
+    assert!(
+        aged_store
+            .model_capture_candidates(None, 8)
+            .await
+            .expect("expired value does not re-enter bootstrap capture")
+            .is_empty()
+    );
 
     sqlx::query(
         "update provider_accounts set credential_revision = credential_revision + 1
@@ -497,37 +559,8 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     let invalid_candidates = aged_store
         .model_capture_candidates(None, 8)
         .await
-        .expect("explicit invalidation waits for ordinary traffic");
-    assert!(invalid_candidates.is_empty());
-    let invalid_scope = aged_store
-        .model_observation_scope("acct_model_state", 1, "upstream-codex")
-        .expect("invalidated pin accepts an ordinary HTTP observation");
-    aged_store.enqueue_observation(TurnStateObservation {
-        id: "obs_invalid_non_292".to_owned(),
-        account_id: "acct_model_state".to_owned(),
-        request_id: None,
-        attempt_index: None,
-        value: "degraded-state".to_owned(),
-        observed_at: Utc::now(),
-        transport: "http".to_owned(),
-        upstream_response_id: None,
-        client_turn_id: None,
-        model_scope: Some(invalid_scope),
-    });
-    let invalid_candidates = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let candidates = aged_store
-                .model_capture_candidates(None, 8)
-                .await
-                .expect("load invalid observation-triggered candidates");
-            if !candidates.is_empty() {
-                break candidates;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("non-292 observation after invalidation schedules residential capture");
+        .expect("attributable invalidation schedules capture in the default mode");
+    assert_eq!(invalid_candidates.len(), 1);
     assert!(matches!(
         aged_store
             .commit_model_capture(&invalid_candidates[0], &observed_value)
@@ -569,6 +602,166 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
 }
 
 #[tokio::test]
+async fn shortened_reuse_window_queues_first_expired_request_and_expires_candidate() {
+    let Some(database) = TestDatabase::create("model_turn_state_shortened_window").await else {
+        return;
+    };
+    const ACCOUNT_ID: &str = "acct_shortened_window";
+    const MODEL: &str = "gpt-5.4";
+    seed_account(&database.pool, ACCOUNT_ID, "openai").await;
+    sqlx::query(
+        "insert into outbound_proxies
+           (id, name, proxy_url, last_test_at, last_test_success, last_test_latency_ms,
+            last_test_message)
+         values ('proxy_shortened_window', 'Shortened window',
+                 'socks5://127.0.0.1:824', now(), true, 1, 'ok')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("seed capture proxy");
+    let (store, writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize shortened-window store");
+    let (writer_cancellation, writer_task) = start_writer(writer);
+    let policy = store
+        .load_account_policy(ACCOUNT_ID)
+        .await
+        .expect("load account policy");
+    let policy = store
+        .update_account_policy(
+            ACCOUNT_ID,
+            AccountTurnStatePolicyUpdate {
+                lock_enabled: true,
+                capture_enabled: true,
+                capture_trigger_mode: ModelTurnStateCaptureTriggerMode::FirstRequestAfterExpiry,
+                capture_proxy_id: Some("proxy_shortened_window".to_owned()),
+                reuse_window_seconds: 7_200,
+                ..account_policy_update(&policy)
+            },
+        )
+        .await
+        .expect("enable first-request capture");
+    let empty = store
+        .load_model_state(ACCOUNT_ID, MODEL)
+        .await
+        .expect("load empty model state");
+    let value = synthetic_fernet_candidate();
+    let pinned = store
+        .update_model_state(
+            ACCOUNT_ID,
+            MODEL,
+            ModelTurnStateUpdate {
+                expected_identity_revision: empty.identity_revision,
+                expected_effective_model: empty.effective_model.clone(),
+                lock_enabled: policy.lock_enabled,
+                capture_enabled: policy.capture_enabled,
+                reuse_window_seconds: policy.reuse_window_seconds,
+                capture_proxy_id: policy.capture_proxy_id.clone(),
+                max_attempts: policy.capture_policy.max_attempts,
+                attempt_timeout_seconds: policy.capture_policy.attempt_timeout_seconds,
+                job_timeout_seconds: policy.capture_policy.job_timeout_seconds,
+                backoff_seconds: policy.capture_policy.backoff_seconds,
+                max_backoff_seconds: policy.capture_policy.max_backoff_seconds,
+                cooldown_seconds: policy.capture_policy.cooldown_seconds,
+                pin_action: ModelTurnStatePinAction::Replace,
+                value: Some(value.clone()),
+                expected_revision: empty.config_revision,
+            },
+        )
+        .await
+        .expect("seed active pin");
+    sqlx::query(
+        "update openai_model_turn_states
+            set pin_captured_at = now() - interval '10 minutes',
+                pin_reuse_deadline = now() + interval '100 minutes',
+                candidate_id = 'candidate-shortened-window',
+                candidate_value = $2, candidate_source = 'capture',
+                candidate_captured_at = now() - interval '10 minutes',
+                candidate_reuse_deadline = now() + interval '100 minutes'
+          where account_id = $1 and effective_model = $3",
+    )
+    .bind(ACCOUNT_ID)
+    .bind("B".repeat(292))
+    .bind(MODEL)
+    .execute(&database.pool)
+    .await
+    .expect("age active and candidate while keeping stored deadlines in the future");
+    let hydrated = store
+        .load_model_state(ACCOUNT_ID, MODEL)
+        .await
+        .expect("hydrate aged values under the original window");
+    assert!(hydrated.pin.is_some());
+    assert!(hydrated.candidate.is_some());
+    assert!(store.active_model_pin(ACCOUNT_ID, 1, MODEL).is_some());
+
+    let shortened = store
+        .update_account_policy(
+            ACCOUNT_ID,
+            AccountTurnStatePolicyUpdate {
+                reuse_window_seconds: 60,
+                ..account_policy_update(&policy)
+            },
+        )
+        .await
+        .expect("shorten the current account window");
+    assert_eq!(shortened.reuse_window_seconds, 60);
+    assert_eq!(
+        store.active_model_pin(ACCOUNT_ID, 1, MODEL),
+        None,
+        "the active and candidate values are expired under the current policy"
+    );
+
+    let requested_at = Utc::now();
+    for _ in 0..2 {
+        store.enqueue_capture_after_expiry(ACCOUNT_ID, 1, MODEL, requested_at);
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let requested: bool = sqlx::query_scalar(
+                "select capture_requested_at is not null
+                   from openai_model_turn_states
+                  where account_id = $1 and effective_model = $2",
+            )
+            .bind(ACCOUNT_ID)
+            .bind(MODEL)
+            .fetch_one(&database.pool)
+            .await
+            .expect("load expired-request signal");
+            if requested {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("shortened effective deadline queues the first request");
+
+    store
+        .maintain_model_turn_state_candidates(8)
+        .await
+        .expect("clear candidate expired by the shortened window");
+    let candidates = store
+        .model_capture_candidates(None, 8)
+        .await
+        .expect("load queued capture after candidate cleanup");
+    assert_eq!(candidates.len(), 1, "duplicate request signals coalesce");
+    let state = store
+        .load_model_state(ACCOUNT_ID, MODEL)
+        .await
+        .expect("load state after effective expiry maintenance");
+    assert!(state.candidate.is_none());
+    assert_eq!(state.capture_trigger_mode, shortened.capture_trigger_mode);
+    assert!(pinned.pin.is_some());
+
+    writer_cancellation.cancel();
+    writer_task
+        .await
+        .expect("writer task")
+        .expect("writer shutdown");
+    database.close().await;
+}
+
+#[tokio::test]
 async fn proactive_capture_stages_candidate_and_promotes_without_extending_candidate_ttl() {
     let Some(database) = TestDatabase::create("model_turn_state_candidate").await else {
         return;
@@ -599,6 +792,7 @@ async fn proactive_capture_stages_candidate_and_promotes_without_extending_candi
                 capture_enabled: true,
                 reuse_window_seconds: 3_600,
                 refresh_lead_seconds: 900,
+                capture_trigger_mode: ModelTurnStateCaptureTriggerMode::BeforeExpiryIfUsed,
                 capture_proxy_id: Some("proxy_candidate".to_owned()),
                 ..account_policy_update(&initial_policy)
             },
@@ -647,6 +841,22 @@ async fn proactive_capture_stages_candidate_and_promotes_without_extending_candi
     let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
         .await
         .expect("restart candidate store");
+    assert!(
+        store
+            .model_capture_candidates(None, 8)
+            .await
+            .expect("unused active must not schedule proactive capture")
+            .is_empty()
+    );
+    sqlx::query(
+        "update openai_model_turn_states
+            set active_sent_count = 1,
+                active_last_sent_at = now() - interval '30 minutes'
+          where account_id = 'acct_candidate' and effective_model = 'gpt-5.6-sol'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("mark active as actually sent");
     let scopes = store
         .model_capture_candidates(None, 8)
         .await
@@ -959,7 +1169,7 @@ async fn ordinary_observation_and_capture_are_fenced_by_a_concurrent_manual_repl
 }
 
 #[tokio::test]
-async fn account_policy_observes_a_never_loaded_model_before_proxy_capture() {
+async fn websocket_observation_bootstraps_empty_models_before_proxy_capture() {
     let Some(database) = TestDatabase::create("model_turn_state_first_observation").await else {
         return;
     };
@@ -983,6 +1193,11 @@ async fn account_policy_observes_a_never_loaded_model_before_proxy_capture() {
         )
         .await
         .expect("enable account policy without opening a model");
+    assert_eq!(
+        policy.capture_trigger_mode,
+        ModelTurnStateCaptureTriggerMode::OnAttributedFailure,
+        "bootstrap observations are independent of the later rotation trigger"
+    );
 
     let first_scope = store
         .model_observation_scope("acct_first_observation", 1, "brand-new-292")
@@ -991,25 +1206,132 @@ async fn account_policy_observes_a_never_loaded_model_before_proxy_capture() {
     assert_eq!(first_scope.policy_revision, policy.config_revision);
     let valid = synthetic_fernet_candidate();
     store.enqueue_observation(TurnStateObservation {
+        id: "obs_first_non292_before_292".to_owned(),
+        account_id: "acct_first_observation".to_owned(),
+        request_id: None,
+        attempt_index: None,
+        value: "short-before-valid".to_owned(),
+        observed_at: Utc::now(),
+        transport: "websocket".to_owned(),
+        upstream_response_id: None,
+        client_turn_id: None,
+        model_scope: Some(first_scope.clone()),
+    });
+    let before_other: (i64, chrono::DateTime<Utc>, Option<String>, Option<String>) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = sqlx::query_as::<
+                    _,
+                    (i64, chrono::DateTime<Utc>, Option<String>, Option<String>),
+                >(
+                    "select config_revision, capture_requested_at,
+                            pin_value, initial_observation_scope_id
+                       from openai_model_turn_states
+                      where account_id = 'acct_first_observation'
+                        and effective_model = 'brand-new-292'",
+                )
+                .fetch_optional(&database.pool)
+                .await
+                .expect("load initial observation scope state");
+                if let Some(state) = state
+                    && state.0 == 1
+                    && state.2.is_none()
+                    && state.3.as_deref() == Some(first_scope.scope_id.as_str())
+                {
+                    break state;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("non-292 observation creates its model row and capture signal");
+
+    let mut other_scope = first_scope.clone();
+    other_scope.scope_id = "different-request-scope".to_owned();
+    store.enqueue_observation(TurnStateObservation {
+        id: "obs_other_scope_292".to_owned(),
+        account_id: "acct_first_observation".to_owned(),
+        request_id: None,
+        attempt_index: None,
+        value: valid.clone(),
+        observed_at: Utc::now(),
+        transport: "websocket".to_owned(),
+        upstream_response_id: None,
+        client_turn_id: None,
+        model_scope: Some(other_scope),
+    });
+    store.enqueue_observation(TurnStateObservation {
+        id: "obs_other_scope_barrier".to_owned(),
+        account_id: "acct_first_observation".to_owned(),
+        request_id: None,
+        attempt_index: None,
+        value: "writer-barrier".to_owned(),
+        observed_at: Utc::now(),
+        transport: "websocket".to_owned(),
+        upstream_response_id: None,
+        client_turn_id: None,
+        model_scope: None,
+    });
+    wait_for_observation(&store, "acct_first_observation", "obs_other_scope_barrier").await;
+    let after_other: (i64, chrono::DateTime<Utc>, Option<String>, Option<String>) = sqlx::query_as(
+        "select config_revision, capture_requested_at,
+                    pin_value, initial_observation_scope_id
+               from openai_model_turn_states
+              where account_id = 'acct_first_observation'
+                and effective_model = 'brand-new-292'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .expect("load state after different scope was processed");
+    assert_eq!(after_other, before_other);
+    assert_eq!(
+        store.active_model_pin("acct_first_observation", 1, "brand-new-292"),
+        None,
+        "a different config-revision-zero scope cannot adopt the row"
+    );
+
+    store.enqueue_observation(TurnStateObservation {
         id: "obs_first_292".to_owned(),
         account_id: "acct_first_observation".to_owned(),
         request_id: None,
         attempt_index: None,
         value: valid.clone(),
         observed_at: Utc::now(),
-        transport: "http".to_owned(),
+        transport: "websocket".to_owned(),
         upstream_response_id: None,
         client_turn_id: None,
         model_scope: Some(first_scope),
     });
-    wait_for_model_pin(&store, "acct_first_observation", "brand-new-292").await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let learned: (Option<String>, bool, bool, Option<String>) = sqlx::query_as(
+                "select pin_value, capture_requested_at is null,
+                        capture_not_before is null, initial_observation_scope_id
+                   from openai_model_turn_states
+                  where account_id = 'acct_first_observation'
+                    and effective_model = 'brand-new-292'",
+            )
+            .fetch_one(&database.pool)
+            .await
+            .expect("load same-scope learned state");
+            if learned.0.as_deref() == Some(valid.as_str())
+                && learned.1
+                && learned.2
+                && learned.3.is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("same scope upgrades the model and clears its capture signal");
     assert_eq!(
         store
             .active_model_pin("acct_first_observation", 1, "brand-new-292")
             .map(|pin| pin.value),
         Some(valid)
     );
-
     let non292_scope = store
         .model_observation_scope("acct_first_observation", 1, "brand-new-non292")
         .expect("second new model receives independent scope");
@@ -1021,7 +1343,7 @@ async fn account_policy_observes_a_never_loaded_model_before_proxy_capture() {
         attempt_index: None,
         value: "short".to_owned(),
         observed_at: Utc::now(),
-        transport: "http".to_owned(),
+        transport: "websocket".to_owned(),
         upstream_response_id: None,
         client_turn_id: None,
         model_scope: Some(non292_scope),
@@ -1144,6 +1466,7 @@ fn account_policy_update(
         capture_enabled: view.capture_enabled,
         reuse_window_seconds: view.reuse_window_seconds,
         refresh_lead_seconds: view.refresh_lead_seconds,
+        capture_trigger_mode: view.capture_trigger_mode,
         capture_proxy_id: view.capture_proxy_id.clone(),
         max_attempts: view.capture_policy.max_attempts,
         attempt_timeout_seconds: view.capture_policy.attempt_timeout_seconds,
@@ -1756,16 +2079,6 @@ async fn wait_for_observation(store: &PgTurnStateStore, account_id: &str, id: &s
     })
     .await
     .expect("observation persisted");
-}
-
-async fn wait_for_model_pin(store: &PgTurnStateStore, account_id: &str, model: &str) {
-    for _ in 0..100 {
-        if store.active_model_pin(account_id, 1, model).is_some() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    panic!("model pin was not persisted in time");
 }
 
 async fn wait_for_response_id(store: &PgTurnStateStore, account_id: &str, response_id: &str) {

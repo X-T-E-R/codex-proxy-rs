@@ -620,6 +620,7 @@ impl CodexBackendClient {
                             context.request_id,
                             attempt_index,
                             context.turn_id,
+                            context.model_turn_state_observation_scope,
                             context.turn_state_send,
                         )
                     });

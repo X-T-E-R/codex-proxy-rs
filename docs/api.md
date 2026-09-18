@@ -245,7 +245,7 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 | `GET` | `/api/admin/accounts/turn-state` | `accountId` | 显式读取 OpenAI 账号最近真实上游 Turn State 与手动覆盖明文 |
 | `POST` | `/api/admin/accounts/turn-state/update` | `{ accountId, enabled, value?, expectedRevision }` | 按账号版本更新出站覆盖 |
 | `POST` | `/api/admin/accounts/turn-state/use-observed` | `{ accountId, observationId, enabled, expectedRevision }` | 仅在观测 ID 仍有效时复制最近上游值 |
-| `GET` | `/api/admin/accounts/turn-state/model` | `accountId`、`model` | 读取账号身份代次与 effective model 对应的 HTTP Turn State 锁、捕获配置和当前任务 |
+| `GET` | `/api/admin/accounts/turn-state/model` | `accountId`、`model` | 读取账号身份代次与 effective model 对应的 Responses Turn State 锁、捕获配置和当前任务 |
 | `POST` | `/api/admin/accounts/turn-state/model/update` | 模型值操作及三项读取 fence | 以配置 revision、身份代次和 effective model 做 CAS，手动替换、清除、失效或导入旧账号值 |
 | `POST` | `/api/admin/accounts/turn-state/model/capture` | `{ accountId, model, expectedRevision, expectedIdentityRevision, expectedEffectiveModel }` | 将一次隔离捕获加入有界队列，返回 `202` 与 `{ jobId, status }` |
 | `GET` | `/api/admin/accounts/turn-state/model/capture` | `jobId` | 查询捕获状态、尝试次数、原因和时间戳 |
@@ -269,16 +269,20 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 | `POST` | `/api/admin/accounts/oauth/start` | `{ provider, name, accountId?, outboundProxyId?, outboundProxyUrl? }` | 创建 OpenAI 或 xAI OAuth flow；`accountId` 表示重新授权 |
 | `POST` | `/api/admin/accounts/oauth/complete` | `{ provider, flowId, callbackUrl, settings? }` | 消费 OAuth callback；首次授权可附带账号设置，重新授权保留原设置 |
 
-模型 Turn State 只兼容上游 HTTP/SSE。手动值支持 1–16384 个可打印 ASCII 字节；普通观测和自动捕获
+模型 Turn State 统一兼容上游 HTTP/SSE 与 WebSocket。手动值支持 1–16384 个可打印 ASCII 字节；普通观测和自动捕获
 仍只接纳正好 292 字节的可打印 ASCII。官方客户端把该值用于
 单 turn sticky routing；跨 turn 模型锁是本网关的实验性本地策略，不代表上游提供了同等持久性保证。数据面优先级为
 未过本地复用窗口的 active、正常 continuation；旧版账号覆盖不再作为 runtime fallback，只能在选择模型后
-显式导入。`reuseWindowSeconds` 默认 7200 秒；`refreshLeadSeconds` 默认 900 秒，在 active 到期前排队捕获
-candidate。candidate 晋升不重置自己的 deadline；没有候选时业务继续走普通请求。
+显式导入。`reuseWindowSeconds` 默认 7200 秒；candidate 晋升不重置自己的 deadline；没有候选时业务继续走普通请求。
+账号策略的 `captureTriggerMode` 支持 `on_attributed_failure`（默认）、`before_expiry_if_used`、
+`first_request_after_expiry` 与 `failure_or_first_after_expiry`。只有提前捕获模式使用
+`refreshLeadSeconds`，且 active 从未在最终 HTTP/WS 发送边界实际使用时不会探测。
 
 模型状态响应包含实际映射后的 `effectiveModel`、独立的 `identityRevision`、模型配置
 `configRevision`、`pin`、`candidate`、`nextCaptureAt`、`nextActivationAt`、`captureNotBefore`、
 `waitingReason`、脱敏的 `captureProxy`、可显式导入的 `legacyOverride` 和当前 `capture` 任务。
+`pin`/`candidate` 通过 `compatibleTransports` 明确列出 `http` 与 `websocket`，并返回匹配当前版本的
+`sentCount`、`lastSentAt`。
 可解码的 Fernet envelope 还展示 `encodedBytes`、`rawBytes`/`decodedBytes`、`ciphertextBytes`、
 `tokenVersion`、`envelopeFormat`、`issuedAt` 与 `timestampVerified: false`。`issuedAt` 是未验证签名的
 envelope timestamp，不是 expiry；长度或多一个 16 字节 ciphertext block 只作为分类事实，不作为质量判断。
@@ -287,11 +291,12 @@ envelope timestamp，不是 expiry；长度或多一个 16 字节 ciphertext blo
 保留已有值并缩短 `reuseWindowSeconds` 时只收紧 deadline，不刷新 `capturedAt`；放大窗口也不延长既有
 deadline。`attemptTimeoutSeconds` 范围为 1–60，`jobTimeoutSeconds` 范围为 1–300，且前者不得大于后者。
 普通 access-token refresh 只推进 credential revision，不改变账号身份代次；真实身份替换才隔离旧模型锁。
-EMPTY、AGED 或显式 INVALID 本身不启动住宅代理任务；网关先让下一次普通 HTTP Responses 请求继续使用
-账号原出口。实际 HTTP 响应头或 SSE metadata 事件返回 292 字节可打印 ASCII 值时，
+EMPTY 的普通请求按 bootstrap 规则运行：返回 292 字节可打印 ASCII 时直接学习，明确非 292 字节时只登记一次捕获。
+AGED 值不会继续发送；是否由首请求或归因拒绝捕获取决于 `captureTriggerMode`。实际 HTTP 响应头或
+WebSocket metadata 事件返回 292 字节可打印 ASCII 值时，
 按 account identity、effective model 和配置 revision 直接保存为 `observation` pin；只有 encoded byte length
 明确不等于 292 时，才登记一次自动捕获请求。正好 292 字节但不可打印的值只保留为 suspect，
-不保存模型锁也不消耗住宅代理。没有返回 Turn State、真正的 WebSocket 观测或通用密文错误均不登记。
+不保存模型锁也不消耗住宅代理。没有返回 Turn State 或通用密文错误均不登记。
 请求先尝试 WebSocket、后在发送 payload 前回退到 HTTP 时，按实际 HTTP 响应执行同一观察状态机。自动任务
 使用选定且最近 24 小时测试成功的已管理代理；每次尝试
 创建独立 HTTP 连接，收到首个 Turn State header 或 SSE event 后立即释放剩余响应。
@@ -300,10 +305,10 @@ EMPTY、AGED 或显式 INVALID 本身不启动住宅代理任务；网关先让�
 取消请求属于 best-effort，job deadline 也不丢弃已开始的 commit；提交成功时任务最终返回 `succeeded`。
 捕获不创建模型请求、用量、额度、限流、账号健康、circuit、feedback 或账号最近观测。失败冷却持久化，
 重启后不会立刻重复付费探测。
-普通上游失败不自动失效模型锁。只有 HTTP Responses 请求确实注入了当前模型锁，且结构化错误的
+普通上游失败不自动失效模型锁。只有 Responses HTTP/WS 请求确实注入了当前模型锁，且结构化错误的
 `param`/`target` 明确指向 `x-codex-turn-state` 时，后端才按当前 pin fingerprint 与配置版本 CAS 标记
 INVALID；仅出现 `invalid_encrypted_content`、`Encrypted content could not be ...` 文本或长度变化时只保留失败事实。
-明确失效会先清除旧的自动捕获信号，回到上述普通 HTTP 观测阶段；它不会直接引发住宅代理轮换。
+默认模式下，明确归因拒绝会失效当前版本并登记一次捕获；通用 429、5xx、网络错误或只有错误文本均不会触发。
 
 账号列表支持以下稳定值：
 

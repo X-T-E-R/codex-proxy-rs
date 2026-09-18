@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 pub const MODEL_TURN_STATE_BYTES: usize = 292;
 pub const DEFAULT_MODEL_REUSE_WINDOW_SECONDS: u32 = 7_200;
@@ -13,6 +14,60 @@ pub const DEFAULT_CAPTURE_BACKOFF_SECONDS: u8 = 1;
 pub const DEFAULT_CAPTURE_MAX_BACKOFF_SECONDS: u8 = 4;
 pub const DEFAULT_CAPTURE_COOLDOWN_SECONDS: u32 = 900;
 pub const DEFAULT_CAPTURE_REFRESH_LEAD_SECONDS: u32 = 900;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelTurnStateCaptureTriggerMode {
+    BeforeExpiryIfUsed,
+    #[default]
+    OnAttributedFailure,
+    FirstRequestAfterExpiry,
+    FailureOrFirstAfterExpiry,
+}
+
+impl ModelTurnStateCaptureTriggerMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeExpiryIfUsed => "before_expiry_if_used",
+            Self::OnAttributedFailure => "on_attributed_failure",
+            Self::FirstRequestAfterExpiry => "first_request_after_expiry",
+            Self::FailureOrFirstAfterExpiry => "failure_or_first_after_expiry",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "before_expiry_if_used" => Some(Self::BeforeExpiryIfUsed),
+            "on_attributed_failure" => Some(Self::OnAttributedFailure),
+            "first_request_after_expiry" => Some(Self::FirstRequestAfterExpiry),
+            "failure_or_first_after_expiry" => Some(Self::FailureOrFirstAfterExpiry),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn captures_before_expiry(self) -> bool {
+        matches!(self, Self::BeforeExpiryIfUsed)
+    }
+
+    #[must_use]
+    pub const fn captures_on_failure(self) -> bool {
+        matches!(
+            self,
+            Self::OnAttributedFailure | Self::FailureOrFirstAfterExpiry
+        )
+    }
+
+    #[must_use]
+    pub const fn captures_on_first_request_after_expiry(self) -> bool {
+        matches!(
+            self,
+            Self::FirstRequestAfterExpiry | Self::FailureOrFirstAfterExpiry
+        )
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct TurnStateObserved {
@@ -106,6 +161,7 @@ pub struct AccountTurnStatePolicyUpdate {
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
     pub refresh_lead_seconds: u32,
+    pub capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
     pub capture_proxy_id: Option<String>,
     pub max_attempts: u8,
     pub attempt_timeout_seconds: u16,
@@ -128,6 +184,7 @@ impl std::fmt::Debug for AccountTurnStatePolicyUpdate {
             .field("capture_enabled", &self.capture_enabled)
             .field("reuse_window_seconds", &self.reuse_window_seconds)
             .field("refresh_lead_seconds", &self.refresh_lead_seconds)
+            .field("capture_trigger_mode", &self.capture_trigger_mode)
             .field("capture_proxy_id", &self.capture_proxy_id)
             .field("max_attempts", &self.max_attempts)
             .field("attempt_timeout_seconds", &self.attempt_timeout_seconds)
@@ -153,7 +210,9 @@ pub struct ModelTurnStatePin {
     pub captured_at: DateTime<Utc>,
     pub reuse_deadline: DateTime<Utc>,
     pub source: String,
-    pub compatible_transport: String,
+    pub compatible_transports: Vec<String>,
+    pub sent_count: u64,
+    pub last_sent_at: Option<DateTime<Utc>>,
     pub invalidated: bool,
     pub generation: u64,
     pub id: Option<String>,
@@ -175,7 +234,9 @@ impl std::fmt::Debug for ModelTurnStatePin {
             .field("captured_at", &self.captured_at)
             .field("reuse_deadline", &self.reuse_deadline)
             .field("source", &self.source)
-            .field("compatible_transport", &self.compatible_transport)
+            .field("compatible_transports", &self.compatible_transports)
+            .field("sent_count", &self.sent_count)
+            .field("last_sent_at", &self.last_sent_at)
             .field("invalidated", &self.invalidated)
             .field("generation", &self.generation)
             .field("id", &self.id)
@@ -205,6 +266,7 @@ pub struct ModelTurnStateView {
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
     pub refresh_lead_seconds: u32,
+    pub capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
     pub capture_proxy_id: Option<String>,
     pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
     pub capture_policy: ModelTurnStateCapturePolicy,
@@ -228,6 +290,7 @@ pub struct AccountTurnStatePolicyView {
     pub capture_enabled: bool,
     pub reuse_window_seconds: u32,
     pub refresh_lead_seconds: u32,
+    pub capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
     pub capture_proxy_id: Option<String>,
     pub capture_proxy: Option<ModelTurnStateCaptureProxy>,
     pub capture_policy: ModelTurnStateCapturePolicy,
@@ -264,6 +327,8 @@ pub struct ModelTurnStateCaptureCursor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelTurnStateObservationScope {
+    /// 同一请求内稳定的 CAS 身份；只授权该请求续写自己创建的初始空模型行。
+    pub scope_id: String,
     pub account_id: String,
     pub identity_revision: u64,
     pub effective_model: String,
@@ -447,6 +512,16 @@ pub trait TurnStateStore: Send + Sync {
     /// 最终 transport 已实际返回响应边界后写入；捕获探针不经过该端口。
     fn enqueue_sent(&self, _sent: TurnStateSent) {}
 
+    /// 到期首个业务请求的非阻塞捕获信号；仅适用于相应账号策略模式。
+    fn enqueue_capture_after_expiry(
+        &self,
+        _account_id: &str,
+        _identity_revision: u64,
+        _effective_model: &str,
+        _requested_at: DateTime<Utc>,
+    ) {
+    }
+
     /// 读取启动时 hydrate、管理提交后同步更新的进程内快照。
     fn active_override(&self, account_id: &str) -> Option<String>;
 
@@ -492,7 +567,7 @@ pub trait TurnStateStore: Send + Sync {
         None
     }
 
-    /// 普通 HTTP Responses 请求在未注入模型锁时取得的 CAS scope；只读进程内快照。
+    /// 普通 Responses 请求在未注入模型锁时取得的 CAS scope；只读进程内快照。
     fn model_observation_scope(
         &self,
         _account_id: &str,
@@ -537,7 +612,7 @@ pub trait TurnStateStore: Send + Sync {
         Ok(())
     }
 
-    /// 仅由可归因到当前 HTTP 模型锁版本的结构化上游拒绝调用。
+    /// 仅由可归因到当前模型锁版本的结构化上游拒绝调用。
     async fn invalidate_active_model_pin(
         &self,
         _account_id: &str,
@@ -548,5 +623,29 @@ pub trait TurnStateStore: Send + Sync {
         _expected_sha256: &str,
     ) -> Result<bool, TurnStateStoreError> {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelTurnStateCaptureTriggerMode as Mode;
+
+    #[test]
+    fn capture_trigger_modes_keep_their_distinct_event_sources() {
+        assert!(Mode::BeforeExpiryIfUsed.captures_before_expiry());
+        assert!(!Mode::BeforeExpiryIfUsed.captures_on_failure());
+        assert!(!Mode::BeforeExpiryIfUsed.captures_on_first_request_after_expiry());
+
+        assert!(Mode::OnAttributedFailure.captures_on_failure());
+        assert!(!Mode::OnAttributedFailure.captures_before_expiry());
+        assert!(!Mode::OnAttributedFailure.captures_on_first_request_after_expiry());
+
+        assert!(Mode::FirstRequestAfterExpiry.captures_on_first_request_after_expiry());
+        assert!(!Mode::FirstRequestAfterExpiry.captures_on_failure());
+        assert!(!Mode::FirstRequestAfterExpiry.captures_before_expiry());
+
+        assert!(Mode::FailureOrFirstAfterExpiry.captures_on_failure());
+        assert!(Mode::FailureOrFirstAfterExpiry.captures_on_first_request_after_expiry());
+        assert!(!Mode::FailureOrFirstAfterExpiry.captures_before_expiry());
     }
 }

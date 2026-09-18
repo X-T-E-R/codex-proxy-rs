@@ -21,9 +21,9 @@ use gateway_core::{
     lifecycle::CancellationToken,
     provider_ports::turn_state::{
         ActiveModelTurnStatePin, ModelTurnStateCaptureCursor, ModelTurnStateCapturePolicy,
-        ModelTurnStateCaptureScope, ModelTurnStatePinAction, ModelTurnStateUpdate,
-        ModelTurnStateView, TurnStateObservation, TurnStateStore, TurnStateStoreError,
-        TurnStateView,
+        ModelTurnStateCaptureScope, ModelTurnStateCaptureTriggerMode, ModelTurnStatePinAction,
+        ModelTurnStateUpdate, ModelTurnStateView, TurnStateObservation, TurnStateStore,
+        TurnStateStoreError, TurnStateView,
     },
     task::{WorkerContribution, WorkerKind, WorkerRunnable, WorkerTaskError},
 };
@@ -588,6 +588,7 @@ fn view(
         capture_enabled: true,
         reuse_window_seconds: 3_600,
         refresh_lead_seconds: 900,
+        capture_trigger_mode: ModelTurnStateCaptureTriggerMode::OnAttributedFailure,
         capture_proxy_id: Some("proxy_capture".to_owned()),
         capture_proxy: None,
         capture_policy,

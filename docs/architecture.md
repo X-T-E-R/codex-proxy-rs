@@ -353,12 +353,12 @@ only-returned / neither / unknown`，旧 attempt 和账号最近值不补缺失�
 sent/returned 中存在的时间清理。原有账号
 最近观测与手动覆盖不变，不建立状态池或自动回放。
 
-模型级 HTTP Turn State 按 `账号 + identity_revision + effective model` 只维护一份 active 与可选 candidate；
+模型级 Responses Turn State 按 `账号 + identity_revision + effective model` 只维护一份 active 与可选 candidate；
 `identity_revision` 只在上游身份实际替换时推进，普通 token refresh 不废弃同一身份的模型锁。服务启动
 hydrate 模型状态到进程内快照，HTTP attempt 在最终账号与模型确定后只读统一 `resolve(now)`，不执行 SQL。
 手动值支持最多 16 KiB 可打印 ASCII；普通观测与自动捕获只接纳 292 字节可打印 ASCII。active 有效时优先于
-正常 continuation，旧账号覆盖不再参与运行时 fallback，只能在选择模型后显式导入；模型值不进入
-上游 WebSocket。可配置 reuse window 是保守的本地最大复用边界，默认 7200 秒，不声明上游
+正常 continuation，旧账号覆盖不再参与运行时 fallback，只能在选择模型后显式导入；模型值统一进入
+最终 HTTP header 或 WebSocket `response.create.client_metadata`。可配置 reuse window 是保守的本地最大复用边界，默认 7200 秒，不声明上游
 真实 TTL。官方客户端将 Turn State 当作单 turn sticky routing；跨 turn 锁定属于本网关实验策略。
 无密钥 Fernet envelope 解析只投影 version、未认证 timestamp 与字节分类，`issuedAt` 不解释为 expiry，
 长度差异也不作为 token 质量真值。复用 deadline 只按本地 `capturedAt + reuse window` 计算；未验签的
@@ -366,13 +366,17 @@ hydrate 模型状态到进程内快照，HTTP attempt 在最终账号与模型�
 active 在 `deadline - refresh lead`（默认提前 900 秒）进入有界捕获队列。捕获成功且 active 仍有效时保存
 candidate；active 到期或明确失效时原子晋升仍有效且不同的 candidate，candidate 的 deadline 保持
 `capturedAt + reuse window`，晋升不续期。热路径在到期瞬间可直接解析 candidate，后台事务只整理持久状态。
-没有 candidate 时停止注入并继续普通业务。EMPTY 与明确 INVALID 先等待普通 HTTP Responses 流量。
+没有 candidate 时停止注入并继续普通业务。EMPTY 与明确 INVALID 先等待普通 Responses 流量。
+账号捕获模式决定自动队列来源：默认 `on_attributed_failure` 只接受实际发送版本的结构化归因拒绝；
+`before_expiry_if_used` 仅在当前 active 曾从最终 HTTP/WS 边界实际发送后执行提前捕获；
+`first_request_after_expiry` 在到期后的首个业务请求发出非阻塞 CAS 信号；
+`failure_or_first_after_expiry` 合并后两类事件。自动捕获关闭时只保留手动任务。active/candidate 换代会重置
+各自使用计数，迟到 sent receipt 必须同时匹配 generation、candidate ID 与值才会计入。
 实际 HTTP 响应头或 SSE metadata 事件返回 292 字节可打印 ASCII 值时，按当前
 identity/model/config fence 直接发布 `observation` pin；只有 encoded byte length 明确不等于 292 时才写入
 持久捕获信号，随后进入 Admin-owned 有界队列。正好 292 字节但不可打印的值只记为 suspect；Fernet
 envelope 解析结果仅作为观测 metadata，不参与 pin 准入。
-观察 scope 随请求准备，但只由实际 HTTP transport 消费，因此 WebSocket fast path 在发送前回退到 HTTP 仍能
-观察，真正的 WebSocket、未返回值与无法归因的错误不推进这个状态机。SSE 观察只旁路解析已交付字节，不修改
+观察 scope 随请求准备，由实际 HTTP 或 WebSocket transport 返回值消费；未返回值与无法归因的错误不推进状态机。SSE/WS 观察只旁路解析已交付字节，不修改
 业务流内容或顺序。
 
 捕获执行任务驻留进程内，排队时机、失败冷却和候选值持久化；按账号与模型 singleflight、全局最多并发 2 个。每个 attempt 使用选定且最近测试
@@ -383,7 +387,7 @@ identity/model/config fence 提交；配置关闭、取消、身份或映射变�
 rate limit、账号健康、circuit 或 feedback。手动获取到与 active/candidate 相同的值不延长原 `capturedAt` 和 deadline；
 已明确拒绝的同值也不能作为 candidate 恢复。
 普通 292 字节观测是新的本地锁定起点，并清除等待中的住宅捕获信号。
-普通上游错误不失效 pin。只有当前 HTTP Responses attempt 确实注入模型 pin，结构化错误的 `param` 或
+普通上游错误不失效 pin。只有当前 Responses attempt 确实注入模型 pin，结构化错误的 `param` 或
 `target` 明确指向 `x-codex-turn-state`，并且 fingerprint、identity、model 与 active generation/candidate ID
 仍匹配时，Store 才 CAS 失效当前实际发送值并晋升可用候选；通用密文错误码或文本只能作为
 SUSPECT，不能触发自动轮换。

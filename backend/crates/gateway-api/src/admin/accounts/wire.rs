@@ -5,8 +5,8 @@ use gateway_admin::model::accounts::{
     ModelTurnStateCaptureJob, ModelTurnStateCaptureStatus, ModelTurnStateResult,
 };
 use gateway_core::provider_ports::turn_state::{
-    AccountTurnStatePolicyUpdate, AccountTurnStatePolicyView, ModelTurnStatePinAction,
-    ModelTurnStateUpdate, TurnStateView,
+    AccountTurnStatePolicyUpdate, AccountTurnStatePolicyView, ModelTurnStateCaptureTriggerMode,
+    ModelTurnStatePinAction, ModelTurnStateUpdate, TurnStateView,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -126,6 +126,8 @@ pub struct UpdateAccountTurnStatePolicyRequest {
     pub reuse_window_seconds: u32,
     #[serde(default = "default_refresh_lead_seconds")]
     pub refresh_lead_seconds: u32,
+    #[serde(default)]
+    pub capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
     pub capture_proxy_id: Option<String>,
     pub max_attempts: u8,
     pub attempt_timeout_seconds: u16,
@@ -148,6 +150,7 @@ impl UpdateAccountTurnStatePolicyRequest {
             capture_enabled: self.capture_enabled,
             reuse_window_seconds: self.reuse_window_seconds,
             refresh_lead_seconds: self.refresh_lead_seconds,
+            capture_trigger_mode: self.capture_trigger_mode,
             capture_proxy_id: self.capture_proxy_id,
             max_attempts: self.max_attempts,
             attempt_timeout_seconds: self.attempt_timeout_seconds,
@@ -172,6 +175,7 @@ pub struct ModelTurnStateData {
     capture_enabled: bool,
     reuse_window_seconds: u32,
     refresh_lead_seconds: u32,
+    capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
     capture_proxy_id: Option<String>,
     capture_proxy: Option<ModelTurnStateCaptureProxyData>,
     capture_policy: ModelTurnStateCapturePolicyData,
@@ -216,6 +220,7 @@ pub struct AccountTurnStatePolicyData {
     capture_enabled: bool,
     reuse_window_seconds: u32,
     refresh_lead_seconds: u32,
+    capture_trigger_mode: ModelTurnStateCaptureTriggerMode,
     capture_proxy_id: Option<String>,
     capture_proxy: Option<ModelTurnStateCaptureProxyData>,
     capture_readiness: &'static str,
@@ -241,6 +246,7 @@ impl From<AccountTurnStatePolicyView> for AccountTurnStatePolicyData {
             capture_enabled: view.capture_enabled,
             reuse_window_seconds: view.reuse_window_seconds,
             refresh_lead_seconds: view.refresh_lead_seconds,
+            capture_trigger_mode: view.capture_trigger_mode,
             capture_proxy_id: view.capture_proxy_id,
             capture_proxy: view
                 .capture_proxy
@@ -280,7 +286,9 @@ struct ModelTurnStatePinData {
     captured_at: DateTime<Utc>,
     reuse_deadline: DateTime<Utc>,
     source: String,
-    compatible_transport: String,
+    compatible_transports: Vec<String>,
+    sent_count: u64,
+    last_sent_at: Option<DateTime<Utc>>,
     status: &'static str,
     generation: u64,
     id: Option<String>,
@@ -309,6 +317,7 @@ impl From<ModelTurnStateResult> for ModelTurnStateData {
             capture_enabled: view.capture_enabled,
             reuse_window_seconds: view.reuse_window_seconds,
             refresh_lead_seconds: view.refresh_lead_seconds,
+            capture_trigger_mode: view.capture_trigger_mode,
             capture_proxy_id: view.capture_proxy_id,
             capture_proxy: view
                 .capture_proxy
@@ -346,7 +355,9 @@ impl From<ModelTurnStateResult> for ModelTurnStateData {
                 captured_at: pin.captured_at,
                 reuse_deadline: pin.reuse_deadline,
                 source: pin.source,
-                compatible_transport: pin.compatible_transport,
+                compatible_transports: pin.compatible_transports,
+                sent_count: pin.sent_count,
+                last_sent_at: pin.last_sent_at,
                 generation: pin.generation,
                 id: pin.id,
             }),
@@ -369,7 +380,9 @@ impl From<ModelTurnStateResult> for ModelTurnStateData {
                 captured_at: pin.captured_at,
                 reuse_deadline: pin.reuse_deadline,
                 source: pin.source,
-                compatible_transport: pin.compatible_transport,
+                compatible_transports: pin.compatible_transports,
+                sent_count: pin.sent_count,
+                last_sent_at: pin.last_sent_at,
                 generation: pin.generation,
                 id: pin.id,
             }),
