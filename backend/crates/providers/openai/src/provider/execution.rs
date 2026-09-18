@@ -1538,6 +1538,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         model_turn_state_fence.as_ref(),
                     )
                     .await;
+                    missing_state_finalized = true;
                 }
                 log_canonical_upstream_error(
                     UpstreamErrorLogContext::new(

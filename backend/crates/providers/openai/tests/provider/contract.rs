@@ -6067,7 +6067,7 @@ async fn model_pin_uses_final_http_header_and_ignores_passthrough_duplicates() {
 }
 
 #[tokio::test]
-async fn only_attributable_http_pin_rejection_requests_cas_invalidation() {
+async fn http_pin_rejection_without_returned_state_requests_one_cas_invalidation() {
     let account_id = "acct_session_affinity";
     let accounts = Arc::new(MemoryAccountStore::default());
     create_account(&accounts, account_id).await;
@@ -6081,6 +6081,7 @@ async fn only_attributable_http_pin_rejection_requests_cas_invalidation() {
     });
 
     for (explicit_target, expected_invalidations) in [(true, 1), (false, 1)] {
+        turn_state.invalidations.lock().unwrap().clear();
         let server = MockServer::start().await;
         let mut error = json!({
             "code": "invalid_encrypted_content",
