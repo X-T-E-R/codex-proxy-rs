@@ -5,6 +5,7 @@ import type {
   ModelTurnStateCaptureAccepted,
   ModelTurnStateCaptureJob,
   ModelTurnStateCaptureStatus,
+  ModelTurnStateCaptureTriggerMode,
   OutboundProxyRecord,
 } from '@/api'
 
@@ -92,6 +93,7 @@ const draftLockEnabled = ref(false)
 const draftCaptureEnabled = ref(false)
 const draftReuseWindowSeconds = ref(7_200)
 const draftRefreshLeadSeconds = ref(900)
+const draftCaptureTriggerMode = ref<ModelTurnStateCaptureTriggerMode>('on_attributed_failure')
 const draftCaptureProxyId = ref('')
 const draftMaxAttempts = ref(3)
 const draftAttemptTimeoutSeconds = ref(8)
@@ -118,6 +120,12 @@ const modelOptions = computed(() => models.value.map(model => ({
   value: model.id,
   description: model.id === model.label ? undefined : model.id,
 })))
+const captureTriggerOptions = [
+  { label: '归因拒绝时捕获（默认）', value: 'on_attributed_failure', description: '只有当前值被实际发送，并被上游结构化拒绝时才轮换。' },
+  { label: '用过后提前捕获', value: 'before_expiry_if_used', description: '当前值至少实际发送过一次后，才在到期前按提前量准备候选。' },
+  { label: '到期后首请求捕获', value: 'first_request_after_expiry', description: '到期不后台探测；首个后续业务请求触发一次捕获。' },
+  { label: '拒绝或到期首请求', value: 'failure_or_first_after_expiry', description: '结构化拒绝优先，否则由到期后的首个业务请求兜底。' },
+] satisfies Array<{ label: string, value: ModelTurnStateCaptureTriggerMode, description: string }>
 function proxyReady(proxy: OutboundProxyRecord) {
   if (proxy.lastTest?.success !== true || !proxy.lastTestAt)
     return false
@@ -176,6 +184,7 @@ const policyChanged = computed(() => {
     || draftCaptureEnabled.value !== current.captureEnabled
     || draftReuseWindowSeconds.value !== current.reuseWindowSeconds
     || draftRefreshLeadSeconds.value !== current.refreshLeadSeconds
+    || draftCaptureTriggerMode.value !== current.captureTriggerMode
     || draftCaptureProxyId.value !== (current.captureProxyId ?? '')
     || draftMaxAttempts.value !== current.capturePolicy.maxAttempts
     || draftAttemptTimeoutSeconds.value !== current.capturePolicy.attemptTimeoutSeconds
@@ -199,7 +208,7 @@ const setupStatus = computed(() => {
   if (!draftLockEnabled.value)
     return '锁定未启用：请求不会注入模型级 Turn State。'
   if (modelState.value?.pin?.status === 'fresh')
-    return '锁定已就绪：普通 HTTP 请求会注入当前模型值。'
+    return '锁定已就绪：Responses HTTP 与 WebSocket 请求都会注入当前模型值。'
   if (draftCaptureEnabled.value && selectedProxyReady.value)
     return '待获取并自动锁定：先走账号正常出口；只有明确观测到非 292 字节值后，才使用所选代理捕获。'
   return '待获取并自动锁定：先走账号正常出口；观测到 292 字节值后会直接锁定。'
@@ -355,6 +364,7 @@ function applyPolicy(result: AccountTurnStatePolicyResponse) {
   draftCaptureEnabled.value = result.captureEnabled
   draftReuseWindowSeconds.value = result.reuseWindowSeconds
   draftRefreshLeadSeconds.value = result.refreshLeadSeconds
+  draftCaptureTriggerMode.value = result.captureTriggerMode
   draftCaptureProxyId.value = result.captureProxyId ?? ''
   draftMaxAttempts.value = result.capturePolicy.maxAttempts
   draftAttemptTimeoutSeconds.value = result.capturePolicy.attemptTimeoutSeconds
@@ -449,6 +459,7 @@ function handleCaptureToggle(enabled: boolean) {
 function applyRecommendedDefaults() {
   draftReuseWindowSeconds.value = RECOMMENDED_REUSE_WINDOW_SECONDS
   draftRefreshLeadSeconds.value = RECOMMENDED_REFRESH_LEAD_SECONDS
+  draftCaptureTriggerMode.value = 'on_attributed_failure'
   draftMaxAttempts.value = RECOMMENDED_CAPTURE_POLICY.maxAttempts
   draftAttemptTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.attemptTimeoutSeconds
   draftJobTimeoutSeconds.value = RECOMMENDED_CAPTURE_POLICY.jobTimeoutSeconds
@@ -535,6 +546,11 @@ function waitingReasonLabel(reason: string) {
     cooldown: '失败冷却中',
     queued: '已进入捕获队列',
     scheduled: '等待提前捕获时间',
+    waiting_first_send: '等待当前值首次实际发送',
+    waiting_attributed_failure: '等待当前值的归因拒绝',
+    waiting_expiry: '等待当前值到期',
+    waiting_first_request_after_expiry: '等待到期后的首个业务请求',
+    waiting_failure_or_expiry: '等待归因拒绝或到期首请求',
     waiting_normal_observation: '等待普通请求观测',
   }[reason] ?? reason
 }
@@ -620,6 +636,7 @@ async function savePolicySettings(): Promise<boolean> {
       captureEnabled: draftCaptureEnabled.value,
       reuseWindowSeconds: draftReuseWindowSeconds.value,
       refreshLeadSeconds: draftRefreshLeadSeconds.value,
+      captureTriggerMode: draftCaptureTriggerMode.value,
       captureProxyId: draftCaptureProxyId.value || null,
       maxAttempts: draftMaxAttempts.value,
       attemptTimeoutSeconds: draftAttemptTimeoutSeconds.value,
@@ -800,7 +817,7 @@ onBeforeUnmount(() => {
           模型级锁定与捕获
         </h3>
         <p class="mt-1 mb-0 text-xs leading-relaxed text-cp-text-secondary">
-          每个账号和实际上游模型独立保存。跨 turn 锁定属于实验行为，只用于 HTTP transport，不改变账号调度。
+          每个账号和实际上游模型独立保存。跨 turn 锁定属于实验行为，统一应用于 Responses HTTP 与 WebSocket，不改变账号调度。
         </p>
       </div>
       <BaseButton
@@ -897,7 +914,7 @@ onBeforeUnmount(() => {
                 账号级自动锁定
               </p>
               <p class="mt-1 mb-0 text-xs leading-relaxed text-cp-text-secondary">
-                实验性地跨 turn 注入当前可用值；本地期限到期或明确失效后先等待普通 HTTP 请求重新观测。
+                实验性地跨 turn 注入当前可用值；本地期限到期或明确失效后不再发送旧值。
               </p>
             </div>
             <BaseSwitch v-model="draftLockEnabled" label="启用账号 Turn State 自动锁定" :disabled="busy" active-text="启用" inactive-text="停用" />
@@ -908,7 +925,7 @@ onBeforeUnmount(() => {
                 自动捕获
               </p>
               <p class="mt-1 mb-0 text-xs leading-relaxed text-cp-text-secondary">
-                普通 HTTP 请求明确返回非 292 字节值后，按下方策略通过已测试代理轮换；正好 292 字节但不可打印的值不会触发。也可手动获取。
+                没有当前值时，普通 Responses 请求明确返回非 292 字节值会启动一次 bootstrap 捕获；已有值按下方触发模式轮换。也可手动获取。
               </p>
             </div>
             <BaseSwitch v-model="draftCaptureEnabled" label="启用模型 Turn State 自动捕获" :disabled="busy" active-text="启用" inactive-text="停用" @update:model-value="handleCaptureToggle" />
@@ -916,6 +933,18 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="grid gap-4 sm:grid-cols-2">
+          <BaseFormItem
+            v-if="draftCaptureEnabled"
+            label="自动捕获触发方式"
+            description="选择何时使用捕获代理。结构化归因拒绝只匹配本次实际发送的账号、模型、generation、candidate 与值。"
+          >
+            <BaseSelect
+              v-model="draftCaptureTriggerMode"
+              :options="captureTriggerOptions"
+              :disabled="busy"
+              aria-label="自动捕获触发方式"
+            />
+          </BaseFormItem>
           <BaseFormItem control-id="model-turn-state-reuse-window" label="本地最大复用期限" description="默认 7200 秒。当前值到期时会切换到已准备的候选值；没有候选时继续走普通请求。">
             <BaseNumberInput id="model-turn-state-reuse-window" v-model="draftReuseWindowSeconds" aria-describedby="model-turn-state-reuse-window-description" label="本地最大复用期限" :min="1" :max="86400" unit="秒" :disabled="busy" />
             <div class="mt-2 flex flex-wrap gap-1.5" aria-label="复用期限快捷值">
@@ -924,7 +953,7 @@ onBeforeUnmount(() => {
               </BaseButton>
             </div>
           </BaseFormItem>
-          <BaseFormItem control-id="model-turn-state-refresh-lead" label="提前捕获" description="默认提前 900 秒排队准备下一份值；大于 TTL 时按 TTL−1 秒执行。">
+          <BaseFormItem v-if="draftCaptureEnabled && draftCaptureTriggerMode === 'before_expiry_if_used'" control-id="model-turn-state-refresh-lead" label="提前捕获" description="当前值至少实际发送过一次后，默认提前 900 秒排队；大于 TTL 时按 TTL−1 秒执行。">
             <BaseNumberInput id="model-turn-state-refresh-lead" v-model="draftRefreshLeadSeconds" aria-describedby="model-turn-state-refresh-lead-description" label="提前捕获" :min="0" :max="86400" unit="秒" :disabled="busy" />
           </BaseFormItem>
           <BaseFormItem
@@ -1107,7 +1136,21 @@ onBeforeUnmount(() => {
                 <dt class="text-cp-text-quaternary">
                   兼容 transport
                 </dt><dd class="m-0 text-cp-text">
-                  HTTP only
+                  {{ modelState.pin.compatibleTransports.join(' / ') }}
+                </dd>
+              </div>
+              <div>
+                <dt class="text-cp-text-quaternary">
+                  实际发送次数
+                </dt><dd class="m-0 text-cp-text">
+                  {{ modelState.pin.sentCount }} 次
+                </dd>
+              </div>
+              <div>
+                <dt class="text-cp-text-quaternary">
+                  最近实际发送
+                </dt><dd class="m-0 text-cp-text">
+                  {{ modelState.pin.lastSentAt ? formatDateTime(modelState.pin.lastSentAt) : '尚未发送' }}
                 </dd>
               </div>
               <div>
@@ -1120,7 +1163,7 @@ onBeforeUnmount(() => {
             </dl>
           </template>
           <p v-else class="m-0 text-cp-text-secondary">
-            当前模型还没有保存值。锁定开关仍可保存为“获取后自动锁定”；系统会先从普通 HTTP 请求观测，必要时再按自动捕获设置使用代理。
+            当前模型还没有保存值。锁定开关仍可保存为“获取后自动锁定”；系统会先从普通 Responses 请求观测，必要时再按自动捕获设置使用代理。
           </p>
 
           <div class="flex flex-wrap gap-2">

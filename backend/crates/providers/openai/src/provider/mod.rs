@@ -626,16 +626,22 @@ impl Provider for CodexProvider {
         };
         apply_transport(&mut upstream_request, transport);
         let model_pin = self.turn_state_store.as_ref().and_then(|store| {
-            (transport == CodexProviderTransport::HttpOnly)
-                .then(|| {
-                    store.active_model_pin(
-                        lease.account_id().as_str(),
-                        lease.account().identity_revision().get(),
-                        upstream_model.as_str(),
-                    )
-                })
-                .flatten()
+            store.active_model_pin(
+                lease.account_id().as_str(),
+                lease.account().identity_revision().get(),
+                upstream_model.as_str(),
+            )
         });
+        if model_pin.is_none()
+            && let Some(store) = self.turn_state_store.as_ref()
+        {
+            store.enqueue_capture_after_expiry(
+                lease.account_id().as_str(),
+                lease.account().identity_revision().get(),
+                upstream_model.as_str(),
+                Utc::now(),
+            );
+        }
         let model_turn_state_fence = model_pin.as_ref().map(|pin| ModelTurnStatePinFence {
             account_id: lease.account_id().as_str().to_owned(),
             identity_revision: lease.account().identity_revision().get(),

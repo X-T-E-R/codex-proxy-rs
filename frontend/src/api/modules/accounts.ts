@@ -355,6 +355,12 @@ export interface AccountTurnStateResponse {
 export type ModelTurnStateCaptureStatus
   = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
+export type ModelTurnStateCaptureTriggerMode
+  = 'before_expiry_if_used'
+    | 'on_attributed_failure'
+    | 'first_request_after_expiry'
+    | 'failure_or_first_after_expiry'
+
 export interface ModelTurnStateCapturePolicy {
   maxAttempts: number
   attemptTimeoutSeconds: number
@@ -390,6 +396,7 @@ export interface AccountModelTurnStateResponse {
   captureEnabled: boolean
   reuseWindowSeconds: number
   refreshLeadSeconds: number
+  captureTriggerMode: ModelTurnStateCaptureTriggerMode
   captureProxyId: string | null
   captureProxy: null | {
     id: string
@@ -427,7 +434,9 @@ export interface ModelTurnStateValue {
   capturedAt: string
   reuseDeadline: string
   source: 'manual' | 'capture' | 'observation'
-  compatibleTransport: 'http'
+  compatibleTransports: Array<'http' | 'websocket'>
+  sentCount: number
+  lastSentAt: string | null
   status: 'fresh' | 'aged'
   generation: number
   id: string | null
@@ -441,6 +450,7 @@ export interface AccountTurnStatePolicyResponse {
   captureEnabled: boolean
   reuseWindowSeconds: number
   refreshLeadSeconds: number
+  captureTriggerMode: ModelTurnStateCaptureTriggerMode
   captureProxyId: string | null
   captureProxy: null | {
     id: string
@@ -521,6 +531,7 @@ interface AccountTurnStatePolicyUpdateParam extends AccountIdParam {
   captureEnabled: boolean
   reuseWindowSeconds: number
   refreshLeadSeconds: number
+  captureTriggerMode: ModelTurnStateCaptureTriggerMode
   captureProxyId: string | null
   maxAttempts: number
   attemptTimeoutSeconds: number

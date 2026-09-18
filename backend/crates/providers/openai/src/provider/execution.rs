@@ -569,15 +569,23 @@ fn error_turn_state(error: &CodexClientError) -> Option<(CodexObservedTurnState,
 }
 
 fn client_error_explicitly_targets_turn_state(error: &CodexClientError) -> bool {
-    let CodexClientError::Upstream {
-        body, transport, ..
-    } = error
-    else {
-        return false;
+    let body = match error {
+        CodexClientError::Upstream {
+            body,
+            send_phase: CodexUpstreamSendPhase::AfterPayload,
+            ..
+        } => body,
+        CodexClientError::WebSocket(error) => {
+            let CodexWebSocketExchangeError::Upstream(error) = error.classified() else {
+                return false;
+            };
+            if error.send_phase != CodexUpstreamSendPhase::AfterPayload {
+                return false;
+            }
+            &error.body
+        }
+        _ => return false,
     };
-    if *transport != CodexBackendTransport::HttpSse {
-        return false;
-    }
     serde_json::from_str::<Value>(body)
         .ok()
         .is_some_and(|value| {
@@ -626,6 +634,7 @@ fn observe_turn_state(
     transport: &str,
     upstream_response_id: Option<&str>,
     request: TurnStateRequestContext<'_>,
+    model_scope: Option<&ModelTurnStateObservationScope>,
 ) {
     let Some(store) = store else { return };
     store.enqueue_observation(TurnStateObservation {
@@ -638,7 +647,7 @@ fn observe_turn_state(
         transport: transport.to_owned(),
         upstream_response_id: upstream_response_id.map(str::to_owned),
         client_turn_id: request.client_turn_id.map(str::to_owned),
-        model_scope: None,
+        model_scope: model_scope.cloned(),
     });
 }
 
@@ -649,6 +658,7 @@ fn observe_received_turn_state(
     receipt: Option<&CodexObservedTurnState>,
     upstream_response_id: Option<&str>,
     request: TurnStateRequestContext<'_>,
+    model_scope: Option<&ModelTurnStateObservationScope>,
 ) {
     if let Some(receipt) = receipt {
         observe_turn_state(
@@ -661,6 +671,9 @@ fn observe_received_turn_state(
             },
             upstream_response_id,
             request,
+            matches!(transport, CodexBackendTransport::WebSocket)
+                .then_some(model_scope)
+                .flatten(),
         );
     }
 }
@@ -820,9 +833,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             _ => None,
         };
         if let Err(CodexHandshakeAttemptError::Client(error)) = &response {
-            if transport_policy == CodexProviderTransport::HttpOnly
-                && client_error_explicitly_targets_turn_state(error)
-            {
+            if client_error_explicitly_targets_turn_state(error) {
                 invalidate_rejected_model_pin(
                     turn_state_store.as_ref(),
                     model_turn_state_fence.as_ref(),
@@ -839,6 +850,9 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     transport,
                     None,
                     turn_state_request,
+                    (transport == "websocket")
+                        .then_some(model_turn_state_observation_scope.as_ref())
+                        .flatten(),
                 );
             }
             log_client_upstream_error(
@@ -889,6 +903,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 pending_initial_turn_state_observation.as_ref(),
                 None,
                 turn_state_request,
+                model_turn_state_observation_scope.as_ref(),
             );
         }
         if !accepts_backend_transport(transport_policy, response.transport) {
@@ -1118,6 +1133,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     Some(&receipt),
                     Some(response_id),
                     turn_state_request,
+                    model_turn_state_observation_scope.as_ref(),
                 );
             }
             pre_commit_events.observe_chunk(chunk_len);
@@ -1126,12 +1142,11 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             let service_tier_changed = observation_state
                 .observe_upstream_service_tier(decoder.response_service_tier());
             let terminal_failure = if let Some((error, semantic_output_seen)) = canonical_failure {
-                if response_transport == CodexBackendTransport::HttpSse
-                    && matches!(
-                        &error,
-                        CodexCanonicalError::Upstream(failure)
-                            if failure.explicitly_targets_turn_state()
-                    )
+                if matches!(
+                    &error,
+                    CodexCanonicalError::Upstream(failure)
+                        if failure.explicitly_targets_turn_state()
+                )
                 {
                     invalidate_rejected_model_pin(
                         turn_state_store.as_ref(),
@@ -1265,6 +1280,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 Some(&receipt),
                 Some(response_id),
                 turn_state_request,
+                model_turn_state_observation_scope.as_ref(),
             );
         }
         let terminal_failure = canonical_failure.map(|(error, semantic_output_seen)| {

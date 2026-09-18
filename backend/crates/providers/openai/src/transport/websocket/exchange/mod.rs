@@ -9,7 +9,7 @@ use std::{pin::Pin, sync::Arc};
 use bytes::Bytes;
 use futures::Stream;
 use gateway_core::provider_ports::turn_state::{
-    TurnStateObservation, TurnStateSent, TurnStateStore,
+    ModelTurnStateObservationScope, TurnStateObservation, TurnStateSent, TurnStateStore,
 };
 use gateway_protocol::openai::events::ParsedRateLimits;
 use tokio::sync::Mutex;
@@ -74,6 +74,7 @@ pub(crate) struct CodexWebSocketTurnStateObserver {
     request_id: String,
     attempt_index: u32,
     client_turn_id: Option<String>,
+    model_scope: Option<ModelTurnStateObservationScope>,
     sent: Option<WebSocketSentContext>,
 }
 
@@ -93,6 +94,7 @@ impl CodexWebSocketTurnStateObserver {
         request_id: &str,
         attempt_index: u32,
         client_turn_id: Option<&str>,
+        model_scope: Option<&ModelTurnStateObservationScope>,
         sent: Option<CodexTurnStateSendContext<'_>>,
     ) -> Self {
         Self {
@@ -101,6 +103,7 @@ impl CodexWebSocketTurnStateObserver {
             request_id: request_id.to_owned(),
             attempt_index,
             client_turn_id: client_turn_id.map(str::to_owned),
+            model_scope: model_scope.cloned(),
             sent: sent.map(|sent| WebSocketSentContext {
                 identity_revision: sent.identity_revision,
                 effective_model: sent.effective_model.to_owned(),
@@ -126,7 +129,7 @@ impl CodexWebSocketTurnStateObserver {
             transport: "websocket".to_owned(),
             upstream_response_id: upstream_response_id.map(str::to_owned),
             client_turn_id: self.client_turn_id.clone(),
-            model_scope: None,
+            model_scope: self.model_scope.clone(),
         });
     }
 

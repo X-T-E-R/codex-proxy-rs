@@ -157,7 +157,7 @@ mod turn_state {
     };
     use gateway_core::provider_ports::turn_state::{
         AccountTurnStatePolicyView, ModelTurnStateCapturePolicy, ModelTurnStateCaptureProxy,
-        ModelTurnStatePin, ModelTurnStateView,
+        ModelTurnStateCaptureTriggerMode, ModelTurnStatePin, ModelTurnStateView,
     };
     use serde_json::json;
 
@@ -242,6 +242,10 @@ mod turn_state {
         assert!(update.lock_enabled);
         assert!(update.capture_enabled);
         assert_eq!(update.capture_proxy_id, None);
+        assert_eq!(
+            update.capture_trigger_mode,
+            ModelTurnStateCaptureTriggerMode::OnAttributedFailure
+        );
         assert_eq!(update.attempt_timeout_seconds, 30);
         assert_eq!(update.job_timeout_seconds, 8);
 
@@ -253,6 +257,7 @@ mod turn_state {
             capture_enabled: true,
             reuse_window_seconds: 7_200,
             refresh_lead_seconds: 900,
+            capture_trigger_mode: ModelTurnStateCaptureTriggerMode::OnAttributedFailure,
             capture_proxy_id: None,
             capture_proxy: None,
             capture_policy: ModelTurnStateCapturePolicy {
@@ -268,6 +273,7 @@ mod turn_state {
         assert_eq!(value["captureReadiness"], "waiting_proxy");
         assert_eq!(value["lockEnabled"], true);
         assert_eq!(value["captureEnabled"], true);
+        assert_eq!(value["captureTriggerMode"], "on_attributed_failure");
         assert_eq!(value["configRevision"], 8);
     }
 
@@ -286,6 +292,7 @@ mod turn_state {
                 capture_enabled: true,
                 reuse_window_seconds: 3_600,
                 refresh_lead_seconds: 900,
+                capture_trigger_mode: ModelTurnStateCaptureTriggerMode::BeforeExpiryIfUsed,
                 capture_proxy_id: Some("proxy_saved".to_owned()),
                 capture_proxy: Some(ModelTurnStateCaptureProxy {
                     id: "proxy_saved".to_owned(),
@@ -315,7 +322,9 @@ mod turn_state {
                     captured_at: now - Duration::hours(2),
                     reuse_deadline: now - Duration::hours(1),
                     source: "capture".to_owned(),
-                    compatible_transport: "http".to_owned(),
+                    compatible_transports: vec!["http".to_owned(), "websocket".to_owned()],
+                    sent_count: 2,
+                    last_sent_at: Some(now - Duration::minutes(15)),
                     invalidated: false,
                     generation: 4,
                     id: None,
@@ -333,7 +342,9 @@ mod turn_state {
                     captured_at: now - Duration::minutes(10),
                     reuse_deadline: now + Duration::minutes(50),
                     source: "capture".to_owned(),
-                    compatible_transport: "http".to_owned(),
+                    compatible_transports: vec!["http".to_owned(), "websocket".to_owned()],
+                    sent_count: 0,
+                    last_sent_at: None,
                     invalidated: false,
                     generation: 5,
                     id: Some("candidate_1".to_owned()),
@@ -360,6 +371,11 @@ mod turn_state {
         assert_eq!(value["pin"]["status"], "aged");
         assert_eq!(value["pin"]["encodedBytes"], 292);
         assert_eq!(value["pin"]["timestampVerified"], false);
+        assert_eq!(
+            value["pin"]["compatibleTransports"],
+            json!(["http", "websocket"])
+        );
+        assert_eq!(value["pin"]["sentCount"], 2);
         assert_eq!(value["candidate"]["id"], "candidate_1");
         assert_eq!(value["candidate"]["generation"], 5);
         assert_eq!(
