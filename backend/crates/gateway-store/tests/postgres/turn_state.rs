@@ -677,7 +677,8 @@ async fn shortened_reuse_window_queues_first_expired_request_and_expires_candida
                 candidate_id = 'candidate-shortened-window',
                 candidate_value = $2, candidate_source = 'capture',
                 candidate_captured_at = now() - interval '10 minutes',
-                candidate_reuse_deadline = now() + interval '100 minutes'
+                candidate_reuse_deadline = now() + interval '100 minutes',
+                config_revision = config_revision + 1, updated_at = now()
           where account_id = $1 and effective_model = $3",
     )
     .bind(ACCOUNT_ID)
