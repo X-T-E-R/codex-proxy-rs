@@ -5579,13 +5579,13 @@ async fn websocket_turn_state_metadata_is_exposed_through_response_observation()
 async fn websocket_model_pin_overrides_client_state_and_records_final_payload() {
     const ACCOUNT_ID: &str = "acct_websocket_sent_turn_state";
     const REQUEST_ID: &str = "req_websocket_sent_turn_state";
-    const TURN_STATE: &str = "turn-sent-in-response-create";
+    let turn_state_value = "W".repeat(292);
 
     let accounts = Arc::new(MemoryAccountStore::default());
     create_account(&accounts, ACCOUNT_ID).await;
     let turn_state = Arc::new(MemoryTurnStateStore::default());
     *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
-        value: TURN_STATE.to_owned(),
+        value: turn_state_value.clone(),
         sha256: "b".repeat(64),
         generation: 23,
         candidate_id: Some("candidate-ws-sent".to_owned()),
@@ -5593,6 +5593,7 @@ async fn websocket_model_pin_overrides_client_state_and_records_final_payload() 
     });
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let expected_value = turn_state_value.clone();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut websocket = accept_codex_test_websocket(stream).await;
@@ -5607,8 +5608,23 @@ async fn websocket_model_pin_overrides_client_state_and_records_final_payload() 
         assert_eq!(request["type"], "response.create");
         assert_eq!(
             request.pointer("/client_metadata/x-codex-turn-state"),
-            Some(&json!(TURN_STATE))
+            Some(&json!(expected_value))
         );
+        websocket
+            .send(Message::Text(
+                json!({
+                    "type": "response.created",
+                    "response": {
+                        "id": "resp_websocket_sent_turn_state",
+                        "model": "gpt-5.4",
+                        "status": "in_progress"
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
         websocket
             .send(Message::Text(
                 json!({
@@ -5674,22 +5690,15 @@ async fn websocket_model_pin_overrides_client_state_and_records_final_payload() 
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].request_id, REQUEST_ID);
     assert_eq!(sent[0].account_id, ACCOUNT_ID);
-    assert_eq!(sent[0].value, TURN_STATE);
+    assert_eq!(sent[0].value, turn_state_value);
     assert_eq!(sent[0].transport, "websocket");
     assert_eq!(sent[0].source, "capture");
     assert_eq!(sent[0].generation, Some(23));
     assert_eq!(sent[0].candidate_id.as_deref(), Some("candidate-ws-sent"));
     drop(sent);
-    assert_eq!(
-        turn_state.invalidations.lock().unwrap().as_slice(),
-        [CapturedModelPinInvalidation {
-            account_id: ACCOUNT_ID.to_owned(),
-            identity_revision: 1,
-            effective_model: "gpt-5.4".to_owned(),
-            config_revision: 23,
-            candidate_id: Some("candidate-ws-sent".to_owned()),
-            sha256: "b".repeat(64),
-        }]
+    assert!(
+        turn_state.invalidations.lock().unwrap().is_empty(),
+        "successful completion without a new state must preserve the sent pin"
     );
 }
 
@@ -6925,6 +6934,86 @@ async fn model_pin_uses_final_http_header_and_ignores_passthrough_duplicates() {
     assert_eq!(sent[0].transport, "http");
     assert_eq!(sent[0].source, "manual");
     assert_eq!(sent[0].generation, Some(7));
+}
+
+#[tokio::test]
+async fn http_terminal_without_returned_state_preserves_only_successful_pin() {
+    for (status, eof_terminated) in [
+        ("completed", false),
+        ("completed", true),
+        ("incomplete", false),
+        ("incomplete", true),
+    ] {
+        let accounts = Arc::new(MemoryAccountStore::default());
+        create_account(&accounts, "acct_session_affinity").await;
+        let turn_state = Arc::new(MemoryTurnStateStore::default());
+        let value = "S".repeat(292);
+        *turn_state.model_pin.lock().unwrap() = Some(ActiveModelTurnStatePin {
+            value: value.clone(),
+            sha256: "4".repeat(64),
+            generation: 83,
+            candidate_id: Some("candidate-success-no-refresh".to_owned()),
+            source: "capture".to_owned(),
+        });
+        let server = MockServer::start().await;
+        let response = format!(
+            "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\",\"status\":\"in_progress\"}}}}\n\nevent: response.{status}\ndata: {{\"type\":\"response.{status}\",\"response\":{{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\",\"status\":\"{status}\",\"output\":[],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/codex/responses"))
+            .and(header("x-codex-turn-state", value.as_str()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(if eof_terminated {
+                        response.trim_end()
+                    } else {
+                        response.as_str()
+                    }),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let turn_state_port: Arc<dyn TurnStateStore> = turn_state.clone();
+        let provider = provider_with_base_url(&accounts, server.uri())
+            .with_turn_state_store(Some(turn_state_port));
+        for index in 0..2 {
+            let mut stream = provider
+                .execute(
+                    planned_request("openai", http_generate_operation()),
+                    context(
+                        &format!("req_terminal_without_state_{status}_{eof_terminated}_{index}"),
+                        CancellationToken::new(),
+                    ),
+                )
+                .await
+                .expect("prepare pinned request");
+            let mut completed = false;
+            while let Some(event) = stream.next().await {
+                completed |= event
+                    .expect("pinned response")
+                    .canonical_facts()
+                    .iter()
+                    .any(|fact| matches!(fact, GatewayEvent::Completed(_)));
+            }
+            assert!(
+                completed,
+                "response must complete, not merely end its stream"
+            );
+            assert_eq!(
+                turn_state.invalidations.lock().unwrap().len(),
+                if status == "completed" { 0 } else { index + 1 },
+                "only a successful completion preserves a pin without returned state"
+            );
+        }
+        let sent = turn_state.sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert!(
+            sent.iter()
+                .all(|receipt| { receipt.value == value && receipt.generation == Some(83) })
+        );
+        assert!(turn_state.observations.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
