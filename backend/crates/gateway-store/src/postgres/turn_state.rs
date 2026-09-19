@@ -1757,7 +1757,7 @@ impl TurnStateStore for PgTurnStateStore {
         if update.expected_revision == 0
             || !(1..=86_400).contains(&update.reuse_window_seconds)
             || update.refresh_lead_seconds > 86_400
-            || !(1..=10).contains(&update.max_attempts)
+            || !(1..=50).contains(&update.max_attempts)
             || !(1..=60).contains(&update.attempt_timeout_seconds)
             || !(1..=300).contains(&update.job_timeout_seconds)
             || update.max_backoff_seconds > 60
