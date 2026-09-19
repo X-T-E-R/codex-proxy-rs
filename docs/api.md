@@ -306,8 +306,9 @@ WebSocket metadata 事件返回 292 字节可打印 ASCII 值时，
 按 account identity、effective model 和配置 revision 直接保存为 `observation` pin；只有 encoded byte length
 明确不等于 292 时立即取消尚未交付的源流并登记捕获。已过期或已拒绝值的同值普通观测不会重置
 `capturedAt`、deadline 或使其复活；正好 292 字节但不可打印的值只保留为 suspect，不保存模型锁也不消耗
-住宅代理。HTTP headers 缺少该字段不表示失败，因为 SSE/WS metadata 可能稍后返回；只有实际发送完成后在
-terminal、错误或超时边界仍没有值，才按 generation/candidate ID fence 退役该次实际发送值。
+住宅代理。HTTP headers 缺少该字段不表示失败，因为 SSE/WS metadata 可能稍后返回。请求成功完成但没有
+返回新 state 时保留已发送的模型锁，沿用原 deadline，不续期；实际发送后在失败、不完整终态或超时边界
+仍没有值时，按 generation/candidate ID fence 退役该次实际发送值。
 请求先尝试 WebSocket、后在发送 payload 前回退到 HTTP 时，按实际 HTTP 响应执行同一观察状态机。自动任务
 使用选定且最近 24 小时测试成功的已管理代理；每次尝试
 创建独立 HTTP 连接，只在成功 HTTP 状态后接纳 Turn State header；收到首个合格 header 或 SSE event 后立即释放剩余响应。
@@ -317,7 +318,7 @@ terminal、错误或超时边界仍没有值，才按 generation/candidate ID fe
 捕获不创建模型请求、用量、额度、限流、账号健康、circuit、feedback 或账号最近观测。仍可用的同值捕获
 以 `succeeded / unchanged_value` 结束当前任务，不续期也不执行下一次付费尝试；过期或已拒绝的同值才进入
 剩余 attempt。一次触发耗尽后清除请求信号并进入冷却，没有新的业务发送或失败信号时不会自动永动。
-Responses HTTP/WS 请求确实注入当前模型锁后，明确非 292 返回、实际发送后的终态无值，以及结构化错误的
+Responses HTTP/WS 请求确实注入当前模型锁后，明确非 292 返回、实际发送后的失败/不完整终态无值，以及结构化错误的
 `param`/`target` 明确指向 `x-codex-turn-state`，都会按 pin fingerprint、generation 与 candidate ID CAS
 退役实际发送值；迟到的 A 反馈不会淘汰已切换的 B。有可用 candidate 时原子晋升且不续期；没有 candidate
 时按账号开关进入捕获。发送前网络失败、通用错误文本或无法确认是否发送的失败不据此退役模型锁。

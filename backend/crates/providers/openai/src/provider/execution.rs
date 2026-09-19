@@ -1574,8 +1574,9 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 .iter()
                 .flat_map(ProviderEvent::canonical_facts)
                 .any(|event| matches!(event, GatewayEvent::Completed(_)));
+            let terminal_incomplete = terminal_response_is_incomplete(&events);
             let terminal_changed = completed
-                && observation_state.mark_completed(terminal_response_is_incomplete(&events));
+                && observation_state.mark_completed(terminal_incomplete);
             if (completed || terminal_failure.is_some())
                 && !received_turn_state
                 && !pre_commit_events.is_committed()
@@ -1620,7 +1621,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 }
                 return;
             }
-            if (completed || terminal_failure.is_some())
+            // 成功响应不保证续发 state；缺少刷新值不能淘汰本次已使用的模型锁。
+            if (terminal_failure.is_some() || (completed && terminal_incomplete))
                 && !received_turn_state
                 && !missing_state_finalized
             {
@@ -1845,9 +1847,13 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             return;
         }
         attach_openai_session_update(&mut events, &mut session_capture);
+        let terminal_incomplete = terminal_response_is_incomplete(&events);
         let terminal_changed = completed
-            && observation_state.mark_completed(terminal_response_is_incomplete(&events));
-        if !received_turn_state && !missing_state_finalized {
+            && observation_state.mark_completed(terminal_incomplete);
+        if (!completed || terminal_failure.is_some() || terminal_incomplete)
+            && !received_turn_state
+            && !missing_state_finalized
+        {
             invalidate_rejected_model_pin(
                 turn_state_store.as_ref(),
                 model_turn_state_fence.as_ref(),

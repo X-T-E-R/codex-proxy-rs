@@ -384,8 +384,9 @@ identity/model/config fence 直接发布 `observation` pin；只有 encoded byte
 持久捕获信号，随后进入 Admin-owned 有界队列。正好 292 字节但不可打印的值只记为 suspect；Fernet
 envelope 解析结果仅作为观测 metadata，不参与 pin 准入。
 观察 scope 随请求准备，由实际 HTTP 或 WebSocket transport 返回值消费。HTTP headers 缺值不会提前裁决；
-SSE/WS 等到 metadata 或 terminal/error/timeout。当前 generation 确实发送后仍无值，或明确返回非 292 值，
-会按 generation/candidate fence 退役实际发送值；发送前网络失败不推进该状态机。SSE/WS 观察只旁路解析
+SSE/WS 等到 metadata 或 terminal/error/timeout。成功完成但没有新 state 时保留已发送的模型锁，不改变 TTL；
+实际发送后失败、不完整结束或超时仍无值，或明确返回非 292 值时，按 generation/candidate fence 退役
+实际发送值；发送前网络失败不推进该状态机。SSE/WS 观察只旁路解析
 已接收字节，不修改已经交付的业务流内容或顺序。
 
 捕获执行任务驻留进程内，排队时机、失败冷却和候选值持久化；按账号与模型 singleflight、全局最多并发 2 个。每个 attempt 使用选定且最近测试
@@ -398,7 +399,7 @@ rate limit、账号健康、circuit 或 feedback。获取到仍可用 active 的
 candidate 恢复。手动获取到不同的有效值时立即替换 active；自动提前捕获在当前 active 仍有效时仍保留同值
 幂等，并只将不同值暂存为 candidate。
 普通 292 字节观测是新的本地锁定起点，并清除等待中的住宅捕获信号。
-只有当前 Responses attempt 确实注入模型 pin，明确非 292 返回、实际发送后的终态无值，或结构化错误的
+只有当前 Responses attempt 确实注入模型 pin，明确非 292 返回、实际发送后的失败/不完整终态无值，或结构化错误的
 `param` / `target` 明确指向 `x-codex-turn-state`，并且 fingerprint、identity、model 与 active
 generation/candidate ID 仍匹配时，Store 才 CAS 失效当前实际发送值并晋升可用候选；发送前网络失败和
 通用密文错误文本不能触发轮换。
