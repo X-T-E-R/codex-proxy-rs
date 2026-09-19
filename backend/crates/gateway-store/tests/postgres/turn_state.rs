@@ -514,13 +514,24 @@ async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests()
     })
     .await
     .expect("expired non-292 observation is persisted");
-    assert!(
-        aged_store
-            .model_capture_candidates(None, 8)
-            .await
-            .expect("expired value does not re-enter bootstrap capture")
-            .is_empty()
-    );
+    // 账号观测先于模型状态提交；等待非 292 的捕获信号，而不是在两次提交间断言空队列。
+    let rejected_candidates = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let candidates = aged_store
+                .model_capture_candidates(None, 8)
+                .await
+                .expect("non-292 observation queues capture after expiry");
+            if !candidates.is_empty() {
+                break candidates;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("non-292 capture signal is committed");
+    assert_eq!(rejected_candidates.len(), 1);
+    assert_eq!(rejected_candidates[0].account_id, "acct_model_state");
+    assert_eq!(rejected_candidates[0].effective_model, "upstream-codex");
 
     sqlx::query(
         "update provider_accounts set credential_revision = credential_revision + 1
