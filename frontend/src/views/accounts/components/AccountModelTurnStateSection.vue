@@ -1393,8 +1393,8 @@ onBeforeUnmount(() => {
                 {{ missingStateFlowDescription }}
               </p>
             </BaseFormItem>
-            <BaseFormItem control-id="model-turn-state-max-attempts" label="最大尝试次数" description="1–10 次">
-              <BaseNumberInput id="model-turn-state-max-attempts" v-model="draftMaxAttempts" aria-describedby="model-turn-state-max-attempts-description" label="最大尝试次数" :min="1" :max="10" unit="次" :disabled="busy" />
+            <BaseFormItem control-id="model-turn-state-max-attempts" label="最大尝试次数" description="1–50 次；任务总超时先到时提前结束">
+              <BaseNumberInput id="model-turn-state-max-attempts" v-model="draftMaxAttempts" aria-describedby="model-turn-state-max-attempts-description" label="最大尝试次数" :min="1" :max="50" unit="次" :disabled="busy" />
             </BaseFormItem>
             <BaseFormItem control-id="model-turn-state-attempt-timeout" label="单次尝试超时" description="1–60 秒；运行时不会超过任务剩余时间">
               <BaseNumberInput id="model-turn-state-attempt-timeout" v-model="draftAttemptTimeoutSeconds" aria-describedby="model-turn-state-attempt-timeout-description" label="单次尝试超时" :min="1" :max="60" unit="秒" :disabled="busy" />

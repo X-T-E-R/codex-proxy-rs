@@ -298,7 +298,8 @@ envelope timestamp，不是 expiry；长度或多一个 16 字节 ciphertext blo
 模型更新和手动捕获必须原样回传同一次 GET 得到的 `configRevision`、`identityRevision` 与
 `effectiveModel`；任一值已变化都返回 `40901`，防止模型映射或账号身份切换后把旧页面操作写入新 scope。
 保留已有值并缩短 `reuseWindowSeconds` 时只收紧 deadline，不刷新 `capturedAt`；放大窗口也不延长既有
-deadline。`attemptTimeoutSeconds` 范围为 1–60，`jobTimeoutSeconds` 范围为 1–300，且前者不得大于后者。
+deadline。`maxAttempts` 范围为 1–50，默认 3；达到任务总超时会提前结束，不保证执行满配置次数。
+`attemptTimeoutSeconds` 范围为 1–60，`jobTimeoutSeconds` 范围为 1–300，且前者不得大于后者。
 普通 access-token refresh 只推进 credential revision，不改变账号身份代次；真实身份替换才隔离旧模型锁。
 EMPTY/AGED/INVALID 都表示当前没有可用托管值；已保存的过期值只保留审计，不阻止重新学习或捕获。
 实际 HTTP 响应头或

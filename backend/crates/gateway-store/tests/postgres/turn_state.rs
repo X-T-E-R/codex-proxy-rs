@@ -92,6 +92,81 @@ async fn turn_state_override_is_versioned_validated_clearable_and_account_scoped
 }
 
 #[tokio::test]
+async fn account_capture_attempt_limit_accepts_fifty_and_rejects_out_of_range_values() {
+    let Some(database) = TestDatabase::create("turn_state_attempt_limit").await else {
+        return;
+    };
+    const ACCOUNT: &str = "acct_attempt_limit";
+    seed_account(&database.pool, ACCOUNT, "openai").await;
+    let (store, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("initialize store");
+    let mut policy = store.load_account_policy(ACCOUNT).await.expect("policy");
+    assert_eq!(policy.capture_policy.max_attempts, 3);
+    for max_attempts in [30, 50] {
+        policy = store
+            .update_account_policy(
+                ACCOUNT,
+                AccountTurnStatePolicyUpdate {
+                    max_attempts,
+                    ..account_policy_update(&policy)
+                },
+            )
+            .await
+            .expect("save expanded attempt limit");
+        assert_eq!(policy.capture_policy.max_attempts, max_attempts);
+        let loaded = store
+            .load_account_policy(ACCOUNT)
+            .await
+            .expect("reload policy");
+        assert_eq!(loaded.capture_policy.max_attempts, max_attempts);
+    }
+    for max_attempts in [0, 51] {
+        assert!(matches!(
+            store
+                .update_account_policy(
+                    ACCOUNT,
+                    AccountTurnStatePolicyUpdate {
+                        max_attempts,
+                        ..account_policy_update(&policy)
+                    },
+                )
+                .await,
+            Err(TurnStateStoreError::Invalid)
+        ));
+        let error = sqlx::query(
+            "update openai_account_turn_state_policies
+                set max_attempts = $1 where account_id = $2",
+        )
+        .bind(i16::from(max_attempts))
+        .bind(ACCOUNT)
+        .execute(&database.pool)
+        .await
+        .expect_err("database must enforce the same attempt limit");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23514")
+        );
+    }
+    let (restarted, _writer) = PgTurnStateStore::initialize(database.pool.clone())
+        .await
+        .expect("restart store");
+    assert_eq!(
+        restarted
+            .load_account_policy(ACCOUNT)
+            .await
+            .expect("persisted policy")
+            .capture_policy
+            .max_attempts,
+        50
+    );
+    database.close().await;
+}
+
+#[tokio::test]
 async fn model_pin_is_scoped_aged_fenced_and_capture_does_not_pollute_requests() {
     let Some(database) = TestDatabase::create("model_turn_state").await else {
         return;
