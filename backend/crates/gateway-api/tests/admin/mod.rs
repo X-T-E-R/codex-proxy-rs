@@ -357,6 +357,12 @@ impl SettingsStore for MemorySettingsStore {
             refresh_concurrency: command.refresh_concurrency,
             max_concurrent_per_account: command.max_concurrent_per_account,
             request_interval_ms: command.request_interval_ms,
+            capacity_queue_retry_seconds: command
+                .capacity_queue_retry_seconds
+                .unwrap_or(settings.capacity_queue_retry_seconds),
+            capacity_queue_timeout_seconds: command
+                .capacity_queue_timeout_seconds
+                .unwrap_or(settings.capacity_queue_timeout_seconds),
             rotation_strategy: command.rotation_strategy,
             min_codex_desktop_version: command.min_codex_desktop_version,
             min_codex_cli_version: command.min_codex_cli_version,
@@ -1147,6 +1153,8 @@ fn test_runtime_settings() -> RuntimeSettings {
         refresh_concurrency: 2,
         max_concurrent_per_account: 3,
         request_interval_ms: 50,
+        capacity_queue_retry_seconds: 3,
+        capacity_queue_timeout_seconds: 60,
         rotation_strategy: RotationStrategy::Smart,
         min_codex_desktop_version: None,
         min_codex_cli_version: None,

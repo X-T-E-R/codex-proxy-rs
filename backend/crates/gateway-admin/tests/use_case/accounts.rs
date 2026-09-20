@@ -884,6 +884,8 @@ impl SettingsStore for StaticSettingsStore {
             refresh_concurrency: 2,
             max_concurrent_per_account: 1,
             request_interval_ms: 0,
+            capacity_queue_retry_seconds: 3,
+            capacity_queue_timeout_seconds: 60,
             rotation_strategy: RotationStrategy::Smart,
             min_codex_desktop_version: None,
             min_codex_cli_version: None,
@@ -1312,6 +1314,7 @@ async fn accounts_update_should_commit_then_release_disabled_account_and_publish
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: Vec::new(),
+                model_access: None,
             },
         )
         .await
@@ -1349,6 +1352,7 @@ async fn accounts_update_should_not_notify_provider_when_store_commit_fails() {
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: Vec::new(),
+                model_access: None,
             },
         )
         .await
@@ -2227,6 +2231,7 @@ pub(super) fn account_record(kind: &str) -> AccountRecord {
         enabled: true,
         concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
+        model_access: gateway_core::account::AccountModelAccess::All,
         credential_state: CredentialState::Ready,
         credential_observed_at: now,
         quota: QuotaState::allowed(now.into()),

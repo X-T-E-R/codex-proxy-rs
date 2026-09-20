@@ -26,6 +26,8 @@ pub struct RuntimeSettings {
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
     pub request_interval_ms: u64,
+    pub capacity_queue_retry_seconds: u32,
+    pub capacity_queue_timeout_seconds: u32,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
@@ -66,6 +68,14 @@ impl fmt::Debug for RuntimeSettings {
                 &self.max_concurrent_per_account,
             )
             .field("request_interval_ms", &self.request_interval_ms)
+            .field(
+                "capacity_queue_retry_seconds",
+                &self.capacity_queue_retry_seconds,
+            )
+            .field(
+                "capacity_queue_timeout_seconds",
+                &self.capacity_queue_timeout_seconds,
+            )
             .field("rotation_strategy", &self.rotation_strategy)
             .field("model_mappings", &self.model_mappings)
             .field("min_codex_desktop_version", &self.min_codex_desktop_version)
@@ -117,6 +127,8 @@ pub struct RuntimeSettingsUpdate {
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
     pub request_interval_ms: u64,
+    pub capacity_queue_retry_seconds: Option<u32>,
+    pub capacity_queue_timeout_seconds: Option<u32>,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
@@ -156,9 +168,18 @@ impl fmt::Debug for RuntimeSettingsUpdate {
 
 impl RuntimeSettingsUpdate {
     pub fn validate(&self) -> StoreResult<()> {
+        let valid_capacity_queue = match (
+            self.capacity_queue_retry_seconds,
+            self.capacity_queue_timeout_seconds,
+        ) {
+            (None, None) => true,
+            (Some(retry), Some(timeout)) => retry > 0 && timeout >= retry,
+            _ => false,
+        };
         if self.refresh_margin_seconds == 0
             || self.refresh_concurrency == 0
             || self.max_concurrent_per_account == 0
+            || !valid_capacity_queue
             || self.usage_retention_days < 31
             || self.ops_event_retention_days == 0
             || self.audit_retention_days == 0
@@ -245,6 +266,7 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
     let row = sqlx::query_as::<_, RuntimeSettingsRow>(
             "select config_revision, admin_api_key, refresh_margin_seconds,
                     refresh_concurrency, max_concurrent_per_account, request_interval_ms,
+                    capacity_queue_retry_seconds, capacity_queue_timeout_seconds,
                     rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
                     min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
@@ -343,6 +365,7 @@ pub(crate) async fn load_runtime_settings_in_transaction(
     let row = sqlx::query_as::<_, RuntimeSettingsRow>(
         "select config_revision, admin_api_key, refresh_margin_seconds,
                 refresh_concurrency, max_concurrent_per_account, request_interval_ms,
+                capacity_queue_retry_seconds, capacity_queue_timeout_seconds,
                 rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
                 min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
@@ -414,6 +437,8 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 openai_request_body_override_enabled = coalesce($24, openai_request_body_override_enabled),
 	                 openai_request_timezone = coalesce($25, openai_request_timezone),
 	                 openai_search_country = coalesce($26, openai_search_country),
+	                 capacity_queue_retry_seconds = coalesce($27, capacity_queue_retry_seconds),
+	                 capacity_queue_timeout_seconds = coalesce($28, capacity_queue_timeout_seconds),
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -444,6 +469,8 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(update.openai_request_body_override_enabled)
     .bind(openai_request_timezone.as_deref())
     .bind(openai_search_country.as_deref())
+    .bind(update.capacity_queue_retry_seconds.map(i64::from))
+    .bind(update.capacity_queue_timeout_seconds.map(i64::from))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -500,6 +527,8 @@ struct RuntimeSettingsRow {
     refresh_concurrency: i64,
     max_concurrent_per_account: i64,
     request_interval_ms: i64,
+    capacity_queue_retry_seconds: i64,
+    capacity_queue_timeout_seconds: i64,
     rotation_strategy: String,
     model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
     usage_retention_days: i64,
@@ -532,6 +561,8 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
         refresh_concurrency: to_u32(row.refresh_concurrency)?,
         max_concurrent_per_account: to_u32(row.max_concurrent_per_account)?,
         request_interval_ms: to_u64(row.request_interval_ms)?,
+        capacity_queue_retry_seconds: to_u32(row.capacity_queue_retry_seconds)?,
+        capacity_queue_timeout_seconds: to_u32(row.capacity_queue_timeout_seconds)?,
         rotation_strategy: row.rotation_strategy,
         model_mappings: row.model_mappings_json.0,
         usage_retention_days: to_u32(row.usage_retention_days)?,

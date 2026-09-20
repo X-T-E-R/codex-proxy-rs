@@ -255,7 +255,7 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 管理员显式清除该账号的本地错误/额度/cooldown 事实并重新启用，不访问上游 |
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 手工替换 OpenAI OAuth token |
-| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
+| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, allowedModels?, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组、模型白名单与出站代理 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled, concurrencyLimit, weight, groupIds, outboundProxyId?, outboundProxyUrl? }` | 一次事务统一更新所选账号的调度字段、完整分组集合与可选代理 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
@@ -268,6 +268,11 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 | `GET` | `/api/admin/accounts/connection-test` | `accountId`、`modelId` | 通过 SSE 返回实时连接测试事件，不作为业务 Responses 用量记录 |
 | `POST` | `/api/admin/accounts/oauth/start` | `{ provider, name, accountId?, outboundProxyId?, outboundProxyUrl? }` | 创建 OpenAI 或 xAI OAuth flow；`accountId` 表示重新授权 |
 | `POST` | `/api/admin/accounts/oauth/complete` | `{ provider, flowId, callbackUrl, settings? }` | 消费 OAuth callback；首次授权可附带账号设置，重新授权保留原设置 |
+
+账号列表的 `allowedModels` 为 `null | string[]`：`null` 表示该账号允许全部上游模型，非空数组表示只允许列出的
+上游模型 ID。账号更新省略 `allowedModels` 时保留当前设置，提交空数组时恢复“全部允许”，提交非空数组时原子
+替换白名单。普通 OpenAI/xAI 调度在目录与健康判定前应用该白名单；指定账号的管理端连接测试继续按诊断语义绕过
+本地模型限制。批量编辑当前不改模型白名单。
 
 模型 Turn State 统一兼容上游 HTTP/SSE 与 WebSocket。手动值支持 1–16384 个可打印 ASCII 字节；普通观测和自动捕获
 仍只接纳正好 292 字节的可打印 ASCII。官方客户端把该值用于
@@ -717,6 +722,8 @@ refreshMarginSeconds
 refreshConcurrency
 maxConcurrentPerAccount
 requestIntervalMs
+capacityQueueRetrySeconds
+capacityQueueTimeoutSeconds
 rotationStrategy
 minCodexDesktopVersion
 minCodexCliVersion
@@ -741,6 +748,19 @@ openaiSearchCountry
 
 `rotationStrategy` 可取 `smart`、`quota_reset_priority`、`round_robin`、`sticky`。
 两个 `minCodex*Version` 字段为 `string | null`，只设置最低版本，不存在最大版本字段。
+
+账号容量排队由以下字段控制：
+
+| 字段 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `capacityQueueRetrySeconds` | `3` | 所有符合模型、范围和健康约束的账号并发均已占满时，重新选择账号的间隔 |
+| `capacityQueueTimeoutSeconds` | `60` | 本次请求等待容量的总预算，必须不小于重试间隔 |
+
+排队只处理明确的并发满载；模型白名单不匹配、账号停用、额度耗尽、空账号范围等永久无资格状态立即返回原错误。
+等待受请求截止时间和客户端取消约束，超时仍返回容量不足。流式 HTTP 请求等待首个上游事件超过 15 秒时先提交
+`text/event-stream` 并发送 `: keep-alive` comment，之后继续同一次执行；若已提交后排队失败，错误通过
+`response.failed` 与 `[DONE]` 结束。非流式请求不会发送 heartbeat。两个字段可同时省略以兼容旧管理客户端，
+省略时保留当前已保存值。
 `wsPool*` 控制 OpenAI 上游 WebSocket 连接池，更新时五个字段均必填：
 
 | 字段 | 默认值 | 含义 |

@@ -1,5 +1,6 @@
 //! Provider 账号、明文 credential 与持久状态值对象。
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::time::{Duration, SystemTime};
@@ -7,6 +8,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Map, Value};
 
 use crate::identity::ProviderKind;
+use crate::routing::UpstreamModelId;
 use crate::validation::{IdentifierError, validate_text};
 
 use super::CredentialError;
@@ -55,6 +57,40 @@ impl AccountConcurrencyLimit {
     #[must_use]
     pub const fn into_non_zero(self) -> NonZeroU32 {
         self.0
+    }
+}
+
+/// 账号允许参与调度的上游模型集合；`All` 保持历史默认行为。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AccountModelAccess {
+    #[default]
+    All,
+    Only(BTreeSet<UpstreamModelId>),
+}
+
+impl AccountModelAccess {
+    /// 构造非空模型白名单；空集合没有稳定语义，由调用方显式使用 [`Self::All`]。
+    #[must_use]
+    pub fn only(models: impl IntoIterator<Item = UpstreamModelId>) -> Option<Self> {
+        let models = models.into_iter().collect::<BTreeSet<_>>();
+        (!models.is_empty()).then_some(Self::Only(models))
+    }
+
+    #[must_use]
+    pub fn permits(&self, upstream_model: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(models) => models.iter().any(|model| model.as_str() == upstream_model),
+        }
+    }
+
+    /// `None` 表示全部模型，`Some` 始终为非空且按 ID 稳定排序。
+    #[must_use]
+    pub const fn allowed_models(&self) -> Option<&BTreeSet<UpstreamModelId>> {
+        match self {
+            Self::All => None,
+            Self::Only(models) => Some(models),
+        }
     }
 }
 
@@ -689,6 +725,7 @@ pub struct ProviderAccount {
     enabled: bool,
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
+    model_access: AccountModelAccess,
     credential_state: CredentialState,
     quota: QuotaState,
     last_error_reason: Option<AccountErrorReason>,
@@ -725,6 +762,7 @@ impl ProviderAccount {
             enabled: true,
             concurrency_limit: None,
             weight: AccountWeight::DEFAULT,
+            model_access: AccountModelAccess::All,
             credential_state: CredentialState::Unknown,
             quota: QuotaState::unknown(),
             last_error_reason: None,
@@ -789,6 +827,12 @@ impl ProviderAccount {
     ) -> Self {
         self.concurrency_limit = concurrency_limit;
         self.weight = weight;
+        self
+    }
+
+    #[must_use]
+    pub fn with_model_access(mut self, model_access: AccountModelAccess) -> Self {
+        self.model_access = model_access;
         self
     }
 
@@ -899,6 +943,16 @@ impl ProviderAccount {
     #[must_use]
     pub const fn weight(&self) -> AccountWeight {
         self.weight
+    }
+
+    #[must_use]
+    pub const fn model_access(&self) -> &AccountModelAccess {
+        &self.model_access
+    }
+
+    #[must_use]
+    pub fn permits_model(&self, upstream_model: &str) -> bool {
+        self.model_access.permits(upstream_model)
     }
 
     #[must_use]

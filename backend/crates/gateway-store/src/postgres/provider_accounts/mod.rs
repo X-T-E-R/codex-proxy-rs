@@ -30,8 +30,8 @@ use gateway_admin::{
     ports::store::{AccountStore, AdminStoreError, AdminStoreErrorKind, AdminStoreResult},
 };
 use gateway_core::account::{
-    AccountConcurrencyLimit, AccountErrorReason, AccountStateChange, AccountWeight,
-    CredentialCasOutcome, CredentialCasUpdate, CredentialCasUpdateParts,
+    AccountConcurrencyLimit, AccountErrorReason, AccountModelAccess, AccountStateChange,
+    AccountWeight, CredentialCasOutcome, CredentialCasUpdate, CredentialCasUpdateParts,
     CredentialRevision as CoreCredentialRevision, CredentialState, LoadedCredential,
     NewProviderAccount as CoreNewProviderAccount, OpaqueProviderData, PlaintextCredential,
     ProviderAccount as CoreProviderAccount, ProviderAccountId as CoreProviderAccountId,
@@ -41,7 +41,7 @@ use gateway_core::account::{
     QuotaEvidence, QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
 };
 use gateway_core::error::{StoreError as CoreStoreError, StoreErrorKind as CoreStoreErrorKind};
-use gateway_core::routing::{AccountGroupId, ProviderKind};
+use gateway_core::routing::{AccountGroupId, ProviderKind, UpstreamModelId};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::{

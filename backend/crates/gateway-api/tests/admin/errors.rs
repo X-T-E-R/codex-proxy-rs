@@ -523,6 +523,7 @@ mod provider {
                 enabled: facts.enabled,
                 concurrency_limit: None,
                 weight: AccountWeight::default(),
+                model_access: gateway_core::account::AccountModelAccess::All,
                 outbound_proxy: None,
                 credential_state: facts.credential_state,
                 credential_observed_at: now,

@@ -117,6 +117,14 @@ fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError>
     let valid = command.refresh_margin_seconds > 0
         && command.refresh_concurrency > 0
         && command.max_concurrent_per_account > 0
+        && match (
+            command.capacity_queue_retry_seconds,
+            command.capacity_queue_timeout_seconds,
+        ) {
+            (None, None) => true,
+            (Some(retry), Some(timeout)) => retry > 0 && timeout >= retry,
+            _ => false,
+        }
         && command.usage_retention_days >= 31
         && command.ops_event_retention_days > 0
         && command.audit_retention_days > 0

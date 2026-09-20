@@ -130,6 +130,7 @@ export interface Account {
   enabled: boolean
   concurrencyLimit: number | null
   weight: number
+  allowedModels: string[] | null
   accessTokenExpiresAt: string | null
   accessTokenExpiresAtDisplay: string | null
   refreshTokenExpiresAt: string | null
@@ -479,6 +480,7 @@ interface AccountUpdateParam {
   concurrencyLimit: number | null
   weight: number
   groupIds: string[]
+  allowedModels?: string[]
 }
 
 interface AccountBatchUpdateParam {

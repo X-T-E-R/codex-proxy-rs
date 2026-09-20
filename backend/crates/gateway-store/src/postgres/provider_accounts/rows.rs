@@ -7,6 +7,7 @@ pub(crate) const ENTITY: &str = "provider account";
 pub(crate) const CREDENTIALS_MAX_BYTES: usize = 256 * 1024;
 pub(crate) const QUOTA_MAX_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_ADMIN_IMPORT_BATCH: usize = 200;
+pub(crate) const MAX_ALLOWED_MODELS: usize = 512;
 pub(crate) const ADMIN_USAGE_CHUNK_SIZE: usize = 200;
 
 /// 四种窗口投影通过一组 `GROUPING SETS` 从同一批匹配请求派生。`grouping_* = 1`
@@ -137,6 +138,7 @@ pub struct ProviderAccountSummary {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub model_access: AccountModelAccess,
     pub credential_state: CredentialState,
     pub credential_observed_at: DateTime<Utc>,
     pub quota: QuotaState,
@@ -321,6 +323,7 @@ pub struct BatchUpdateProviderAccountsAdmin {
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
     pub group_ids: Vec<AccountGroupId>,
+    pub model_access: Option<AccountModelAccess>,
     pub audit: AdminAuditEvent,
 }
 
@@ -383,7 +386,7 @@ impl ProviderAccountStateUpdate {
 
 pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision, identity_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, allowed_models, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -391,7 +394,7 @@ pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_url, id, provider
 
 pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision, identity_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, allowed_models, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -401,7 +404,7 @@ pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_url, id, p
 
 pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision, identity_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, allowed_models, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -478,6 +481,7 @@ pub(crate) fn core_account_from_summary(
         summary.last_error_message,
     )
     .with_scheduling(summary.concurrency_limit, summary.weight)
+    .with_model_access(summary.model_access)
     .with_outbound_proxy(summary.outbound_proxy)
     .with_refresh_schedule(
         summary.has_refresh_token,
@@ -536,6 +540,7 @@ pub(crate) fn account_summary_from_row(
         .ok()
         .and_then(AccountWeight::new)
         .ok_or_else(|| invalid("invalid weight"))?;
+    let model_access = parse_model_access(get::<Option<Vec<String>>>(&row, "allowed_models")?)?;
     Ok(ProviderAccountSummary {
         outbound_proxy: get::<Option<String>>(&row, "outbound_proxy_url")?
             .map(|url| {
@@ -562,6 +567,7 @@ pub(crate) fn account_summary_from_row(
         enabled: get(&row, "enabled")?,
         concurrency_limit,
         weight,
+        model_access,
         credential_state: parse_credential_state(&credential_state)?,
         credential_observed_at: get(&row, "credential_observed_at")?,
         quota,
@@ -570,6 +576,26 @@ pub(crate) fn account_summary_from_row(
         created_at: get(&row, "created_at")?,
         updated_at: get(&row, "updated_at")?,
     })
+}
+
+fn parse_model_access(models: Option<Vec<String>>) -> StoreResult<AccountModelAccess> {
+    let Some(models) = models else {
+        return Ok(AccountModelAccess::All);
+    };
+    if models.is_empty() || models.len() > MAX_ALLOWED_MODELS {
+        return Err(invalid("invalid allowed_models"));
+    }
+    let original_len = models.len();
+    let models = models
+        .into_iter()
+        .map(|model| UpstreamModelId::new(model).map_err(|_| invalid("invalid allowed_models")))
+        .collect::<StoreResult<Vec<_>>>()?;
+    let access =
+        AccountModelAccess::only(models).ok_or_else(|| invalid("invalid allowed_models"))?;
+    if access.allowed_models().map_or(0, BTreeSet::len) != original_len {
+        return Err(invalid("duplicate allowed_models"));
+    }
+    Ok(access)
 }
 
 pub(crate) fn get<'r, T>(row: &'r sqlx::postgres::PgRow, column: &'static str) -> StoreResult<T>

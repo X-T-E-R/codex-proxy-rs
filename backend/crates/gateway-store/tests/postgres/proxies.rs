@@ -39,6 +39,7 @@ fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
         concurrency_limit: None,
         weight: AccountWeight::DEFAULT,
         group_ids: vec![],
+        model_access: None,
         outbound_proxy: Some(selection),
     }
 }

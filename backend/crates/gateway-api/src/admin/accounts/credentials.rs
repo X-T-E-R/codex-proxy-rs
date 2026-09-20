@@ -205,6 +205,9 @@ pub struct UpdateAccountRequest {
     pub concurrency_limit: Option<u64>,
     pub weight: u64,
     pub group_ids: Vec<String>,
+    /// 省略时保留；空数组恢复全部模型；非空数组替换账号白名单。
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
 }
 
 impl UpdateAccountRequest {
@@ -213,6 +216,7 @@ impl UpdateAccountRequest {
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
+        parse_model_access_update(self.allowed_models.clone())?;
         Ok(())
     }
 
@@ -228,8 +232,36 @@ impl UpdateAccountRequest {
             concurrency_limit: parse_concurrency_limit(self.concurrency_limit)?,
             weight: parse_account_weight(self.weight)?,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
+            model_access: parse_model_access_update(self.allowed_models)?,
         })
     }
+}
+
+fn parse_model_access_update(
+    models: Option<Vec<String>>,
+) -> Result<Option<AccountModelAccess>, WireValidationError> {
+    let Some(models) = models else {
+        return Ok(None);
+    };
+    if models.is_empty() {
+        return Ok(Some(AccountModelAccess::All));
+    }
+    if models.len() > 512 {
+        return Err(WireValidationError::new("allowedModels"));
+    }
+    let original_len = models.len();
+    let parsed = models
+        .into_iter()
+        .map(|model| {
+            UpstreamModelId::new(model).map_err(|_| WireValidationError::new("allowedModels"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let access = AccountModelAccess::only(parsed)
+        .ok_or_else(|| WireValidationError::new("allowedModels"))?;
+    if access.allowed_models().map_or(0, BTreeSet::len) != original_len {
+        return Err(WireValidationError::new("allowedModels"));
+    }
+    Ok(Some(access))
 }
 
 #[derive(Debug, Clone, Serialize)]

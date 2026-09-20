@@ -761,6 +761,8 @@ impl SettingsStore for FixtureSettingsStore {
             refresh_concurrency: 2,
             max_concurrent_per_account: 1,
             request_interval_ms: 0,
+            capacity_queue_retry_seconds: 3,
+            capacity_queue_timeout_seconds: 60,
             rotation_strategy: RotationStrategy::Smart,
             min_codex_desktop_version: None,
             min_codex_cli_version: None,

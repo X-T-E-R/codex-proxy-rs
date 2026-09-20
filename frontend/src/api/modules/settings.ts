@@ -8,6 +8,8 @@ export interface RuntimeSettings {
   refreshConcurrency: number
   maxConcurrentPerAccount: number
   requestIntervalMs: number
+  capacityQueueRetrySeconds: number
+  capacityQueueTimeoutSeconds: number
   rotationStrategy: RotationStrategy
   minCodexDesktopVersion: string | null
   minCodexCliVersion: string | null

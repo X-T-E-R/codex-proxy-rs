@@ -20,9 +20,10 @@ use gateway_admin::model::{
     AdminError as AdminServiceError, PageSize,
     accounts::{
         AccountConcurrencyLimit, AccountConnectionTestEvent as DomainConnectionTestEvent,
-        AccountCost, AccountGroupFilter, AccountListQuery, AccountModelUsage, AccountSort,
-        AccountSortField, AccountStatus as DomainAccountStatus, AccountUpdateResult, AccountUsage,
-        AccountWeight, AccountsUpdateResult, BatchUpdateAccounts, SortDirection, UpdateAccount,
+        AccountCost, AccountGroupFilter, AccountListQuery, AccountModelAccess, AccountModelUsage,
+        AccountSort, AccountSortField, AccountStatus as DomainAccountStatus, AccountUpdateResult,
+        AccountUsage, AccountWeight, AccountsUpdateResult, BatchUpdateAccounts, SortDirection,
+        UpdateAccount,
     },
     provider_credentials::{
         AccountDirectoryItem, AccountDirectoryPage, AccountExportBundle, AccountRefreshResult,

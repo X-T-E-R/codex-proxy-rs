@@ -2022,6 +2022,7 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         enabled: account.enabled(),
         concurrency_limit: account.concurrency_limit(),
         weight: account.weight(),
+        model_access: account.model_access().clone(),
         credential_state: account.credential_state(),
         credential_observed_at: now,
         quota: account.quota(),

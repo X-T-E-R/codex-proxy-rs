@@ -24,6 +24,8 @@ pub struct SnapshotRuntimeSettings {
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
     pub request_interval_ms: u64,
+    pub capacity_queue_retry_seconds: u32,
+    pub capacity_queue_timeout_seconds: u32,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
     pub min_codex_desktop_version: Option<String>,
@@ -161,6 +163,10 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
             .with_cyber_session_block(
                 data.settings.cyber_session_block_enabled,
                 data.settings.cyber_session_block_ttl_seconds,
+            )
+            .with_capacity_queue(
+                data.settings.capacity_queue_retry_seconds,
+                data.settings.capacity_queue_timeout_seconds,
             );
             let client_policies = data
                 .client_api_keys
@@ -238,6 +244,8 @@ async fn load_settings(
             i64,
             i64,
             i64,
+            i64,
+            i64,
             String,
             sqlx::types::Json<BTreeMap<String, String>>,
             Option<String>,
@@ -250,7 +258,8 @@ async fn load_settings(
         ),
     >(
         "select config_revision, refresh_margin_seconds, refresh_concurrency,
-                max_concurrent_per_account, request_interval_ms, rotation_strategy,
+                max_concurrent_per_account, request_interval_ms,
+                capacity_queue_retry_seconds, capacity_queue_timeout_seconds, rotation_strategy,
                 model_mappings_json, min_codex_desktop_version,
                 min_codex_cli_version, overload_cooldown_enabled,
                 overload_cooldown_threshold, overload_cooldown_seconds,
@@ -271,15 +280,17 @@ async fn load_settings(
             refresh_concurrency: to_u32(row.2)?,
             max_concurrent_per_account: to_u32(row.3)?,
             request_interval_ms: to_u64(row.4)?,
-            rotation_strategy: row.5,
-            model_mappings: row.6.0,
-            min_codex_desktop_version: row.7,
-            min_codex_cli_version: row.8,
-            overload_cooldown_enabled: row.9,
-            overload_cooldown_threshold: to_u32(row.10)?,
-            overload_cooldown_seconds: to_u32(row.11)?,
-            cyber_session_block_enabled: row.12,
-            cyber_session_block_ttl_seconds: to_u32(row.13)?,
+            capacity_queue_retry_seconds: to_u32(row.5)?,
+            capacity_queue_timeout_seconds: to_u32(row.6)?,
+            rotation_strategy: row.7,
+            model_mappings: row.8.0,
+            min_codex_desktop_version: row.9,
+            min_codex_cli_version: row.10,
+            overload_cooldown_enabled: row.11,
+            overload_cooldown_threshold: to_u32(row.12)?,
+            overload_cooldown_seconds: to_u32(row.13)?,
+            cyber_session_block_enabled: row.14,
+            cyber_session_block_ttl_seconds: to_u32(row.15)?,
         },
     ))
 }

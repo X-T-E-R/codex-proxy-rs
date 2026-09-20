@@ -102,6 +102,12 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
         enabled: account.enabled,
         concurrency_limit: account.concurrency_limit.map(|limit| limit.get()),
         weight: account.weight.get(),
+        allowed_models: account.model_access.allowed_models().map(|models| {
+            models
+                .iter()
+                .map(|model| model.as_str().to_owned())
+                .collect()
+        }),
         outbound_proxy_endpoint: account
             .outbound_proxy
             .as_ref()

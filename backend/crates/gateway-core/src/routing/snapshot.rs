@@ -38,6 +38,8 @@ pub struct SnapshotSettingsFacts {
     overload_cooldown_seconds: u32,
     cyber_session_block_enabled: bool,
     cyber_session_block_ttl_seconds: u32,
+    capacity_queue_retry_seconds: u32,
+    capacity_queue_timeout_seconds: u32,
 }
 
 impl SnapshotSettingsFacts {
@@ -62,6 +64,8 @@ impl SnapshotSettingsFacts {
             overload_cooldown_seconds: 120,
             cyber_session_block_enabled: false,
             cyber_session_block_ttl_seconds: 3600,
+            capacity_queue_retry_seconds: 3,
+            capacity_queue_timeout_seconds: 60,
         }
     }
 
@@ -82,6 +86,13 @@ impl SnapshotSettingsFacts {
     pub const fn with_cyber_session_block(mut self, enabled: bool, ttl_seconds: u32) -> Self {
         self.cyber_session_block_enabled = enabled;
         self.cyber_session_block_ttl_seconds = ttl_seconds;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_capacity_queue(mut self, retry_seconds: u32, timeout_seconds: u32) -> Self {
+        self.capacity_queue_retry_seconds = retry_seconds;
+        self.capacity_queue_timeout_seconds = timeout_seconds;
         self
     }
 }
@@ -391,6 +402,12 @@ async fn compile_runtime_snapshot(
         .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
     let cyber_session_ttl = NonZeroU32::new(facts.settings.cyber_session_block_ttl_seconds)
         .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
+    if facts.settings.capacity_queue_retry_seconds == 0
+        || facts.settings.capacity_queue_timeout_seconds
+            < facts.settings.capacity_queue_retry_seconds
+    {
+        return Err(RuntimeSnapshotCompileError::InvalidData);
+    }
     let selection_policy = AccountSelectionPolicy::new(
         rotation_strategy,
         NonZeroU32::new(facts.settings.max_concurrent_per_account)
@@ -402,6 +419,10 @@ async fn compile_runtime_snapshot(
             .settings
             .overload_cooldown_enabled
             .then_some((overload_threshold, overload_seconds)),
+    )
+    .with_capacity_queue(
+        Duration::from_secs(u64::from(facts.settings.capacity_queue_retry_seconds)),
+        Duration::from_secs(u64::from(facts.settings.capacity_queue_timeout_seconds)),
     );
     let mut client_policies = Vec::with_capacity(facts.client_policies.len());
     for policy in facts.client_policies {

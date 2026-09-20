@@ -14,10 +14,10 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use futures::{StreamExt, stream};
+use futures::{StreamExt, future::BoxFuture, stream};
 use gateway_core::diagnostics::TraceContext;
 use gateway_core::engine::execution::{ClientTransport, ExecutionSession, StartedExecution};
-use gateway_core::engine::{CommitRequirement, EngineError};
+use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError};
 use gateway_core::error::{GatewayError, GatewayErrorKind};
 use gateway_core::event::{ProviderEvent, ProviderResponseHeader};
 use gateway_core::lifecycle::ConnectionGuard;
@@ -295,11 +295,40 @@ pub async fn stream_execution_response(
     session: Box<dyn ExecutionSession>,
     connection_guard: Option<Box<dyn ConnectionGuard>>,
 ) -> Response {
-    let mut execution = PendingExecution::new(session);
-    let Some(session) = execution.session_mut() else {
-        return internal_gateway_response("gateway response session is unavailable");
+    let mut opening = open_first_event(PendingExecution::new(session));
+    let opening_result = tokio::time::timeout(SSE_KEEPALIVE_INTERVAL, opening.as_mut()).await;
+    let Ok((execution, first)) = opening_result else {
+        let state = OpeningResponsesStreamState::new(opening, connection_guard);
+        let output = opening_stream(state);
+        return event_stream_response(keepalive_body(output), &[]);
     };
-    let first = match session.next_event().await {
+    finish_stream_opening(execution, first, connection_guard).await
+}
+
+type OpeningExecutionFuture = BoxFuture<
+    'static,
+    (
+        PendingExecution,
+        Result<Option<CoordinatedEvent>, EngineError>,
+    ),
+>;
+
+fn open_first_event(mut execution: PendingExecution) -> OpeningExecutionFuture {
+    Box::pin(async move {
+        let result = match execution.session_mut() {
+            Some(session) => session.next_event().await,
+            None => Err(EngineError::InvalidDeliveryState),
+        };
+        (execution, result)
+    })
+}
+
+async fn finish_stream_opening(
+    mut execution: PendingExecution,
+    first: Result<Option<CoordinatedEvent>, EngineError>,
+    connection_guard: Option<Box<dyn ConnectionGuard>>,
+) -> Response {
+    let first = match first {
         Ok(Some(event)) => event,
         Ok(None) => {
             let response = gateway_error_response(&GatewayError::new(
@@ -311,11 +340,22 @@ pub async fn stream_execution_response(
             return response;
         }
         Err(error) => {
-            let response_headers = session.response_headers().to_vec();
+            let response_headers = execution
+                .session_mut()
+                .map(|session| session.response_headers().to_vec())
+                .unwrap_or_default();
             let response = engine_error_response_with_headers(&error, &response_headers);
             return execution.record_response_status(response).await;
         }
     };
+    finish_stream_opening_with_first(execution, first, connection_guard).await
+}
+
+async fn finish_stream_opening_with_first(
+    mut execution: PendingExecution,
+    first: CoordinatedEvent,
+    connection_guard: Option<Box<dyn ConnectionGuard>>,
+) -> Response {
     let first_requirement = first.commit_requirement();
     let first_events = first.into_provider_events();
     if first_requirement != CommitRequirement::CommitBeforeDelivery {
@@ -369,7 +409,16 @@ pub async fn stream_execution_response(
     }));
     // 保活只轮询已固定的输出 stream；不能取消并重建 advance/next_event future，
     // 否则一次心跳就可能丢失正在等待的上游事件或执行终态清理。
-    let body = Body::from_stream(stream::unfold(output, |mut output| async move {
+    let body = keepalive_body(output);
+    event_stream_response(body, &response_headers)
+}
+
+fn keepalive_body<S>(output: S) -> Body
+where
+    S: futures::Stream<Item = Result<Bytes, Infallible>> + Send + 'static,
+{
+    let output = Box::pin(output);
+    Body::from_stream(stream::unfold(output, |mut output| async move {
         let chunk = tokio::select! {
             biased;
             chunk = output.next() => chunk?,
@@ -378,8 +427,7 @@ pub async fn stream_execution_response(
             }
         };
         Some((chunk, output))
-    }));
-    event_stream_response(body, &response_headers)
+    }))
 }
 
 fn event_stream_response(body: Body, response_headers: &[ProviderResponseHeader]) -> Response {
@@ -464,6 +512,181 @@ impl Drop for PendingExecution {
         session.cancel();
         detach_finalize(session);
     }
+}
+
+struct OpeningResponsesStreamState {
+    opening: Option<OpeningExecutionFuture>,
+    active: Option<ResponsesStreamState>,
+    pending: VecDeque<Bytes>,
+    output_finished: bool,
+    connection_guard: Option<Box<dyn ConnectionGuard>>,
+}
+
+impl OpeningResponsesStreamState {
+    fn new(
+        opening: OpeningExecutionFuture,
+        connection_guard: Option<Box<dyn ConnectionGuard>>,
+    ) -> Self {
+        Self {
+            opening: Some(opening),
+            active: None,
+            pending: VecDeque::from([Bytes::from_static(b": keep-alive\n\n")]),
+            output_finished: false,
+            connection_guard,
+        }
+    }
+
+    async fn advance(&mut self) {
+        if let Some(active) = self.active.as_mut() {
+            active.advance().await;
+            return;
+        }
+        let Some(opening) = self.opening.take() else {
+            self.finish_with_gateway_error(GatewayError::new(
+                GatewayErrorKind::Internal,
+                "gateway response opening state is unavailable",
+            ));
+            return;
+        };
+        let (mut execution, result) = opening.await;
+        let first = match result {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                self.fail_opening(
+                    execution,
+                    GatewayError::new(
+                        GatewayErrorKind::Internal,
+                        "gateway response ended before its first event",
+                    ),
+                )
+                .await;
+                return;
+            }
+            Err(error) => {
+                self.fail_opening(execution, gateway_error_from_engine(&error))
+                    .await;
+                return;
+            }
+        };
+        if first.commit_requirement() != CommitRequirement::CommitBeforeDelivery {
+            self.fail_opening(
+                execution,
+                GatewayError::new(
+                    GatewayErrorKind::Internal,
+                    "gateway first event did not require commit",
+                ),
+            )
+            .await;
+            return;
+        }
+        let mut encoder = OpenAiResponsesEncoder::new();
+        let mut frames = Vec::new();
+        for event in first.into_provider_events() {
+            frames.extend(encoder.push_sse(&event));
+        }
+        if frames.is_empty() {
+            self.fail_opening(
+                execution,
+                GatewayError::new(
+                    GatewayErrorKind::Internal,
+                    "gateway commit batch encoded no output",
+                ),
+            )
+            .await;
+            return;
+        }
+        let Some(session) = execution.session_mut() else {
+            self.finish_with_gateway_error(GatewayError::new(
+                GatewayErrorKind::Internal,
+                "gateway response session is unavailable",
+            ));
+            return;
+        };
+        let delayed_header_count = session.response_headers().len();
+        if let Err(error) = session
+            .commit_downstream(Some(StatusCode::OK.as_u16()))
+            .await
+        {
+            execution.cancel_and_finalize().await;
+            self.finish_with_gateway_error(gateway_error_from_engine(&error));
+            return;
+        }
+        let Some(session) = execution.into_session() else {
+            self.finish_with_gateway_error(GatewayError::new(
+                GatewayErrorKind::Internal,
+                "gateway response session is unavailable",
+            ));
+            return;
+        };
+        if delayed_header_count > 0 {
+            session.trace().record(
+                "downstream.headers.after_keepalive",
+                serde_json::json!({"count": delayed_header_count}),
+            );
+        }
+        let mut active =
+            ResponsesStreamState::new(session, encoder, frames, self.connection_guard.take());
+        if active.encoder.is_completed() {
+            active.finish_completed(Vec::new()).await;
+        }
+        self.active = Some(active);
+    }
+
+    async fn fail_opening(&mut self, mut execution: PendingExecution, error: GatewayError) {
+        let _ = record_committed_stream_status(&mut execution).await;
+        execution.cancel_and_finalize().await;
+        self.finish_with_gateway_error(error);
+    }
+
+    fn finish_with_gateway_error(&mut self, error: GatewayError) {
+        let encoder = OpenAiResponsesEncoder::new();
+        let (_, default_type, default_code) = gateway_error_contract(error.kind());
+        self.pending
+            .push_back(Bytes::from(response_failed_sse_event_with_id(
+                encoder.response_id(),
+                error.client_error_type().unwrap_or(default_type),
+                error.client_error_code().unwrap_or(default_code),
+                error.client_message(),
+            )));
+        self.pending
+            .push_back(Bytes::from_static(DONE_SSE_FRAME.as_bytes()));
+        self.output_finished = true;
+    }
+}
+
+async fn record_committed_stream_status(execution: &mut PendingExecution) -> Result<(), ()> {
+    let Some(session) = execution.session_mut() else {
+        return Err(());
+    };
+    session
+        .record_client_status(StatusCode::OK.as_u16())
+        .await
+        .map_err(|_| ())
+}
+
+fn opening_stream(
+    state: OpeningResponsesStreamState,
+) -> impl futures::Stream<Item = Result<Bytes, Infallible>> + Send + 'static {
+    stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(chunk) = state.pending.pop_front() {
+                return Some((Ok(chunk), state));
+            }
+            if let Some(active) = state.active.as_mut() {
+                if let Some(chunk) = active.pending.pop_front() {
+                    active.trace.dump("downstream.chunk", &chunk);
+                    active.handed_off_bytes += chunk.len() as u64;
+                    return Some((Ok(chunk), state));
+                }
+                if active.output_finished {
+                    return None;
+                }
+            } else if state.output_finished {
+                return None;
+            }
+            state.advance().await;
+        }
+    })
 }
 
 struct ResponsesStreamState {

@@ -23,13 +23,13 @@ use gateway_admin::{
     ports::store::AccountStore,
 };
 use gateway_core::account::{
-    AccountErrorReason, AccountStateChange, CredentialCasOutcome, CredentialCasUpdate,
-    CredentialRevision, CredentialState, OpaqueProviderData, PlaintextCredential,
-    ProviderAccountId, ProviderAccountIdentity, ProviderAccountStore, ProviderAccountUpdate,
-    ProviderRefreshQuery, QuotaAccessChange, QuotaAccessState, QuotaEvidence, QuotaObservation,
-    QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
+    AccountErrorReason, AccountModelAccess, AccountStateChange, CredentialCasOutcome,
+    CredentialCasUpdate, CredentialRevision, CredentialState, OpaqueProviderData,
+    PlaintextCredential, ProviderAccountId, ProviderAccountIdentity, ProviderAccountStore,
+    ProviderAccountUpdate, ProviderRefreshQuery, QuotaAccessChange, QuotaAccessState,
+    QuotaEvidence, QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
 };
-use gateway_core::routing::{AccountGroupId, ProviderKind};
+use gateway_core::routing::{AccountGroupId, ProviderKind, UpstreamModelId};
 use gateway_store::{
     ConflictKind, JsonObject, Revision, StoreError,
     postgres::{
@@ -1053,6 +1053,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: Vec::new(),
+                model_access: None,
             },
             &context,
         )
@@ -1131,6 +1132,7 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
         concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
         group_ids: vec![],
+        model_access: None,
         outbound_proxy: None,
     };
     store
@@ -2079,6 +2081,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
             concurrency_limit: None,
             weight: gateway_core::account::AccountWeight::DEFAULT,
             group_ids: Vec::new(),
+            model_access: None,
             audit: audit("audit_account_disable", "disable", "acct_admin_a"),
         })
         .await
@@ -2438,6 +2441,96 @@ async fn disabled_account_preserves_user_state_during_refresh_writes() {
     database.close().await;
 }
 
+#[tokio::test]
+async fn account_model_access_round_trips_and_can_return_to_all_models() {
+    let Some(database) = TestDatabase::create("account_model_access").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    repository
+        .insert_provider_account(account("acct_model_access", "user-model-access"))
+        .await
+        .expect("seed account");
+    let store = admin_account_store(&database.pool);
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "account-model-access".to_owned(),
+    };
+    let limited = AccountModelAccess::only([
+        UpstreamModelId::new("gpt-5.6-luna").expect("model"),
+        UpstreamModelId::new("gpt-5.6-sol").expect("model"),
+    ])
+    .expect("nonempty access");
+
+    store
+        .update_account(
+            UpdateAccount {
+                account_id: "acct_model_access".to_owned(),
+                enabled: true,
+                concurrency_limit: None,
+                weight: gateway_core::account::AccountWeight::DEFAULT,
+                group_ids: Vec::new(),
+                model_access: Some(limited.clone()),
+                outbound_proxy: None,
+            },
+            &context,
+        )
+        .await
+        .expect("limit account models");
+    let loaded = repository
+        .load_provider_account("acct_model_access")
+        .await
+        .expect("load account")
+        .expect("account");
+    assert_eq!(loaded.summary.model_access, limited);
+
+    store
+        .update_account(
+            UpdateAccount {
+                account_id: "acct_model_access".to_owned(),
+                enabled: true,
+                concurrency_limit: None,
+                weight: gateway_core::account::AccountWeight::new(2).expect("weight"),
+                group_ids: Vec::new(),
+                model_access: None,
+                outbound_proxy: None,
+            },
+            &context,
+        )
+        .await
+        .expect("preserve omitted model access");
+    let preserved = repository
+        .load_provider_account("acct_model_access")
+        .await
+        .expect("load preserved account")
+        .expect("account");
+    assert_eq!(preserved.summary.model_access, limited);
+
+    store
+        .update_account(
+            UpdateAccount {
+                account_id: "acct_model_access".to_owned(),
+                enabled: true,
+                concurrency_limit: None,
+                weight: gateway_core::account::AccountWeight::DEFAULT,
+                group_ids: Vec::new(),
+                model_access: Some(AccountModelAccess::All),
+                outbound_proxy: None,
+            },
+            &context,
+        )
+        .await
+        .expect("allow all account models");
+    let stored: Option<Vec<String>> =
+        sqlx::query_scalar("select allowed_models from provider_accounts where id = $1")
+            .bind("acct_model_access")
+            .fetch_one(&database.pool)
+            .await
+            .expect("load model access column");
+    assert!(stored.is_none());
+    database.close().await;
+}
+
 pub(super) fn account(id: &str, upstream_user_id: &str) -> NewProviderAccount {
     NewProviderAccount {
         outbound_proxy: None,
@@ -2644,6 +2737,7 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: vec![],
+                model_access: None,
                 outbound_proxy: Some(gateway_admin::model::proxies::AccountProxySelection::Url(
                     gateway_core::account::OutboundProxy::parse("http://127.0.0.1:18080").unwrap(),
                 )),

@@ -9,12 +9,12 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use gateway_core::account::{
-    AccountConcurrencyLimit, AccountErrorReason, AccountRuntimeSignals, AccountStateChange,
-    AccountWeight, CredentialCasOutcome, CredentialCasUpdate, CredentialCasUpdateParts,
-    CredentialRevision, CredentialState, LoadedCredential, NewProviderAccount, OpaqueProviderData,
-    ProviderAccount, ProviderAccountId, ProviderAccountStore, ProviderAccountUpdate,
-    ProviderRefreshQuery, QuotaAccessChange, QuotaObservation, QuotaObservationTouch, QuotaState,
-    QuotaWriteOutcome,
+    AccountConcurrencyLimit, AccountErrorReason, AccountModelAccess, AccountRuntimeSignals,
+    AccountStateChange, AccountWeight, CredentialCasOutcome, CredentialCasUpdate,
+    CredentialCasUpdateParts, CredentialRevision, CredentialState, LoadedCredential,
+    NewProviderAccount, OpaqueProviderData, ProviderAccount, ProviderAccountId,
+    ProviderAccountStore, ProviderAccountUpdate, ProviderRefreshQuery, QuotaAccessChange,
+    QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
 };
 use gateway_core::error::{StoreError, StoreErrorKind};
 use gateway_core::policy::ClientApiKeyId;
@@ -84,6 +84,13 @@ impl MemoryAccountStore {
             .account
             .clone()
             .with_scheduling(concurrency_limit, weight);
+    }
+
+    pub(crate) fn set_model_access(&self, id: &str, access: AccountModelAccess) {
+        let id = ProviderAccountId::new(id).expect("valid account ID");
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts.get_mut(&id).expect("seeded account");
+        stored.account = stored.account.clone().with_model_access(access);
     }
 
     pub(crate) fn quota_reads(&self) -> usize {
@@ -531,6 +538,7 @@ fn rebuild_account(current: &ProviderAccount, rebuild: AccountRebuild) -> Provid
         rebuild.last_error_message,
     )
     .with_scheduling(current.concurrency_limit(), current.weight())
+    .with_model_access(current.model_access().clone())
     .with_refresh_schedule(rebuild.has_refresh_token, rebuild.next_refresh_at)
 }
 
@@ -539,6 +547,7 @@ pub(crate) struct TestLeaseCoordinator {
     pub(crate) requests: Mutex<Vec<ProviderSchedulingLeaseRequest>>,
     pub(crate) busy: Mutex<bool>,
     pub(crate) busy_accounts: Mutex<BTreeSet<ProviderAccountId>>,
+    pub(crate) in_flight: Mutex<u32>,
     round_robin_cursor: Mutex<u64>,
 }
 
@@ -550,6 +559,7 @@ impl ProviderLeasePort for TestLeaseCoordinator {
         accounts: &'a [ProviderAccountId],
     ) -> BoxFuture<'a, Result<ProviderSchedulingState, ProviderStoreError>> {
         Box::pin(async move {
+            let in_flight = *self.in_flight.lock().expect("in-flight lock");
             let signals = accounts
                 .iter()
                 .cloned()
@@ -557,7 +567,7 @@ impl ProviderLeasePort for TestLeaseCoordinator {
                     (
                         account,
                         AccountRuntimeSignals {
-                            in_flight: 0,
+                            in_flight,
                             last_started_at: None,
                             quota_reset_at: None,
                             quota_remaining_rank: None,

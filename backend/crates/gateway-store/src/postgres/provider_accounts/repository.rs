@@ -110,7 +110,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         let rows = sqlx::query(
             "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, identity_revision, has_refresh_token,
-                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, allowed_models, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
                     quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
@@ -496,6 +496,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     settings.concurrency_limit,
                     settings.weight,
                     None,
+                    None,
                 )
                 .await?;
                 replace_account_group_assignments_in_transaction(
@@ -583,6 +584,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 command.concurrency_limit,
                 command.weight,
                 command.outbound_proxy.as_ref(),
+                command.model_access.as_ref(),
             )
             .await?;
             replace_account_group_assignments_in_transaction(
@@ -915,6 +917,7 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
     outbound_proxy: Option<&gateway_admin::model::proxies::AccountProxySelection>,
+    model_access: Option<&AccountModelAccess>,
 ) -> StoreResult<()> {
     let (proxy_id, proxy) = match outbound_proxy {
         Some(selection) => {
@@ -922,11 +925,20 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
         }
         None => (None, None),
     };
+    let allowed_models = model_access.and_then(|access| {
+        access.allowed_models().map(|models| {
+            models
+                .iter()
+                .map(|model| model.as_str().to_owned())
+                .collect::<Vec<_>>()
+        })
+    });
     let updated = sqlx::query_scalar::<_, String>(
         "update provider_accounts
          set enabled = $2, concurrency_limit = $3, weight = $4, updated_at = greatest(now(), updated_at),
              outbound_proxy_url = case when $5 then $6 else outbound_proxy_url end,
-             outbound_proxy_id = case when $5 then $7 else outbound_proxy_id end
+             outbound_proxy_id = case when $5 then $7 else outbound_proxy_id end,
+             allowed_models = case when $8 then $9 else allowed_models end
          where id = any($1::text[])
          returning id",
     )
@@ -937,6 +949,8 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     .bind(outbound_proxy.is_some())
     .bind(proxy.as_ref().map(gateway_core::account::OutboundProxy::expose_url))
     .bind(proxy_id)
+    .bind(model_access.is_some())
+    .bind(allowed_models)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("set provider accounts state in admin transaction"))?

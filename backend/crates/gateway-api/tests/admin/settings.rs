@@ -45,6 +45,8 @@ fn update_body() -> Value {
         "refreshConcurrency": 4,
         "maxConcurrentPerAccount": 5,
         "requestIntervalMs": 25,
+        "capacityQueueRetrySeconds": 3,
+        "capacityQueueTimeoutSeconds": 60,
         "rotationStrategy": "round_robin",
         "minCodexDesktopVersion": "26.825.6671",
         "minCodexCliVersion": "0.40.0",
@@ -259,6 +261,8 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         refresh_concurrency: 4,
         max_concurrent_per_account: 5,
         request_interval_ms: 25,
+        capacity_queue_retry_seconds: 3,
+        capacity_queue_timeout_seconds: 60,
         rotation_strategy: RotationStrategy::RoundRobin,
         min_codex_desktop_version: Some("26.825.6671".to_owned()),
         min_codex_cli_version: Some("0.40.0".to_owned()),
@@ -297,6 +301,8 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "refreshConcurrency": 4,
             "maxConcurrentPerAccount": 5,
             "requestIntervalMs": 25,
+            "capacityQueueRetrySeconds": 3,
+            "capacityQueueTimeoutSeconds": 60,
             "rotationStrategy": "round_robin",
             "minCodexDesktopVersion": "26.825.6671",
             "minCodexCliVersion": "0.40.0",
@@ -359,6 +365,16 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         refresh_concurrency: u32::try_from(request.refresh_concurrency).expect("u32"),
         max_concurrent_per_account: u32::try_from(request.max_concurrent_per_account).expect("u32"),
         request_interval_ms: request.request_interval_ms,
+        capacity_queue_retry_seconds: u32::try_from(
+            request.capacity_queue_retry_seconds.expect("queue retry"),
+        )
+        .expect("u32"),
+        capacity_queue_timeout_seconds: u32::try_from(
+            request
+                .capacity_queue_timeout_seconds
+                .expect("queue timeout"),
+        )
+        .expect("u32"),
         rotation_strategy: RotationStrategy::parse(&request.rotation_strategy)
             .expect("fixture rotation strategy"),
         min_codex_desktop_version: request.min_codex_desktop_version,

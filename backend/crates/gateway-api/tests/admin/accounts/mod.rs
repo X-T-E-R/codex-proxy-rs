@@ -599,6 +599,51 @@ mod batch_update {
             .is_err()
         );
     }
+
+    #[test]
+    fn single_update_should_accept_omitted_all_or_restricted_model_access() {
+        for allowed_models in [
+            None,
+            Some(json!([])),
+            Some(json!(["gpt-5.6-luna", "gpt-5.6-sol"])),
+        ] {
+            let mut payload = json!({
+                "accountId": "acct_test",
+                "enabled": true,
+                "concurrencyLimit": null,
+                "weight": 1,
+                "groupIds": []
+            });
+            if let Some(allowed_models) = allowed_models {
+                payload["allowedModels"] = allowed_models;
+            }
+            let request: UpdateAccountRequest =
+                serde_json::from_value(payload).expect("model access update");
+            request.validate().expect("valid model access");
+        }
+    }
+
+    #[test]
+    fn single_update_should_reject_duplicate_or_invalid_allowed_models() {
+        for allowed_models in [json!(["gpt-5.6-sol", "gpt-5.6-sol"]), json!([""])] {
+            let request: UpdateAccountRequest = serde_json::from_value(json!({
+                "accountId": "acct_test",
+                "enabled": true,
+                "concurrencyLimit": null,
+                "weight": 1,
+                "groupIds": [],
+                "allowedModels": allowed_models
+            }))
+            .expect("deserialize invalid model access");
+            assert_eq!(
+                request
+                    .validate()
+                    .expect_err("reject invalid model access")
+                    .field(),
+                "allowedModels"
+            );
+        }
+    }
 }
 
 mod response {

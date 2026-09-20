@@ -50,6 +50,7 @@ pub struct AccountSelectionPolicy {
     max_concurrent_per_account: NonZeroU32,
     request_interval: Duration,
     overload_cooldown: Option<(NonZeroU32, NonZeroU32)>,
+    capacity_queue: Option<(Duration, Duration)>,
 }
 
 impl AccountSelectionPolicy {
@@ -64,6 +65,7 @@ impl AccountSelectionPolicy {
             max_concurrent_per_account,
             request_interval,
             overload_cooldown: None,
+            capacity_queue: None,
         }
     }
 
@@ -95,6 +97,34 @@ impl AccountSelectionPolicy {
     #[must_use]
     pub const fn request_interval(self) -> Duration {
         self.request_interval
+    }
+
+    /// 设置并发池满时的重试间隔和总等待预算。
+    #[must_use]
+    pub fn with_capacity_queue(mut self, retry_interval: Duration, timeout: Duration) -> Self {
+        self.capacity_queue =
+            (!retry_interval.is_zero() && !timeout.is_zero() && retry_interval <= timeout)
+                .then_some((retry_interval, timeout));
+        self
+    }
+
+    /// 根据已等待时间和请求截止时间计算下一次重试延迟。
+    #[must_use]
+    pub fn capacity_queue_delay(
+        self,
+        elapsed: Duration,
+        request_deadline: SystemTime,
+    ) -> Option<Duration> {
+        let (retry_interval, timeout) = self.capacity_queue?;
+        let queue_remaining = timeout.checked_sub(elapsed)?;
+        let request_remaining = request_deadline.duration_since(SystemTime::now()).ok()?;
+        let delay = retry_interval.min(queue_remaining).min(request_remaining);
+        (!delay.is_zero()).then_some(delay)
+    }
+
+    #[must_use]
+    pub const fn capacity_queue(self) -> Option<(Duration, Duration)> {
+        self.capacity_queue
     }
 }
 
@@ -387,6 +417,11 @@ impl AccountCapacitySnapshot {
     #[must_use]
     pub const fn total_slots(self) -> u64 {
         self.total_slots
+    }
+
+    #[must_use]
+    pub const fn is_saturated(self) -> bool {
+        self.total_slots > 0 && self.used_slots >= self.total_slots
     }
 
     #[must_use]

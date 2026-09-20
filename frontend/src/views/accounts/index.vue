@@ -159,6 +159,9 @@ const {
   proxyMode: editingProxyMode,
   proxyId: editingProxyId,
   selectedGroupIds: editingGroupIds,
+  selectedModels: editingModels,
+  availableModels: editingAvailableModels,
+  modelsLoading: editingModelsLoading,
   saving: savingAccountEdit,
   open: openAccountEdit,
   save: saveAccountEdit,
@@ -364,10 +367,13 @@ const {
       v-model:proxy-mode="editingProxyMode"
       v-model:proxy-id="editingProxyId"
       v-model:selected-group-ids="editingGroupIds"
+      v-model:selected-models="editingModels"
       :account="editingAccount"
       :groups="groups"
       :groups-loading="groupsLoading"
       :saving="savingAccountEdit"
+      :models="editingAvailableModels"
+      :models-loading="editingModelsLoading"
       @save="saveAccountEdit"
     />
 

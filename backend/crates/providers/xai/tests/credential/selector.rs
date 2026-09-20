@@ -4,11 +4,11 @@ use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use gateway_core::account::{
-    AccountAttemptFeedback, AccountConcurrencyLimit, AccountFeedbackStats, AccountRuntimeSignals,
-    AccountSelectionPolicy, AccountWeight, CredentialCasOutcome, CredentialRevision,
-    CredentialState, OpaqueProviderData, ProviderAccountId, ProviderAccountStore,
-    ProviderAccountUpdate, QuotaAccessState, QuotaObservation, QuotaState, QuotaWriteOutcome,
-    RotationStrategy,
+    AccountAttemptFeedback, AccountConcurrencyLimit, AccountFeedbackStats, AccountModelAccess,
+    AccountRuntimeSignals, AccountSelectionPolicy, AccountWeight, CredentialCasOutcome,
+    CredentialRevision, CredentialState, OpaqueProviderData, ProviderAccountId,
+    ProviderAccountStore, ProviderAccountUpdate, QuotaAccessState, QuotaObservation, QuotaState,
+    QuotaWriteOutcome, RotationStrategy,
 };
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::provider_ports::{
@@ -217,6 +217,43 @@ impl SelectorFixture {
         required_account: Option<ProviderAccountId>,
         strategy: RotationStrategy,
     ) -> GrokSessionSelection {
+        self.request_for_model_with_selection_policy(
+            upstream_model,
+            excluded,
+            required_account,
+            AccountSelectionPolicy::new(
+                strategy,
+                std::num::NonZeroU32::new(2).expect("limit"),
+                Duration::ZERO,
+            ),
+        )
+    }
+
+    fn request_with_capacity_queue(
+        &self,
+        retry_interval: Duration,
+        timeout: Duration,
+    ) -> GrokSessionSelection {
+        self.request_for_model_with_selection_policy(
+            "grok-4.5",
+            BTreeSet::new(),
+            None,
+            AccountSelectionPolicy::new(
+                RotationStrategy::Smart,
+                std::num::NonZeroU32::new(2).expect("limit"),
+                Duration::ZERO,
+            )
+            .with_capacity_queue(retry_interval, timeout),
+        )
+    }
+
+    fn request_for_model_with_selection_policy(
+        &self,
+        upstream_model: &str,
+        excluded: BTreeSet<ProviderAccountId>,
+        required_account: Option<ProviderAccountId>,
+        selection_policy: AccountSelectionPolicy,
+    ) -> GrokSessionSelection {
         let provider = gateway_core::routing::ProviderKind::new("xai").expect("provider");
         let accounts = self
             .coordinator
@@ -236,11 +273,7 @@ impl SelectorFixture {
             UpstreamModelId::new(upstream_model).expect("model"),
             excluded,
             required_account,
-            AccountSelectionPolicy::new(
-                strategy,
-                std::num::NonZeroU32::new(2).expect("limit"),
-                Duration::ZERO,
-            ),
+            selection_policy,
             SystemTime::now() + Duration::from_secs(30),
             Arc::new(FrozenAccountScope::new(
                 Arc::new(RuntimeAccountDirectory::new(accounts)),
@@ -770,6 +803,33 @@ async fn excluded_account_is_never_selected_again() {
 }
 
 #[tokio::test]
+async fn account_model_access_is_applied_before_xai_scheduling() {
+    let fixture = SelectorFixture::new(&["model-access"]).await;
+    let id = account_id("model-access");
+    fixture.store.set_model_access(
+        &id,
+        AccountModelAccess::only([UpstreamModelId::new("grok-4.6").expect("model")])
+            .expect("nonempty access"),
+    );
+
+    assert!(matches!(
+        fixture
+            .selector
+            .select(fixture.request_for_model("grok-4.5", None))
+            .await,
+        Err(GrokSessionSelectorError::NoEligibleSession)
+    ));
+    assert!(
+        fixture
+            .coordinator
+            .requests
+            .lock()
+            .expect("requests")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn capacity_denial_returns_minimum_retry_without_upstream_send() {
     let fixture = SelectorFixture::new(&["denied-a", "denied-b"]).await;
     fixture
@@ -787,6 +847,53 @@ async fn capacity_denial_returns_minimum_retry_without_upstream_send() {
             retry_after: Some(value)
         }) if value == Duration::from_millis(25)
     ));
+}
+
+#[tokio::test]
+async fn capacity_queue_reselects_xai_after_the_configured_delay() {
+    let fixture = Arc::new(SelectorFixture::new(&["queued"]).await);
+    fixture
+        .coordinator
+        .denied
+        .lock()
+        .expect("denied")
+        .insert(account_id("queued"));
+    let queued = Arc::clone(&fixture);
+    let task =
+        tokio::spawn(async move {
+            queued
+                .selector
+                .select(queued.request_with_capacity_queue(
+                    Duration::from_millis(30),
+                    Duration::from_millis(90),
+                ))
+                .await
+        });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        fixture.coordinator.requests.lock().expect("requests").len(),
+        1
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        fixture.coordinator.requests.lock().expect("requests").len(),
+        1
+    );
+    fixture.coordinator.denied.lock().expect("denied").clear();
+    tokio::time::timeout(Duration::from_millis(100), async {
+        while fixture.coordinator.requests.lock().expect("requests").len() < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("queue retry");
+
+    let session = task.await.expect("selection task").expect("queued session");
+    assert_eq!(session.account_id(), &account_id("queued"));
+    assert_eq!(
+        fixture.coordinator.requests.lock().expect("requests").len(),
+        2
+    );
 }
 
 #[tokio::test]

@@ -663,6 +663,9 @@ impl AccountStore for PgAdminAccountStore {
         if command.outbound_proxy.is_some() {
             changed_fields.push("outbound_proxy".to_owned());
         }
+        if command.model_access.is_some() {
+            changed_fields.push("allowed_models".to_owned());
+        }
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
@@ -672,6 +675,7 @@ impl AccountStore for PgAdminAccountStore {
                 weight: command.weight,
                 group_ids: command.group_ids,
                 outbound_proxy: command.outbound_proxy,
+                model_access: command.model_access,
                 audit: mutation_audit(
                     context,
                     "update",
@@ -765,6 +769,7 @@ impl AccountStore for PgAdminAccountStore {
                 weight: command.weight,
                 group_ids: command.group_ids,
                 outbound_proxy: command.outbound_proxy,
+                model_access: None,
                 audit: mutation_audit(
                     context,
                     "batch_update",

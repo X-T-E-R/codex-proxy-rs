@@ -83,6 +83,7 @@ impl Trace {
 enum NextStep {
     Event(CoordinatedEvent),
     DelayedEvent(Duration, CoordinatedEvent),
+    DelayedError(Duration, EngineError),
     Error(EngineError),
     FinalizeCancelled,
     FinalizeSuccess,
@@ -289,6 +290,13 @@ impl ExecutionSession for FakeSession {
                     tokio::time::sleep(delay).await;
                     self.trace.push("next_event");
                     Ok(Some(event))
+                }
+                NextStep::DelayedError(delay, error) => {
+                    self.trace.push("wait_error");
+                    tokio::time::sleep(delay).await;
+                    self.trace.push("next_error");
+                    self.finalized = true;
+                    Err(error)
                 }
                 NextStep::Error(error) => {
                     self.trace.push("next_error");
@@ -889,7 +897,7 @@ async fn dropping_stream_during_keepalive_should_cancel_and_finalize_execution()
 }
 
 #[tokio::test(start_paused = true)]
-async fn streaming_keepalive_should_wait_for_first_event_before_committing_http_status() {
+async fn streaming_keepalive_should_cover_waiting_for_the_first_event_without_restarting_it() {
     let trace = Arc::new(Trace::default());
     let session = FakeSession::streaming(
         Arc::clone(&trace),
@@ -903,13 +911,97 @@ async fn streaming_keepalive_should_wait_for_first_event_before_committing_http_
     );
     let response = tokio::spawn(stream_execution_response(Box::new(session), None));
     tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_secs(30)).await;
+    tokio::time::advance(Duration::from_secs(14)).await;
 
     assert!(!response.is_finished());
     assert!(trace.client_statuses().is_empty());
+    tokio::time::advance(Duration::from_secs(1)).await;
     let response = response.await.expect("response task");
     assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(
+        body.next()
+            .await
+            .expect("opening heartbeat")
+            .expect("bytes"),
+        Bytes::from_static(b": keep-alive\n\n")
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(20), body.next())
+            .await
+            .expect("second heartbeat timeout")
+            .expect("second heartbeat")
+            .expect("bytes"),
+        Bytes::from_static(b": keep-alive\n\n")
+    );
+    let first = tokio::time::timeout(Duration::from_secs(20), body.next())
+        .await
+        .expect("first event timeout")
+        .expect("first event")
+        .expect("bytes");
+    assert!(String::from_utf8_lossy(&first).contains("response.created"));
+    assert_eq!(trace.client_statuses(), vec![200]);
     assert_eq!(trace.snapshot(), vec!["wait_event", "next_event", "commit"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn streaming_failure_after_opening_keepalive_should_be_delivered_as_sse_error() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![NextStep::DelayedError(
+            Duration::from_secs(20),
+            EngineError::Provider(ProviderError::new(
+                ProviderErrorKind::Unavailable,
+                UpstreamSendState::NotSent,
+            )),
+        )],
+    );
+
+    let response = stream_execution_response(Box::new(session), None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(
+        body.next()
+            .await
+            .expect("opening heartbeat")
+            .expect("bytes"),
+        Bytes::from_static(b": keep-alive\n\n")
+    );
+    let failure = tokio::time::timeout(Duration::from_secs(10), body.next())
+        .await
+        .expect("failure timeout")
+        .expect("failure event")
+        .expect("bytes");
+    assert!(String::from_utf8_lossy(&failure).contains("response.failed"));
+    assert_eq!(trace.client_statuses(), vec![200]);
+    assert_eq!(trace.snapshot(), vec!["wait_error", "next_error"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_stream_after_opening_keepalive_should_cancel_first_event_wait() {
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::DelayedEvent(
+                Duration::from_secs(60),
+                delivery(started(), CommitRequirement::CommitBeforeDelivery),
+            ),
+            NextStep::FinalizeCancelled,
+        ],
+    );
+
+    let response = tokio::spawn(stream_execution_response(Box::new(session), None));
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(15)).await;
+    let response = response.await.expect("response task");
+    assert_eq!(response.status(), StatusCode::OK);
+    drop(response);
+    tokio::task::yield_now().await;
+
+    assert!(trace.is_cancelled());
+    assert_eq!(trace.snapshot(), vec!["wait_event", "cancel_finalize"]);
 }
 
 #[tokio::test]

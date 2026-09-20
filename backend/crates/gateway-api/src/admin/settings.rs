@@ -37,6 +37,8 @@ pub struct RuntimeSettingsView {
     pub refresh_concurrency: u64,
     pub max_concurrent_per_account: u64,
     pub request_interval_ms: u64,
+    pub capacity_queue_retry_seconds: u64,
+    pub capacity_queue_timeout_seconds: u64,
     pub rotation_strategy: String,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
@@ -69,6 +71,10 @@ pub struct UpdateRuntimeSettingsRequest {
     pub refresh_concurrency: u64,
     pub max_concurrent_per_account: u64,
     pub request_interval_ms: u64,
+    #[serde(default)]
+    pub capacity_queue_retry_seconds: Option<u64>,
+    #[serde(default)]
+    pub capacity_queue_timeout_seconds: Option<u64>,
     pub rotation_strategy: String,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
@@ -141,6 +147,20 @@ impl UpdateRuntimeSettingsRequest {
         ] {
             require_positive_i64(value, field)?;
         }
+        match (
+            self.capacity_queue_retry_seconds,
+            self.capacity_queue_timeout_seconds,
+        ) {
+            (None, None) => {}
+            (Some(retry), Some(timeout)) => {
+                require_positive_i64(retry, "capacityQueueRetrySeconds")?;
+                require_positive_i64(timeout, "capacityQueueTimeoutSeconds")?;
+                if retry > timeout {
+                    return Err(WireValidationError::new("capacityQueueTimeoutSeconds"));
+                }
+            }
+            _ => return Err(WireValidationError::new("capacityQueue")),
+        }
         if let Some(value) = self.cyber_session_block_ttl_seconds {
             require_positive_i64(value, "cyberSessionBlockTtlSeconds")?;
             u32::try_from(value)
@@ -173,6 +193,16 @@ impl UpdateRuntimeSettingsRequest {
             max_concurrent_per_account: u32::try_from(self.max_concurrent_per_account)
                 .map_err(|_| WireValidationError::new("settingsMaxConcurrencyOverflow"))?,
             request_interval_ms: self.request_interval_ms,
+            capacity_queue_retry_seconds: self
+                .capacity_queue_retry_seconds
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| WireValidationError::new("capacityQueueRetrySeconds"))?,
+            capacity_queue_timeout_seconds: self
+                .capacity_queue_timeout_seconds
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| WireValidationError::new("capacityQueueTimeoutSeconds"))?,
             rotation_strategy: RotationStrategy::parse(&self.rotation_strategy)
                 .ok_or_else(|| WireValidationError::new("rotationStrategy"))?,
             min_codex_desktop_version: self.min_codex_desktop_version,
@@ -228,6 +258,8 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
             refresh_concurrency: u64::from(settings.refresh_concurrency),
             max_concurrent_per_account: u64::from(settings.max_concurrent_per_account),
             request_interval_ms: settings.request_interval_ms,
+            capacity_queue_retry_seconds: u64::from(settings.capacity_queue_retry_seconds),
+            capacity_queue_timeout_seconds: u64::from(settings.capacity_queue_timeout_seconds),
             rotation_strategy: settings.rotation_strategy.as_str().to_owned(),
             min_codex_desktop_version: settings.min_codex_desktop_version,
             min_codex_cli_version: settings.min_codex_cli_version,

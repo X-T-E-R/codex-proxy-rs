@@ -2,7 +2,7 @@ import type { Ref } from 'vue'
 import type { getAccounts } from '@/api'
 
 import { computed, ref, shallowRef, watch } from 'vue'
-import { updateAccount } from '@/api'
+import { getAccountModels, updateAccount } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
 import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
@@ -22,6 +22,10 @@ export function useAccountEditor(options: {
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
   const selectedGroupIds = ref<string[]>([])
+  const selectedModels = ref<string[]>([])
+  const availableModels = ref<Array<{ id: string, label: string }>>([])
+  const modelsLoading = shallowRef(false)
+  let modelsRequestId = 0
   const saveAction = useAsyncAction()
   const saving = saveAction.loading
   const editingAccount = computed(() => {
@@ -39,7 +43,34 @@ export function useAccountEditor(options: {
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
     weight.value = String(account.weight)
     selectedGroupIds.value = account.groups.map(group => group.id)
+    selectedModels.value = account.allowedModels ? [...account.allowedModels] : []
+    availableModels.value = []
     showEditModal.value = true
+    void loadModels(account.id)
+  }
+
+  async function loadModels(accountId: string) {
+    const requestId = ++modelsRequestId
+    modelsLoading.value = true
+    try {
+      const result = await getAccountModels({ accountId })
+      if (requestId !== modelsRequestId)
+        return
+      const byId = new Map(result.models.map(model => [model.id, model]))
+      for (const id of selectedModels.value)
+        byId.set(id, byId.get(id) ?? { id, label: id })
+      availableModels.value = [...byId.values()]
+    }
+    catch {
+      if (requestId !== modelsRequestId)
+        return
+      const account = editingAccount.value
+      availableModels.value = (account?.allowedModels ?? []).map(id => ({ id, label: id }))
+    }
+    finally {
+      if (requestId === modelsRequestId)
+        modelsLoading.value = false
+    }
   }
 
   async function save() {
@@ -64,6 +95,7 @@ export function useAccountEditor(options: {
         concurrencyLimit: scheduling.values.concurrencyLimit,
         weight: scheduling.values.weight,
         groupIds: [...new Set(selectedGroupIds.value)],
+        allowedModels: [...new Set(selectedModels.value)],
       })
       showEditModal.value = false
       await Promise.all([options.reloadAccounts(), options.reloadGroups()])
@@ -75,12 +107,16 @@ export function useAccountEditor(options: {
     if (open || isSaving)
       return
     editingAccountId.value = null
+    modelsRequestId += 1
     proxyMode.value = 'preserve'
     proxyId.value = ''
     schedulingEnabled.value = true
     concurrencyLimit.value = ''
     weight.value = '1'
     selectedGroupIds.value = []
+    selectedModels.value = []
+    availableModels.value = []
+    modelsLoading.value = false
   })
 
   return {
@@ -92,6 +128,9 @@ export function useAccountEditor(options: {
     proxyMode,
     proxyId,
     selectedGroupIds,
+    selectedModels,
+    availableModels,
+    modelsLoading,
     saving,
     open,
     save,

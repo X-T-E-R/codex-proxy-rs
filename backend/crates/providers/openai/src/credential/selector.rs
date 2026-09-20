@@ -20,6 +20,7 @@ use gateway_core::provider_ports::{
 use gateway_core::routing::ProviderKind;
 use secrecy::ExposeSecret;
 use thiserror::Error;
+use tokio::time::Instant;
 use url::Url;
 
 use super::affinity::{CODEX_ROOT_SESSION_TTL, CodexSessionAffinity};
@@ -307,7 +308,7 @@ impl CodexCredentialSelector {
             session_affinity_key: request.session_affinity_key,
             session_affinity_observation: None,
         };
-        self.select_inner(
+        self.select_with_capacity_queue(
             &input,
             None,
             ModelCatalogEligibility::Required(request.upstream_model),
@@ -327,7 +328,7 @@ impl CodexCredentialSelector {
             session_affinity_key: request.session_affinity_key,
             session_affinity_observation,
         };
-        self.select_inner(
+        self.select_with_capacity_queue(
             &input,
             cyber_policy_session_key,
             ModelCatalogEligibility::Required(request.upstream_model),
@@ -349,8 +350,37 @@ impl CodexCredentialSelector {
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
             session_affinity_observation: request.session_affinity,
         };
-        self.select_inner(&input, None, ModelCatalogEligibility::NotApplicable)
+        self.select_with_capacity_queue(&input, None, ModelCatalogEligibility::NotApplicable)
             .await
+    }
+
+    async fn select_with_capacity_queue(
+        &self,
+        request: &CredentialSelectionInput<'_>,
+        cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
+        model_catalog_eligibility: ModelCatalogEligibility<'_>,
+    ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        let started_at = Instant::now();
+        loop {
+            match self
+                .select_inner(request, cyber_policy_session_key, model_catalog_eligibility)
+                .await
+            {
+                Err(CredentialSelectionError::CapacityUnavailable { retry_after })
+                    if !request.attempt.is_diagnostic_required_account() =>
+                {
+                    let Some(delay) = request
+                        .attempt
+                        .account_selection_policy()
+                        .capacity_queue_delay(started_at.elapsed(), request.attempt.deadline())
+                    else {
+                        return Err(CredentialSelectionError::CapacityUnavailable { retry_after });
+                    };
+                    tokio::time::sleep(delay).await;
+                }
+                result => return result,
+            }
+        }
     }
 
     async fn select_inner(
@@ -374,9 +404,12 @@ impl CodexCredentialSelector {
                         || match model_catalog_eligibility {
                             ModelCatalogEligibility::NotApplicable => true,
                             ModelCatalogEligibility::Required(upstream_model) => {
-                                let observed_support =
-                                    self.catalog.observed_model_support(account, upstream_model);
-                                matches!(observed_support, Ok(None | Some(true)))
+                                account.permits_model(upstream_model) && {
+                                    let observed_support = self
+                                        .catalog
+                                        .observed_model_support(account, upstream_model);
+                                    matches!(observed_support, Ok(None | Some(true)))
+                                }
                             }
                         })
             })
@@ -540,6 +573,9 @@ impl CodexCredentialSelector {
                     Some(retry_after) => Err(CredentialSelectionError::CapacityUnavailable {
                         retry_after: Some(retry_after),
                     }),
+                    None if capacity.is_some_and(AccountCapacitySnapshot::is_saturated) => {
+                        Err(CredentialSelectionError::CapacityUnavailable { retry_after: None })
+                    }
                     None => Err(CredentialSelectionError::NoEligibleCredential),
                 };
             };

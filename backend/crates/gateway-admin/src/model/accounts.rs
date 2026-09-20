@@ -13,9 +13,9 @@ use gateway_core::{
 use super::{PageSize, Revision, account_groups::AccountGroupRef, observability::TimeRange};
 
 pub use gateway_core::account::{
-    AccountConcurrencyLimit, AccountErrorReason, AccountStatus, AccountStatusFacts,
-    AccountStatusProjection, AccountWeight, CredentialState, QuotaAccessState, QuotaEvidence,
-    QuotaState, resolve_account_status,
+    AccountConcurrencyLimit, AccountErrorReason, AccountModelAccess, AccountStatus,
+    AccountStatusFacts, AccountStatusProjection, AccountWeight, CredentialState, QuotaAccessState,
+    QuotaEvidence, QuotaState, resolve_account_status,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +124,7 @@ pub struct AccountRecord {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub model_access: AccountModelAccess,
     pub outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     pub credential_state: CredentialState,
     pub credential_observed_at: DateTime<Utc>,
@@ -248,6 +249,8 @@ pub struct UpdateAccount {
     pub weight: AccountWeight,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
+    /// `None` 保留当前设置；`Some(All)` 恢复全部模型。
+    pub model_access: Option<AccountModelAccess>,
 }
 
 /// 账号更新结果。

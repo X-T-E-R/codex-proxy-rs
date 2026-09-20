@@ -6,6 +6,7 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
+import AccountModelAccessField from './AccountModelAccessField.vue'
 import AccountPlanBadge from './AccountPlanBadge.vue'
 import AccountSettingsFields from './AccountSettingsFields.vue'
 
@@ -14,6 +15,8 @@ defineProps<{
   groups: AccountGroup[]
   groupsLoading: boolean
   saving: boolean
+  models: Array<{ id: string, label: string }>
+  modelsLoading: boolean
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +30,7 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const selectedModels = defineModel<string[]>('selectedModels', { required: true })
 </script>
 
 <template>
@@ -68,6 +72,16 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         :endpoint="account.outboundProxyEndpoint"
         :account-id="account.id"
       />
+
+      <div class="grid gap-2">
+        <span class="text-cp leading-none font-medium text-cp-text-secondary">允许的模型</span>
+        <AccountModelAccessField
+          v-model="selectedModels"
+          :models="models"
+          :loading="modelsLoading"
+          :disabled="saving"
+        />
+      </div>
     </div>
 
     <template #footer>

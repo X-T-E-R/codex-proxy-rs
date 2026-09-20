@@ -54,6 +54,9 @@ const {
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
   requestIntervalMsValue,
+  capacityQueueRetrySecondsValue,
+  capacityQueueTimeoutSecondsValue,
+  capacityQueueErrors,
   wsPoolMaxAgeMsValue,
   wsPoolMaxConnectingValue,
   wsPoolStreamIdleTimeoutMsValue,
@@ -144,6 +147,10 @@ watch(
         v-model:refresh-margin-seconds="refreshMarginSecondsValue"
         v-model:refresh-concurrency="refreshConcurrencyValue"
         v-model:request-interval-ms="requestIntervalMsValue"
+        v-model:capacity-queue-retry-seconds="capacityQueueRetrySecondsValue"
+        v-model:capacity-queue-timeout-seconds="capacityQueueTimeoutSecondsValue"
+        :capacity-queue-errors="capacityQueueErrors"
+        :disabled="loading || saving"
       />
 
       <WebSocketPoolCard

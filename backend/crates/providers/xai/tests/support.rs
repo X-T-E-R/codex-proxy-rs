@@ -8,11 +8,12 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use chrono::Utc;
 use gateway_core::account::{
-    AccountConcurrencyLimit, AccountErrorReason, AccountStateChange, AccountWeight,
-    CredentialCasOutcome, CredentialCasUpdate, CredentialCasUpdateParts, CredentialRevision,
-    CredentialState, LoadedCredential, NewProviderAccount, PlaintextCredential, ProviderAccount,
-    ProviderAccountId, ProviderAccountStore, ProviderAccountUpdate, ProviderRefreshQuery,
-    QuotaAccessChange, QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
+    AccountConcurrencyLimit, AccountErrorReason, AccountModelAccess, AccountStateChange,
+    AccountWeight, CredentialCasOutcome, CredentialCasUpdate, CredentialCasUpdateParts,
+    CredentialRevision, CredentialState, LoadedCredential, NewProviderAccount, PlaintextCredential,
+    ProviderAccount, ProviderAccountId, ProviderAccountStore, ProviderAccountUpdate,
+    ProviderRefreshQuery, QuotaAccessChange, QuotaObservation, QuotaObservationTouch, QuotaState,
+    QuotaWriteOutcome,
 };
 use gateway_core::error::{StoreError, StoreErrorKind};
 use gateway_core::provider_ports::{
@@ -270,6 +271,12 @@ impl MemoryProviderAccountStore {
             .account
             .clone()
             .with_scheduling(concurrency_limit, weight);
+    }
+
+    pub fn set_model_access(&self, id: &ProviderAccountId, access: AccountModelAccess) {
+        let mut accounts = lock(&self.accounts);
+        let stored = accounts.get_mut(id).expect("seeded account");
+        stored.account = stored.account.clone().with_model_access(access);
     }
 
     pub fn set_outbound_proxy(
@@ -668,6 +675,7 @@ fn rebuild_account(previous: &ProviderAccount, replacement: AccountReplacement) 
         replacement.last_error_message,
     )
     .with_scheduling(previous.concurrency_limit(), previous.weight())
+    .with_model_access(previous.model_access().clone())
     .with_refresh_schedule(replacement.has_refresh_token, replacement.next_refresh_at)
     .with_outbound_proxy(previous.outbound_proxy().cloned())
 }

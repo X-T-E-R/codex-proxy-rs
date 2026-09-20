@@ -803,6 +803,8 @@ pub struct AccountView {
     pub enabled: bool,
     pub concurrency_limit: Option<u32>,
     pub weight: u16,
+    /// `null` 表示允许全部上游模型；数组表示账号级白名单。
+    pub allowed_models: Option<Vec<String>>,
     pub access_token_expires_at: Option<String>,
     pub access_token_expires_at_display: Option<String>,
     pub refresh_token_expires_at: Option<String>,

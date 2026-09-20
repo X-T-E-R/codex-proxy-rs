@@ -16,6 +16,7 @@ use gateway_core::provider_ports::{
     ProviderScopedCooldown,
 };
 use gateway_core::routing::{ProviderKind, UpstreamModelId};
+use tokio::time::Instant;
 
 use super::catalog::{GrokCatalogScope, GrokCredentialCatalogCache, GrokCredentialQuotaService};
 use super::repository::{GrokCredentialRepository, GrokCredentialRepositoryError};
@@ -88,6 +89,29 @@ impl GrokAccountSessionSelector {
         &self,
         request: GrokSessionSelection,
     ) -> Result<SelectedGrokSession, GrokSessionSelectorError> {
+        let started_at = Instant::now();
+        loop {
+            match self.select_once(request.clone()).await {
+                Err(GrokSessionSelectorError::CapacityUnavailable { retry_after })
+                    if request.eligibility() != AccountEligibilityPolicy::BypassForDiagnostic =>
+                {
+                    let Some(delay) = request
+                        .account_selection_policy()
+                        .capacity_queue_delay(started_at.elapsed(), request.deadline())
+                    else {
+                        return Err(GrokSessionSelectorError::CapacityUnavailable { retry_after });
+                    };
+                    tokio::time::sleep(delay).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn select_once(
+        &self,
+        request: GrokSessionSelection,
+    ) -> Result<SelectedGrokSession, GrokSessionSelectorError> {
         let diagnostic = request.eligibility() == AccountEligibilityPolicy::BypassForDiagnostic;
         let accounts = self
             .repository
@@ -99,7 +123,10 @@ impl GrokAccountSessionSelector {
         } else {
             accounts
                 .into_iter()
-                .filter(|account| request.account_scope().allows(account.id()))
+                .filter(|account| {
+                    request.account_scope().allows(account.id())
+                        && account.permits_model(request.upstream_model().as_str())
+                })
                 .collect()
         };
         let catalog_eligible = if diagnostic {
@@ -204,6 +231,7 @@ impl GrokAccountSessionSelector {
         loop {
             let capacity = AccountSelector.capacity_snapshot(&candidates, &context);
             let Some(selection) = AccountSelector.select(&candidates, &context) else {
+                capacity_denied |= capacity.is_some_and(AccountCapacitySnapshot::is_saturated);
                 break;
             };
             let selected = selection.candidate();

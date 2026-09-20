@@ -6,10 +6,10 @@ use std::time::{Duration, SystemTime};
 use futures::executor::block_on;
 use gateway_core::account::{
     AccountAttemptFeedback, AccountConcurrencyLimit, AccountErrorReason, AccountFeedbackStats,
-    AccountSelectionPolicy, AccountStateChange, AccountWeight, CredentialState, OpaqueProviderData,
-    ProviderAccount, ProviderAccountId, ProviderAccountStore as _, QuotaAccessChange,
-    QuotaAccessState, QuotaEvidence, QuotaObservation, QuotaState, QuotaWriteOutcome,
-    RotationStrategy,
+    AccountModelAccess, AccountSelectionPolicy, AccountStateChange, AccountWeight, CredentialState,
+    OpaqueProviderData, ProviderAccount, ProviderAccountId, ProviderAccountStore as _,
+    QuotaAccessChange, QuotaAccessState, QuotaEvidence, QuotaObservation, QuotaState,
+    QuotaWriteOutcome, RotationStrategy,
 };
 use gateway_core::engine::continuation::{
     ContinuationBinding, NativeContinuationPin, PreviousResponseId,
@@ -24,6 +24,7 @@ use gateway_core::provider_ports::{
 };
 use gateway_core::routing::{
     ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
+    UpstreamModelId,
 };
 use provider_openai::OFFICIAL_CODEX_BASE_URL;
 use provider_openai::credential::{
@@ -116,6 +117,22 @@ fn round_robin_attempt() -> AttemptContext {
             NonZeroU32::new(2).expect("concurrency"),
             Duration::ZERO,
         ),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        None,
+        CancellationToken::new(),
+    )
+}
+
+fn capacity_queue_attempt(timeout: Duration) -> AttemptContext {
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_codex_capacity_queue").expect("request id"),
+            ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy().with_capacity_queue(Duration::from_secs(3), timeout),
         AccountAttemptContext::new(BTreeSet::new(), None, None)
             .with_account_scope(contract_account_scope()),
         None,
@@ -414,6 +431,38 @@ fn selector_uses_the_account_concurrency_override_for_the_redis_lease() {
 
     let requests = leases.requests.lock().expect("lease requests lock");
     assert_eq!(requests[0].max_concurrent().get(), 7);
+}
+
+#[test]
+fn selector_enforces_account_model_access_before_scheduling() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    store.set_model_access(
+        "acct_primary",
+        AccountModelAccess::only([UpstreamModelId::new("gpt-5.6-sol").expect("model")])
+            .expect("nonempty access"),
+    );
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+
+    let error =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.6-luna",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect_err("disallowed model must not schedule the account");
+
+    assert!(matches!(
+        error,
+        CredentialSelectionError::NoEligibleCredential
+    ));
+    assert!(leases.requests.lock().expect("lease requests").is_empty());
 }
 
 #[test]
@@ -827,6 +876,100 @@ fn selector_returns_capacity_error_when_every_redis_lease_is_busy() {
             retry_after: Some(_)
         }
     ));
+}
+
+#[test]
+fn selector_reports_capacity_when_the_loaded_pool_is_already_saturated() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    *leases.in_flight.lock().expect("in-flight lock") = 2;
+    let selector = selector(&store, Arc::clone(&leases));
+    let attempt = attempt(BTreeSet::new());
+    let error =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect_err("saturated pool must report capacity");
+
+    assert!(matches!(
+        error,
+        CredentialSelectionError::CapacityUnavailable { retry_after: None }
+    ));
+    assert!(leases.requests.lock().expect("lease requests").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn selector_retries_a_saturated_pool_after_the_configured_delay() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    *leases.busy.lock().expect("lease busy lock") = true;
+    let selector = Arc::new(selector(&store, Arc::clone(&leases)));
+    let task = tokio::spawn(async move {
+        let attempt = capacity_queue_attempt(Duration::from_secs(9));
+        let request_url =
+            Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+        selector
+            .select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &request_url,
+                attempt: &attempt,
+                session_affinity_key: None,
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(leases.requests.lock().expect("lease requests").len(), 1);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(leases.requests.lock().expect("lease requests").len(), 1);
+    *leases.busy.lock().expect("lease busy lock") = false;
+    tokio::time::advance(Duration::from_secs(1)).await;
+
+    let lease = task.await.expect("selection task").expect("queued lease");
+    assert_eq!(lease.account_id().as_str(), "acct_primary");
+    assert_eq!(leases.requests.lock().expect("lease requests").len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn selector_returns_capacity_error_after_the_queue_timeout() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let leases = Arc::new(TestLeaseCoordinator::default());
+    *leases.busy.lock().expect("lease busy lock") = true;
+    let selector = Arc::new(selector(&store, Arc::clone(&leases)));
+    let task = tokio::spawn(async move {
+        let attempt = capacity_queue_attempt(Duration::from_secs(6));
+        let request_url =
+            Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL");
+        selector
+            .select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &request_url,
+                attempt: &attempt,
+                session_affinity_key: None,
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+
+    let error = task
+        .await
+        .expect("selection task")
+        .expect_err("queue timeout must preserve capacity error");
+    assert!(matches!(
+        error,
+        CredentialSelectionError::CapacityUnavailable { .. }
+    ));
+    assert_eq!(leases.requests.lock().expect("lease requests").len(), 2);
 }
 
 #[test]

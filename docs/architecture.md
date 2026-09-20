@@ -307,10 +307,16 @@ Client Key 与账号分组形成授权范围：
 - 已绑定分组为空或全部禁用时得到空池，绝不回退为全部账号；
 - 分组可以包含多个 Provider，账号也可以属于多个分组。
 
-账号选择综合启停状态、credential/quota 事实、Redis cooldown、并发上限、权重、请求间隔和会话亲和。
+账号选择综合启停状态、账号级上游模型白名单、credential/quota 事实、Redis cooldown、并发上限、权重、请求间隔和会话亲和。
 账号编辑在一个事务中替换完整调度事实。导入与首次 OAuth 可携带统一账号设置，由 Admin 传递给 Store，
 与凭据在同一事务中提交；Provider 仍独占凭据解析。未附带设置的导入、重新授权和后台刷新保留已有分组、
-权重与并发设置。管理端导入和账号编辑共用设置表单，凭据输入独立于设置。
+权重、并发和模型白名单设置。白名单缺省为全部模型；非空集合使用已映射的 upstream model ID，OpenAI 与 xAI
+在正常选号前共同执行，固定账号诊断保留现有本地资格绕过。管理端导入和账号编辑共用设置表单，凭据输入独立于设置。
+
+全部永久资格判定通过、但并发槽均占满时，Provider 按冻结到请求的全局间隔和总预算重新读取调度事实并选号；
+永久无资格、冷却和额度错误不进入该队列。等待受请求 deadline/取消约束，超时保留容量不足错误。HTTP SSE 在
+首事件等待超过 15 秒时提交事件流并发 comment heartbeat；heartbeat 不进入 canonical event、模型输出、usage 或
+continuation。提交后发生的选号失败转成 SSE `response.failed`，非流式 HTTP 仍保留未提交前的状态码错误。
 
 Continuation 仍受原请求的 Client Key、账号范围、Provider 和发送/交付边界约束：
 

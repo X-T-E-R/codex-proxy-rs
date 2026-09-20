@@ -16,6 +16,8 @@ fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettingsUpdate {
         refresh_concurrency: 2,
         max_concurrent_per_account: 3,
         request_interval_ms: 50,
+        capacity_queue_retry_seconds: Some(3),
+        capacity_queue_timeout_seconds: Some(60),
         rotation_strategy: "smart".to_owned(),
         model_mappings: BTreeMap::from([
             ("gpt-5.4".to_owned(), "gpt-5.5".to_owned()),
@@ -61,6 +63,8 @@ async fn runtime_policy_settings_round_trip_with_snapshot() {
     assert!(defaults.openai_request_body_override_enabled);
     assert_eq!(defaults.openai_request_timezone, "America/Los_Angeles");
     assert_eq!(defaults.openai_search_country, "US");
+    assert_eq!(defaults.capacity_queue_retry_seconds, 3);
+    assert_eq!(defaults.capacity_queue_timeout_seconds, 60);
     let user_agent = "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)";
     repository
         .update_runtime_settings(RuntimeSettingsUpdate {
@@ -73,6 +77,8 @@ async fn runtime_policy_settings_round_trip_with_snapshot() {
             openai_request_body_override_enabled: Some(false),
             openai_request_timezone: Some(" Europe/Berlin ".to_owned()),
             openai_search_country: Some(" de ".to_owned()),
+            capacity_queue_retry_seconds: Some(7),
+            capacity_queue_timeout_seconds: Some(90),
             ..settings_with_margin(3_600)
         })
         .await
@@ -86,6 +92,8 @@ async fn runtime_policy_settings_round_trip_with_snapshot() {
     assert!(!settings.openai_request_body_override_enabled);
     assert_eq!(settings.openai_request_timezone, "Europe/Berlin");
     assert_eq!(settings.openai_search_country, "DE");
+    assert_eq!(settings.capacity_queue_retry_seconds, 7);
+    assert_eq!(settings.capacity_queue_timeout_seconds, 90);
     assert_eq!(
         repository.load_user_agent_override().await.expect("UA"),
         Some(user_agent.to_owned())
@@ -106,11 +114,13 @@ async fn runtime_policy_settings_round_trip_with_snapshot() {
     assert_eq!(snapshot.settings.overload_cooldown_seconds, 180);
     assert!(snapshot.settings.cyber_session_block_enabled);
     assert_eq!(snapshot.settings.cyber_session_block_ttl_seconds, u32::MAX);
+    assert_eq!(snapshot.settings.capacity_queue_retry_seconds, 7);
+    assert_eq!(snapshot.settings.capacity_queue_timeout_seconds, 90);
     database.close().await;
 }
 
 #[tokio::test]
-async fn omitted_cyber_fields_merge_with_the_transaction_current_row() {
+async fn omitted_optional_settings_merge_with_the_transaction_current_row() {
     let Some(database) = TestDatabase::create("cyber_settings_atomic_merge").await else {
         return;
     };
@@ -119,12 +129,16 @@ async fn omitted_cyber_fields_merge_with_the_transaction_current_row() {
         refresh_margin_seconds: 4_200,
         cyber_session_block_enabled: None,
         cyber_session_block_ttl_seconds: None,
+        capacity_queue_retry_seconds: None,
+        capacity_queue_timeout_seconds: None,
         ..settings_with_margin(3_600)
     };
     sqlx::query(
         "update runtime_settings
          set cyber_session_block_enabled = true,
-             cyber_session_block_ttl_seconds = 900
+             cyber_session_block_ttl_seconds = 900,
+             capacity_queue_retry_seconds = 7,
+             capacity_queue_timeout_seconds = 90
          where id = 1",
     )
     .execute(&database.pool)
@@ -141,6 +155,8 @@ async fn omitted_cyber_fields_merge_with_the_transaction_current_row() {
         .expect("merged settings");
     assert!(settings.cyber_session_block_enabled);
     assert_eq!(settings.cyber_session_block_ttl_seconds, 900);
+    assert_eq!(settings.capacity_queue_retry_seconds, 7);
+    assert_eq!(settings.capacity_queue_timeout_seconds, 90);
     assert_eq!(settings.refresh_margin_seconds, 4_200);
 }
 
@@ -187,6 +203,27 @@ async fn omitted_openai_request_locale_merges_with_the_transaction_current_row()
 fn runtime_settings_keep_account_rotation_global() {
     let settings = settings_with_margin(3_600);
     assert!(settings.validate().is_ok());
+}
+
+#[test]
+fn runtime_settings_validate_capacity_queue_as_an_atomic_pair() {
+    for settings in [
+        RuntimeSettingsUpdate {
+            capacity_queue_retry_seconds: Some(0),
+            ..settings_with_margin(3_600)
+        },
+        RuntimeSettingsUpdate {
+            capacity_queue_retry_seconds: Some(10),
+            capacity_queue_timeout_seconds: Some(9),
+            ..settings_with_margin(3_600)
+        },
+        RuntimeSettingsUpdate {
+            capacity_queue_timeout_seconds: None,
+            ..settings_with_margin(3_600)
+        },
+    ] {
+        assert!(settings.validate().is_err());
+    }
 }
 
 #[test]

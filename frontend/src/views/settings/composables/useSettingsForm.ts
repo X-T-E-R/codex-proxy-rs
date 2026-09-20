@@ -17,6 +17,8 @@ export function useSettingsForm() {
     refreshConcurrency: null as number | null,
     maxConcurrentPerAccount: null as number | null,
     requestIntervalMs: null as number | null,
+    capacityQueueRetrySeconds: null as number | null,
+    capacityQueueTimeoutSeconds: null as number | null,
     rotationStrategy: '' as RotationStrategy | '',
     minCodexDesktopVersion: '',
     minCodexCliVersion: '',
@@ -39,7 +41,7 @@ export function useSettingsForm() {
     cyberSessionBlockTtlSeconds: null as number | null,
   })
 
-  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs' | 'overloadCooldownThreshold' | 'overloadCooldownSeconds' | 'cyberSessionBlockTtlSeconds') {
+  function numericModel(key: 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'requestIntervalMs' | 'capacityQueueRetrySeconds' | 'capacityQueueTimeoutSeconds' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs' | 'overloadCooldownThreshold' | 'overloadCooldownSeconds' | 'cyberSessionBlockTtlSeconds') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -57,6 +59,17 @@ export function useSettingsForm() {
   const refreshConcurrencyValue = numericModel('refreshConcurrency')
   const maxConcurrentPerAccountValue = numericModel('maxConcurrentPerAccount')
   const requestIntervalMsValue = numericModel('requestIntervalMs')
+  const capacityQueueRetrySecondsValue = numericModel('capacityQueueRetrySeconds')
+  const capacityQueueTimeoutSecondsValue = numericModel('capacityQueueTimeoutSeconds')
+  const capacityQueueErrors = computed(() => ({
+    retry: positiveIntegerError(form.capacityQueueRetrySeconds, 4_294_967_295),
+    timeout: positiveIntegerError(form.capacityQueueTimeoutSeconds, 4_294_967_295)
+      || (form.capacityQueueRetrySeconds !== null
+        && form.capacityQueueTimeoutSeconds !== null
+        && form.capacityQueueTimeoutSeconds < form.capacityQueueRetrySeconds
+        ? '排队超时不能短于重试间隔'
+        : ''),
+  }))
   const wsPoolMaxAgeMsValue = numericModel('wsPoolMaxAgeMs')
   const wsPoolMaxConnectingValue = numericModel('wsPoolMaxConnecting')
   const wsPoolStreamIdleTimeoutMsValue = numericModel('wsPoolStreamIdleTimeoutMs')
@@ -121,6 +134,8 @@ export function useSettingsForm() {
     form.refreshConcurrency = data.refreshConcurrency
     form.maxConcurrentPerAccount = data.maxConcurrentPerAccount
     form.requestIntervalMs = data.requestIntervalMs
+    form.capacityQueueRetrySeconds = data.capacityQueueRetrySeconds
+    form.capacityQueueTimeoutSeconds = data.capacityQueueTimeoutSeconds
     form.rotationStrategy = data.rotationStrategy
     form.minCodexDesktopVersion = data.minCodexDesktopVersion ?? ''
     form.minCodexCliVersion = data.minCodexCliVersion ?? ''
@@ -197,9 +212,13 @@ export function useSettingsForm() {
   async function saveSettings() {
     if (saving.value || loading.value)
       return
-    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs, overloadCooldownThreshold, overloadCooldownSeconds, cyberSessionBlockTtlSeconds } = form
-    if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || !rotationStrategy) {
+    const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, requestIntervalMs, capacityQueueRetrySeconds, capacityQueueTimeoutSeconds, rotationStrategy, wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs, overloadCooldownThreshold, overloadCooldownSeconds, cyberSessionBlockTtlSeconds } = form
+    if (refreshMarginSeconds === null || refreshConcurrency === null || maxConcurrentPerAccount === null || requestIntervalMs === null || capacityQueueRetrySeconds === null || capacityQueueTimeoutSeconds === null || !rotationStrategy) {
       toast.warning('请完整填写运行参数和调度策略')
+      return
+    }
+    if (Object.values(capacityQueueErrors.value).some(Boolean)) {
+      toast.warning('请修正并发排队参数')
       return
     }
     if (wsPoolMaxAgeMs === null || wsPoolMaxConnecting === null || wsPoolStreamIdleTimeoutMs === null || wsPoolFastPathBudgetMs === null) {
@@ -238,6 +257,8 @@ export function useSettingsForm() {
         refreshConcurrency,
         maxConcurrentPerAccount,
         requestIntervalMs,
+        capacityQueueRetrySeconds,
+        capacityQueueTimeoutSeconds,
         rotationStrategy,
         minCodexDesktopVersion: form.minCodexDesktopVersion.trim() || null,
         minCodexCliVersion: form.minCodexCliVersion.trim() || null,
@@ -285,6 +306,9 @@ export function useSettingsForm() {
     refreshConcurrencyValue,
     maxConcurrentPerAccountValue,
     requestIntervalMsValue,
+    capacityQueueRetrySecondsValue,
+    capacityQueueTimeoutSecondsValue,
+    capacityQueueErrors,
     wsPoolMaxAgeMsValue,
     wsPoolMaxConnectingValue,
     wsPoolStreamIdleTimeoutMsValue,

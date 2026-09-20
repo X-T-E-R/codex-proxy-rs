@@ -54,6 +54,8 @@ fn valid_replace_command() -> ReplaceRuntimeSettings {
         refresh_concurrency: 1,
         max_concurrent_per_account: 1,
         request_interval_ms: 0,
+        capacity_queue_retry_seconds: Some(3),
+        capacity_queue_timeout_seconds: Some(60),
         rotation_strategy: RotationStrategy::Smart,
         min_codex_desktop_version: None,
         min_codex_cli_version: None,
