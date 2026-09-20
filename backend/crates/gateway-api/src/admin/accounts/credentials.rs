@@ -250,13 +250,7 @@ fn parse_model_access_update(
         return Err(WireValidationError::new("allowedModels"));
     }
     let original_len = models.len();
-    let parsed = models
-        .into_iter()
-        .map(|model| {
-            UpstreamModelId::new(model).map_err(|_| WireValidationError::new("allowedModels"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let access = AccountModelAccess::only(parsed)
+    let access = AccountModelAccess::only(models)
         .ok_or_else(|| WireValidationError::new("allowedModels"))?;
     if access.allowed_models().map_or(0, BTreeSet::len) != original_len {
         return Err(WireValidationError::new("allowedModels"));

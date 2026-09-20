@@ -29,7 +29,7 @@ use gateway_core::account::{
     ProviderAccountUpdate, ProviderRefreshQuery, QuotaAccessChange, QuotaAccessState,
     QuotaEvidence, QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
 };
-use gateway_core::routing::{AccountGroupId, ProviderKind, UpstreamModelId};
+use gateway_core::routing::{AccountGroupId, ProviderKind};
 use gateway_store::{
     ConflictKind, JsonObject, Revision, StoreError,
     postgres::{
@@ -2456,11 +2456,8 @@ async fn account_model_access_round_trips_and_can_return_to_all_models() {
         actor: MutationActor::System,
         request_id: "account-model-access".to_owned(),
     };
-    let limited = AccountModelAccess::only([
-        UpstreamModelId::new("gpt-5.6-luna").expect("model"),
-        UpstreamModelId::new("gpt-5.6-sol").expect("model"),
-    ])
-    .expect("nonempty access");
+    let limited = AccountModelAccess::only(["gpt-5.6-luna".to_owned(), "gpt-5.6-sol".to_owned()])
+        .expect("nonempty access");
 
     store
         .update_account(

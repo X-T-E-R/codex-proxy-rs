@@ -24,7 +24,6 @@ use gateway_core::provider_ports::{
 };
 use gateway_core::routing::{
     ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
-    UpstreamModelId,
 };
 use provider_openai::OFFICIAL_CODEX_BASE_URL;
 use provider_openai::credential::{
@@ -439,8 +438,7 @@ fn selector_enforces_account_model_access_before_scheduling() {
     create_account(&store, "acct_primary", "at-primary");
     store.set_model_access(
         "acct_primary",
-        AccountModelAccess::only([UpstreamModelId::new("gpt-5.6-sol").expect("model")])
-            .expect("nonempty access"),
+        AccountModelAccess::only(["gpt-5.6-sol".to_owned()]).expect("nonempty access"),
     );
     let leases = Arc::new(TestLeaseCoordinator::default());
     let selector = selector(&store, Arc::clone(&leases));

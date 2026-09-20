@@ -41,7 +41,7 @@ use gateway_core::account::{
     QuotaEvidence, QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
 };
 use gateway_core::error::{StoreError as CoreStoreError, StoreErrorKind as CoreStoreErrorKind};
-use gateway_core::routing::{AccountGroupId, ProviderKind, UpstreamModelId};
+use gateway_core::routing::{AccountGroupId, ProviderKind};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::{

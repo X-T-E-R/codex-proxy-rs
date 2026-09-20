@@ -586,10 +586,6 @@ fn parse_model_access(models: Option<Vec<String>>) -> StoreResult<AccountModelAc
         return Err(invalid("invalid allowed_models"));
     }
     let original_len = models.len();
-    let models = models
-        .into_iter()
-        .map(|model| UpstreamModelId::new(model).map_err(|_| invalid("invalid allowed_models")))
-        .collect::<StoreResult<Vec<_>>>()?;
     let access =
         AccountModelAccess::only(models).ok_or_else(|| invalid("invalid allowed_models"))?;
     if access.allowed_models().map_or(0, BTreeSet::len) != original_len {

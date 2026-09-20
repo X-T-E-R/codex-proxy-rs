@@ -808,8 +808,7 @@ async fn account_model_access_is_applied_before_xai_scheduling() {
     let id = account_id("model-access");
     fixture.store.set_model_access(
         &id,
-        AccountModelAccess::only([UpstreamModelId::new("grok-4.6").expect("model")])
-            .expect("nonempty access"),
+        AccountModelAccess::only(["grok-4.6".to_owned()]).expect("nonempty access"),
     );
 
     assert!(matches!(

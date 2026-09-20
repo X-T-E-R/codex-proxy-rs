@@ -8,7 +8,6 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Map, Value};
 
 use crate::identity::ProviderKind;
-use crate::routing::UpstreamModelId;
 use crate::validation::{IdentifierError, validate_text};
 
 use super::CredentialError;
@@ -65,15 +64,19 @@ impl AccountConcurrencyLimit {
 pub enum AccountModelAccess {
     #[default]
     All,
-    Only(BTreeSet<UpstreamModelId>),
+    Only(BTreeSet<String>),
 }
 
 impl AccountModelAccess {
     /// 构造非空模型白名单；空集合没有稳定语义，由调用方显式使用 [`Self::All`]。
     #[must_use]
-    pub fn only(models: impl IntoIterator<Item = UpstreamModelId>) -> Option<Self> {
+    pub fn only(models: impl IntoIterator<Item = String>) -> Option<Self> {
         let models = models.into_iter().collect::<BTreeSet<_>>();
-        (!models.is_empty()).then_some(Self::Only(models))
+        (!models.is_empty()
+            && models
+                .iter()
+                .all(|model| validate_text(model, 256, true, None).is_ok()))
+        .then_some(Self::Only(models))
     }
 
     #[must_use]
@@ -86,7 +89,7 @@ impl AccountModelAccess {
 
     /// `None` 表示全部模型，`Some` 始终为非空且按 ID 稳定排序。
     #[must_use]
-    pub const fn allowed_models(&self) -> Option<&BTreeSet<UpstreamModelId>> {
+    pub const fn allowed_models(&self) -> Option<&BTreeSet<String>> {
         match self {
             Self::All => None,
             Self::Only(models) => Some(models),
