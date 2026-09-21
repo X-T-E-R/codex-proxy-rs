@@ -34,6 +34,104 @@ mod turn_state;
 
 static TEST_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
+const DEPLOYED_FORK_MIGRATIONS: &[(i64, &str, &str)] = &[
+    (
+        1,
+        "initial",
+        "66daf12a89a1ec11a81110c1ce6289f110bf65beaa432f2668a2bddc6fd246933138dba2d70a60a3d29c6aa6b2e631c1",
+    ),
+    (
+        2,
+        "client key budgets",
+        "9c29e6c73340926f312b58af3b58b5be43b021ccc77797b4ebbf016cac6da802948d99f8e4a324cd1113184698e7ae8a",
+    ),
+    (
+        3,
+        "account outbound proxy",
+        "8a0ed3ad9db3132dfefe7bc60dc78558c6e1fc687575ec8f21c0a0e27c5aa0866fd1fbdaaa66a6ad82be0816ae41efc8",
+    ),
+    (
+        4,
+        "remove client charge reconciliation",
+        "5379ecf2efdcc4c68c48a083284f38cef3be3e27cba46bf86d919649ab1622b4f86e4bbdae031758da1db56b2dd73860",
+    ),
+    (
+        5,
+        "managed outbound proxies",
+        "a0691a7cb853a9e03abc94b0e3564384dedecfe8e6b68deaba4d059a7a9863764b28daa6dadacf24b53775c8cdeaa9b6",
+    ),
+    (
+        6,
+        "ws pool runtime settings",
+        "6d08edfc0b1ea7c2a13afa5ac318fb89f3dea6a91608918c27f1c86c7b3b1a515a43e43cbfd4cd09a1b74f86d9172581",
+    ),
+    (
+        7,
+        "overload cooldown",
+        "6e1dd276f7f462fcd6f33299059b479e2f7a03b5d1f6abac78526c63fcc3546c61191cba62f91684e1450f11a6a6f2d7",
+    ),
+    (
+        8,
+        "openai user agent",
+        "85d41a20952cc776730ff3bd54f344e093895150b13b1fd3311694bd54e097bfb53197a4d248e576635c9eb380f5d68c",
+    ),
+    (
+        9,
+        "cyber session block",
+        "3639a56c6b43534e820814d14a985fda593241e341c4efb755c5eec3af233287a6542a90e3de907969a5f92e63d658fd",
+    ),
+    (
+        10,
+        "openai request locale",
+        "1eb2db277349cd1fea31adea40f26cd06c14e19061609ee29461df8aeb6b299e0af230d6b00eda434aed6b6227c38be3",
+    ),
+    (
+        11,
+        "openai turn state",
+        "7fffc53921126a187f4ced497916708aaa9c36e50135fb834a2a6655d4acc3c769b8cf55f65d4148e7c2b75d4b474af1",
+    ),
+    (
+        12,
+        "request turn state",
+        "2f4243ffa1db5b3f9b18d1e12c5b84a18ef339ce798aa2ad8ba628f413424578a723c3598577b95ebadb8970fcdec799",
+    ),
+    (
+        13,
+        "openai model turn state",
+        "0187b793d941d3ca14b646eeacfacb8efaf0c8a090d15de5d4807532d3c9416ce8f62f0aa1ba4822a417c19a196bf999",
+    ),
+    (
+        14,
+        "openai account turn state policy",
+        "49d08f8e9f176f982bbaebee48e99d0e986a13425e270005c403159f2a91c4b70fa4ada5a9c5fa52dd31e4dcdcff825c",
+    ),
+    (
+        15,
+        "openai turn state rotation",
+        "31592a8a58a8c51b15fc437e692e2c9cd2f73ccaa7fa29a0420bcb4f528461e10b419bc7898e97bcc595953d6ee05816",
+    ),
+    (
+        16,
+        "openai turn state capture modes",
+        "54ef952e48d3b077a024f381fa125772ca9ad143bd13073a28ccd2f672d1d68c0aa999cade3f6cc8d975ea2921142eb4",
+    ),
+    (
+        17,
+        "openai turn state missing action",
+        "2a5fb4d567f7e960bcd03ce453019bb08509e9443a6ea81655de76ced5663704c59bcf5485dad3c15ab29cf602a2b781",
+    ),
+    (
+        18,
+        "openai turn state capture attempt limit",
+        "c2359f68b0dcef276594a083f8e775a0c9a6c1ee940e830ba4ed9c82c05e8c18375059ae0cf1053e8c7dff13d904bda9",
+    ),
+    (
+        19,
+        "account model access and capacity queue",
+        "057f756f06cd28dc2d93f2c8b929c53d167dfa79805b14288551e5bb9023725f96b7cb4e1ee6baa82f79afae815b788e",
+    ),
+];
+
 pub(super) struct TestDatabase {
     admin: PgPool,
     pub(super) pool: PgPool,
@@ -292,4 +390,22 @@ fn migrations_should_leave_transaction_ownership_to_sqlx() {
         .count();
 
     assert_eq!(transaction_statements, 0);
+}
+
+#[test]
+fn deployed_fork_migration_prefix_should_remain_byte_compatible() {
+    let migrations = TEST_MIGRATOR.iter().collect::<Vec<_>>();
+    for (index, migration) in migrations.iter().enumerate() {
+        assert_eq!(migration.version, i64::try_from(index + 1).unwrap());
+    }
+    for (migration, (version, description, checksum)) in migrations
+        .iter()
+        .take(DEPLOYED_FORK_MIGRATIONS.len())
+        .zip(DEPLOYED_FORK_MIGRATIONS)
+    {
+        assert_eq!(migration.version, *version);
+        assert_eq!(migration.description.as_ref(), *description);
+        assert_eq!(hex::encode(migration.checksum.as_ref()), *checksum);
+    }
+    assert!(migrations.len() > DEPLOYED_FORK_MIGRATIONS.len());
 }
