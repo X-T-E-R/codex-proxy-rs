@@ -107,7 +107,7 @@ async fn start_account_model_turn_state_capture<S>(
     AdminJson(request): AdminJson<StartModelTurnStateCaptureRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let id = ProviderAccountId::new(request.account_id)
@@ -137,7 +137,7 @@ async fn account_turn_state_policy<S>(
     AdminQuery(query): AdminQuery<AccountIdQuery>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     let id = query.into_id().map_err(map_wire_error)?;
     let view = state
@@ -158,7 +158,7 @@ async fn update_account_turn_state_policy<S>(
     AdminJson(request): AdminJson<UpdateAccountTurnStatePolicyRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let id = ProviderAccountId::new(request.account_id.clone())
@@ -181,7 +181,7 @@ async fn account_model_turn_state_capture<S>(
     AdminQuery(query): AdminQuery<ModelTurnStateCaptureQuery>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     validate_job_id(&query.job_id)?;
     let job = state
@@ -201,7 +201,7 @@ async fn cancel_account_model_turn_state_capture<S>(
     AdminJson(request): AdminJson<CancelModelTurnStateCaptureRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     validate_job_id(&request.job_id)?;
     let job = state
@@ -229,7 +229,7 @@ async fn account_model_turn_state<S>(
     AdminQuery(query): AdminQuery<ModelTurnStateQuery>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     require_account_id(&query.account_id, "accountId").map_err(map_wire_error)?;
     let id = ProviderAccountId::new(query.account_id)
@@ -252,7 +252,7 @@ async fn update_account_model_turn_state<S>(
     AdminJson(request): AdminJson<UpdateModelTurnStateRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let id = ProviderAccountId::new(request.account_id.clone())
@@ -276,7 +276,7 @@ async fn account_turn_state<S>(
     AdminQuery(query): AdminQuery<AccountIdQuery>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     let id = query.into_id().map_err(map_wire_error)?;
     let view = state
@@ -297,7 +297,7 @@ async fn update_account_turn_state<S>(
     AdminJson(request): AdminJson<UpdateTurnStateRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let id = ProviderAccountId::new(request.account_id)
@@ -325,7 +325,7 @@ async fn use_observed_account_turn_state<S>(
     AdminJson(request): AdminJson<UseObservedTurnStateRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
-    S: AdminSessionState + Send + Sync,
+    S: SessionState + Send + Sync,
 {
     require_account_id(&request.account_id, "accountId").map_err(map_wire_error)?;
     let id = ProviderAccountId::new(request.account_id)

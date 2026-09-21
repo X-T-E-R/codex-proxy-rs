@@ -32,6 +32,7 @@ use gateway_core::operation::{
     OperationKind, ProtocolPayload, ProviderSessionState, RawJsonPayload, StandaloneSearchRequest,
 };
 use gateway_core::policy::ClientApiKeyId;
+use gateway_core::provider_ports::ProviderLeasePort;
 use gateway_core::provider_ports::turn_state::{
     ActiveModelTurnStatePin, ModelTurnStateCaptureCoordinator, ModelTurnStateCaptureRequest,
     ModelTurnStateCaptureWaitError, ModelTurnStateMissingAction, ModelTurnStateMissingPolicy,
@@ -1151,58 +1152,6 @@ fn fallback_transport_context(request_id: &str) -> AttemptContext {
     context(request_id, CancellationToken::new()).with_transport(AttemptTransport::Fallback)
 }
 
-fn overload_context(account_id: &str, policy: Option<(u32, u32)>) -> AttemptContext {
-    AttemptContext::new(
-        RequestAttemptContext::new(
-            ModelRequestId::new("req_overload").expect("request"),
-            ClientApiKeyId::new("key_openai_contract").expect("key"),
-        ),
-        NonZeroU32::new(1).expect("attempt"),
-        SystemTime::now() + Duration::from_secs(30),
-        account_policy().with_overload_cooldown(policy.map(|(threshold, seconds)| {
-            (
-                NonZeroU32::new(threshold).expect("threshold"),
-                NonZeroU32::new(seconds).expect("seconds"),
-            )
-        })),
-        AccountAttemptContext::new(
-            BTreeSet::new(),
-            Some(ProviderAccountId::new(account_id).expect("account")),
-            None,
-        )
-        .with_account_scope(contract_account_scope()),
-        None,
-        CancellationToken::new(),
-    )
-    .with_transport(AttemptTransport::Fallback)
-}
-
-async fn overload_request(
-    provider: &CodexProvider,
-    account_id: &str,
-    policy: Option<(u32, u32)>,
-) -> Result<(), gateway_core::error::ProviderError> {
-    let mut stream = provider
-        .execute(
-            planned_request("openai", http_generate_operation()),
-            overload_context(account_id, policy),
-        )
-        .await?;
-    while let Some(event) = stream.next().await {
-        event?;
-    }
-    Ok(())
-}
-
-async fn overload_response(server: &MockServer, response: ResponseTemplate) {
-    server.reset().await;
-    Mock::given(method("POST"))
-        .and(path("/codex/responses"))
-        .respond_with(response)
-        .mount(server)
-        .await;
-}
-
 #[tokio::test]
 async fn natural_missing_state_captures_before_replaying_an_invalid_header_response_once() {
     const ACCOUNT_ID: &str = "acct_provider_contract";
@@ -2126,143 +2075,6 @@ async fn capture_without_lock_keeps_the_business_request_fail_open() {
         event.expect("capture-only response");
     }
     assert!(capture.calls.lock().unwrap().is_empty());
-}
-
-fn overloaded_response() -> ResponseTemplate {
-    ResponseTemplate::new(503).set_body_json(json!({
-        "error": {
-            "type": "server_error",
-            "message": "Our servers are currently overloaded. Please try again later."
-        }
-    }))
-}
-
-fn overload_success_response() -> ResponseTemplate {
-    ResponseTemplate::new(200)
-        .insert_header("content-type", "text/event-stream")
-        .set_body_string(format!(
-            "event: response.created\ndata: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp_scope_capture\",\"model\":\"gpt-5.4\"}}}}\n\n{CAPTURE_COMPLETED_SSE}"
-        ))
-}
-
-#[tokio::test]
-async fn overload_cooldown_is_opt_in_consecutive_and_account_scoped() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_provider_contract").await;
-    create_account(&store, "acct_scope_new").await;
-    let server = MockServer::start().await;
-    let provider = provider_with_base_url(&store, server.uri());
-    let account = "acct_provider_contract";
-    overload_response(&server, overloaded_response()).await;
-    for _ in 0..3 {
-        let error = overload_request(&provider, account, None)
-            .await
-            .expect_err("upstream overload");
-        assert_eq!(error.send_state(), UpstreamSendState::Sent);
-        assert_eq!(error.upstream_status(), Some(503));
-    }
-    let policy = Some((2, 120));
-    assert!(overload_request(&provider, account, policy).await.is_err());
-    overload_response(&server, overload_success_response()).await;
-    overload_request(&provider, account, policy)
-        .await
-        .expect("success resets streak");
-    overload_response(&server, overloaded_response()).await;
-    assert!(overload_request(&provider, account, policy).await.is_err());
-    // 仅 code/status 相似不算匹配，也必须打断连续次数。
-    overload_response(
-        &server,
-        ResponseTemplate::new(503).set_body_json(json!({
-            "error": { "code": "server_is_overloaded", "message": "A different server failure" }
-        })),
-    )
-    .await;
-    assert!(overload_request(&provider, account, policy).await.is_err());
-    overload_response(&server, overloaded_response()).await;
-    assert!(overload_request(&provider, account, policy).await.is_err());
-    assert!(
-        overload_request(&provider, "acct_scope_new", policy)
-            .await
-            .is_err()
-    );
-    overload_response(
-        &server,
-        ResponseTemplate::new(503).set_body_string(
-            "Upstream rejected the request: Selected model is at capacity. Retry later.",
-        ),
-    )
-    .await;
-    let second = overload_request(&provider, account, policy)
-        .await
-        .expect_err("second upstream failure");
-    assert_eq!(second.upstream_status(), Some(503), "{second:?}");
-    let before = server.received_requests().await.expect("requests").len();
-    // 关闭新触发并不提前解除已有冷号；指定账号和诊断都不会再发送上游请求。
-    let blocked = overload_request(&provider, account, None)
-        .await
-        .expect_err("cold account");
-    assert_eq!(blocked.send_state(), UpstreamSendState::NotSent);
-    assert!(
-        provider
-            .execute(
-                planned_request("openai", http_generate_operation()),
-                diagnostic_context("req_cold_diagnostic", account),
-            )
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        server.received_requests().await.expect("requests").len(),
-        before
-    );
-    overload_response(&server, overload_success_response()).await;
-    overload_request(&provider, "acct_scope_new", policy)
-        .await
-        .expect("other account remains eligible");
-}
-
-#[tokio::test]
-async fn overload_cooldown_expiry_and_late_success_preserve_the_configured_interval() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_provider_contract").await;
-    let server = MockServer::start().await;
-    let provider = provider_with_base_url(&store, server.uri());
-    let account = "acct_provider_contract";
-    let policy = Some((1, 1));
-    overload_response(&server, overload_success_response()).await;
-    let mut in_flight = provider
-        .execute(
-            planned_request("openai", http_generate_operation()),
-            overload_context(account, policy),
-        )
-        .await
-        .expect("admitted before cooldown");
-    in_flight
-        .next()
-        .await
-        .expect("response observation")
-        .expect("successful opening");
-    assert_eq!(server.received_requests().await.expect("requests").len(), 1);
-    // SSE 的错误事件走同一个过载检测入口；阈值 1 立即冷号。
-    overload_response(&server, ResponseTemplate::new(200)
-        .insert_header("content-type", "text/event-stream")
-        .set_body_string(concat!(
-            "event: error\n",
-            "data: {\"type\":\"error\",\"error\":{\"type\":\"server_error\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}}\n\n"
-        ))).await;
-    assert!(overload_request(&provider, account, policy).await.is_err());
-    while let Some(event) = in_flight.next().await {
-        event.expect("in-flight success still finishes");
-    }
-    let blocked = overload_request(&provider, account, policy)
-        .await
-        .expect_err("late success cannot clear cooldown");
-    assert_eq!(blocked.send_state(), UpstreamSendState::NotSent);
-    tokio::time::sleep(Duration::from_millis(1_100)).await;
-    overload_response(&server, overload_success_response()).await;
-    overload_request(&provider, account, policy)
-        .await
-        .expect("expiry restores admission");
 }
 
 fn diagnostic_context(request_id: &str, account_id: &str) -> AttemptContext {

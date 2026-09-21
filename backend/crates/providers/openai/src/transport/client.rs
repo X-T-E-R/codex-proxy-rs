@@ -34,9 +34,9 @@ use super::response_meta::CodexResponseMetadata;
 use super::tls::{CustomCaError, build_reqwest_client_with_custom_ca, custom_ca_env_cache_key};
 use super::websocket::{
     CodexWebSocketExchangeError, CodexWebSocketPool, CodexWebSocketPoolKey,
-    CodexWebSocketRateLimitUpdates, CodexWebSocketRequest, CodexWebSocketTurnStateObservations,
-    CodexWebSocketTurnStateUpdate, PreparedWebSocket, WebSocketOriginBreaker,
-    WebSocketPoolDecision,
+    CodexWebSocketRateLimitUpdates, CodexWebSocketRequest, CodexWebSocketResponseMetadataUpdates,
+    CodexWebSocketTurnStateObservations, CodexWebSocketTurnStateUpdate, PreparedWebSocket,
+    WebSocketOriginBreaker, WebSocketPoolDecision,
 };
 
 // ---------------------------------------------------------------------------
@@ -656,6 +656,9 @@ pub type CodexRateLimitUpdates = CodexWebSocketRateLimitUpdates;
 /// 响应头之后在 live 流中采集的请求级 metadata 更新。
 pub type CodexResponseMetadataUpdates = CodexWebSocketResponseMetadataUpdates;
 
+/// 响应头之后在 live 流中采集的 turn state 更新。
+pub type CodexTurnStateUpdate = CodexWebSocketTurnStateUpdate;
+
 /// 在真实上游接收边界生成的敏感观测；不实现 Debug，避免原值进入诊断。
 #[derive(Clone, PartialEq, Eq)]
 #[doc(hidden)]
@@ -699,6 +702,8 @@ pub struct CodexBackendStreamingResponse {
     pub rate_limit_headers: Vec<(String, String)>,
     /// live stream 期间捕获的结构化限流更新。
     pub rate_limit_updates: Option<CodexRateLimitUpdates>,
+    /// live stream 期间捕获的请求级 metadata 更新。
+    pub response_metadata_updates: Option<CodexResponseMetadataUpdates>,
     /// live stream 期间捕获的 turn-state 更新。
     pub turn_state_update: Option<CodexTurnStateUpdate>,
     /// WS 每次 metadata 实际值；独立于 continuation 的首值语义。

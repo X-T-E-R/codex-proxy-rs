@@ -27,6 +27,7 @@ use gateway_admin::model::provider_credentials::{
     ProviderResetCredit, ProviderResetCreditResult, ProviderResetCredits, ProviderSubscription,
     QuotaLocalUsageAttribution,
 };
+use gateway_admin::model::quota_forecast_sampling::QuotaForecastObservation;
 use gateway_admin::ports::provider::{
     ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind, ProviderTurnStateCapture,
     ProviderTurnStateCaptureRequest,
@@ -270,6 +271,87 @@ impl ProviderAdmin for OpenAiAdminProvider {
             }],
             verified_at: Some(profile.verified_at),
             release: Some(release),
+        })
+    }
+
+    fn configured_wire_profile(
+        &self,
+        configuration: &OpaqueProviderData,
+    ) -> Option<DashboardWireProfile> {
+        use crate::transport::profile::selection::{
+            ClientKind, ClientPlatform, ClientProfileSelection, VersionMode,
+        };
+        let selection = ClientProfileSelection::parse(configuration).ok()?;
+        let profile = selection.resolve(&self.profile).ok()?;
+        let custom = selection.version_mode == VersionMode::Fixed;
+        let (checked_at, error) = self.profile.client_release_status(
+            selection.client,
+            selection.platform,
+            selection.architecture(),
+        );
+        let release = if custom {
+            None
+        } else if selection.client == ClientKind::Desktop
+            && selection.platform == ClientPlatform::Macos
+        {
+            Some(dashboard_desktop_release(
+                &profile,
+                self.desktop_release.snapshot(),
+            ))
+        } else {
+            Some(DashboardDesktopRelease {
+                status: if error.is_some() {
+                    DesktopReleaseStatus::Failed
+                } else if checked_at.is_some() {
+                    DesktopReleaseStatus::Current
+                } else {
+                    DesktopReleaseStatus::Unchecked
+                },
+                checked_at,
+                latest_version: Some(profile.codex_version.clone()),
+                latest_build: None,
+                published_at: None,
+                minimum_system_version: None,
+                hardware_requirements: None,
+                download_url: None,
+                download_size: None,
+                signature_present: None,
+                error,
+            })
+        };
+        Some(DashboardWireProfile {
+            provider: self.provider_kind.as_str().to_owned(),
+            product: profile.originator.clone(),
+            version: profile.codex_version.clone(),
+            build: None,
+            user_agent: profile.user_agent(),
+            target: DashboardWireTarget {
+                os_type: profile.os_type,
+                os_version: profile.os_version,
+                arch: profile.arch,
+                terminal: profile.terminal,
+            },
+            attributes: vec![
+                DashboardWireAttribute {
+                    label: "客户端标识".to_owned(),
+                    value: if selection.client == ClientKind::Desktop {
+                        format!("{}; {}", profile.originator, profile.desktop_version)
+                    } else {
+                        profile.originator
+                    },
+                },
+                DashboardWireAttribute {
+                    label: "版本策略".to_owned(),
+                    value: if custom {
+                        "固定自定义"
+                    } else {
+                        "自动最新"
+                    }
+                    .to_owned(),
+                },
+            ],
+            verified_at: (!custom).then_some(profile.verified_at),
+            release,
         })
     }
 

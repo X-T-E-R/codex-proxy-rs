@@ -80,11 +80,19 @@ impl SettingsStore for UnusedSettingsStore {
 
 fn valid_replace_command() -> ReplaceRuntimeSettings {
     ReplaceRuntimeSettings {
+        openai_client_profile: None,
+        xai_client_profile: None,
+        request_location_enabled: false,
+        request_location: Default::default(),
         model_mappings: Default::default(),
         refresh_margin_seconds: 3_600,
         refresh_concurrency: 1,
         max_concurrent_per_account: 1,
         request_interval_ms: 0,
+        max_waiting_per_key: 0,
+        max_waiting_per_account: 0,
+        concurrency_wait_timeout_seconds: 30,
+        responses_max_decompressed_body_bytes: 64 * 1024 * 1024,
         rotation_strategy: RotationStrategy::Smart,
         min_codex_desktop_version: None,
         min_codex_cli_version: None,
@@ -96,12 +104,15 @@ fn valid_replace_command() -> ReplaceRuntimeSettings {
         ws_pool_max_connecting: 8,
         ws_pool_stream_idle_timeout_ms: 300_000,
         ws_pool_fast_path_budget_ms: 800,
-        overload_cooldown_enabled: false,
-        overload_cooldown_threshold: 2,
-        overload_cooldown_seconds: 120,
         cyber_session_block_enabled: Some(false),
         cyber_session_block_ttl_seconds: Some(3600),
-        openai_user_agent: None,
+        account_auto_freeze_enabled: true,
+        account_auto_freeze_threshold: 12,
+        account_auto_freeze_window_seconds: 600,
+        account_auto_freeze_duration_seconds: 7_200,
+        account_auto_freeze_probe_enabled: true,
+        account_auto_freeze_probe_model: None,
+        account_auto_freeze_adaptive_concurrency: true,
     }
 }
 
@@ -161,20 +172,6 @@ fn unused() -> AdminStoreError {
         "settings",
         "unused in this test",
     )
-}
-
-#[tokio::test]
-async fn overload_cooldown_settings_reject_zero_even_when_disabled() {
-    replace_and_expect_invalid(ReplaceRuntimeSettings {
-        overload_cooldown_threshold: 0,
-        ..valid_replace_command()
-    })
-    .await;
-    replace_and_expect_invalid(ReplaceRuntimeSettings {
-        overload_cooldown_seconds: 0,
-        ..valid_replace_command()
-    })
-    .await;
 }
 
 #[tokio::test]

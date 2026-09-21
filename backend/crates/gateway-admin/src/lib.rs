@@ -452,7 +452,28 @@ pub async fn initialize(
         import_tasks,
         backups,
     };
+    let freeze_recovery =
+        freeze_recovery::FreezeRecoveryTask::new(freeze_recovery::FreezeRecoveryDeps {
+            accounts: Arc::clone(&accounts) as Arc<dyn AccountsService>,
+            store: store.accounts(),
+            runtime: store.account_runtime(),
+            settings: store.settings(),
+        });
     let mut worker_contributions = backup_worker_contribution(backup_task)?;
+    let id = WorkerId::try_new(WorkerKind::AccountImport, "admin")
+        .map_err(|_| AdminError::internal("导入 Worker ID 不合法"))?;
+    let restart = DaemonRestartPolicy::try_new(Duration::from_secs(1), Duration::from_secs(60))
+        .map_err(|_| AdminError::internal("导入 Worker 重启策略不合法"))?;
+    let registration = WorkerRegistration::try_new(
+        id,
+        WorkerRunnable::Daemon {
+            restart,
+            task: Box::new(import_task),
+        },
+    )
+    .map_err(|_| AdminError::internal("导入 Worker 注册信息不合法"))?;
+    worker_contributions.push(WorkerContribution::Registration(registration));
+    worker_contributions.extend(freeze_recovery_worker_contribution(freeze_recovery)?);
     if let Some(manager) = turn_state_capture.clone() {
         worker_contributions.push(turn_state_capture_worker_contribution(manager)?);
     }

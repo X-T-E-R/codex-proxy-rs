@@ -331,6 +331,25 @@ impl DefaultExecutionService {
         self
     }
 
+    fn authenticate_without_usage(
+        &self,
+        plaintext: &str,
+    ) -> Result<AuthenticatedClient, ClientAuthenticationError> {
+        let snapshot = self
+            .snapshots
+            .acquire()
+            .map_err(|_| ClientAuthenticationError::SnapshotUnavailable)?;
+        let policy = snapshot
+            .client_policies()
+            .filter(|policy| {
+                constant_time_equal(plaintext, policy.plaintext_key().expose_for_auth())
+            })
+            .find(|policy| policy.authorize().is_ok())
+            .cloned()
+            .ok_or(ClientAuthenticationError::InvalidKey)?;
+        Ok(AuthenticatedClient { snapshot, policy })
+    }
+
     async fn start_inner(&self, request: StartExecution) -> Result<StartedExecution, GatewayError> {
         let StartExecution {
             client,
@@ -644,6 +663,84 @@ impl DefaultExecutionService {
         })
     }
 
+    async fn acquire_client_admission(
+        &self,
+        client: &AuthenticatedClient,
+        request_id: &ModelRequestId,
+        deadline_at: SystemTime,
+        budget: &ConcurrencyWaitBudget,
+    ) -> Result<AdmissionLease, GatewayError> {
+        let policy = client.snapshot.client_queue_policy();
+        let limits = client.policy.limits();
+        let key = client.policy.key_id();
+        let mut waiting = CapacityWait::new(&self.admission_waiting, policy, deadline_at, budget);
+        let mut admission = AdmissionLease {
+            port: Arc::clone(&self.admissions),
+            client_api_key_id: key.clone(),
+            model_request_id: request_id.clone(),
+            armed: false,
+        };
+        loop {
+            let remaining = deadline_at
+                .duration_since(SystemTime::now())
+                .unwrap_or_default();
+            if remaining.is_zero() {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::Timeout,
+                    "request deadline elapsed",
+                ));
+            }
+            admission.armed = true;
+            let acquire = self
+                .admissions
+                .admit(ClientAdmissionRequest {
+                    model_request_id: request_id.clone(),
+                    client_api_key_id: key.clone(),
+                    lease_ttl: remaining,
+                    allow_concurrency_acquire: limits.max_concurrency == 0 || waiting.can_try(key),
+                    limits,
+                })
+                .fuse();
+            let timeout = Delay::new(remaining).fuse();
+            pin_mut!(acquire, timeout);
+            let decision = select_biased! {
+                result = acquire => result.map_err(|_| GatewayError::new(GatewayErrorKind::NoAvailableProvider, "request admission is temporarily unavailable"))?,
+                _ = timeout => return Err(GatewayError::new(GatewayErrorKind::Timeout, "request deadline elapsed")),
+            };
+            match decision {
+                ClientAdmissionDecision::Granted => {
+                    if !waiting.elapsed().is_zero() {
+                        tracing::info!(
+                            request_id = request_id.as_str(),
+                            queue_layer = "client_key",
+                            queue_wait_ms = duration_ms(waiting.elapsed()),
+                            "排队请求已取得 Key 并发槽位"
+                        );
+                    }
+                    return Ok(admission);
+                }
+                ClientAdmissionDecision::Rejected(reason) => {
+                    admission.armed = false;
+                    if reason == ClientAdmissionRejection::RateLimited || policy.max_waiting == 0 {
+                        return Err(GatewayError::new(
+                            GatewayErrorKind::RateLimited,
+                            "request exceeds client API key limits",
+                        ));
+                    }
+                    if waiting.elapsed().is_zero()
+                        && let Some(budget) = &self.budget
+                    {
+                        budget.admit(key.clone()).await?;
+                    }
+                    waiting.wait(std::slice::from_ref(key)).await.map_err(|error| {
+                        tracing::info!(request_id = request_id.as_str(), queue_layer = "client_key", queue_wait_ms = duration_ms(waiting.elapsed()), reason = %error, "Key 排队请求被拒绝");
+                        error.gateway_error()
+                    })?;
+                }
+            }
+        }
+    }
+
     async fn cyber_session_is_blocked(
         &self,
         client_api_key_id: &ClientApiKeyId,
@@ -703,6 +800,7 @@ impl DefaultExecutionService {
                 http_version: None,
                 websocket_pool: None,
                 service_tier: None,
+                upstream_response_model: None,
                 provider_metadata_json: None,
                 diagnostic_trace_json: None,
                 error: Some(error),

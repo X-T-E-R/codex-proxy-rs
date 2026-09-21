@@ -253,6 +253,7 @@ async fn collect_backend_response(
         set_cookie_headers,
         mut rate_limit_headers,
         rate_limit_updates,
+        response_metadata_updates,
         turn_state_update,
         turn_state_observations,
         websocket_pool_decision,
@@ -279,6 +280,12 @@ async fn collect_backend_response(
     }
     if let Some(update) = turn_state_update {
         turn_state = update.snapshot().or(turn_state);
+    }
+    let mut reported_model = response_metadata.effective_model.clone();
+    if let Some(update) = response_metadata_updates {
+        let update = update.lock().await;
+        turn_state = update.turn_state.clone().or(turn_state);
+        reported_model = update.reported_model.clone().or(reported_model);
     }
     let turn_state_observations = turn_state_observations.map(|observations| async move {
         observations

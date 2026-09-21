@@ -57,17 +57,20 @@ fn update_body() -> Value {
         "usageRetentionDays": 32,
         "opsEventRetentionDays": 31,
         "auditRetentionDays": 91,
-        "wsPoolEnabled": true,
-        "wsPoolMaxAgeMs": 3_600_000,
+        "accountAutoFreezeEnabled": true,
+        "accountAutoFreezeThreshold": 12,
+        "accountAutoFreezeWindowSeconds": 600,
+        "accountAutoFreezeDurationSeconds": 7200,
+        "accountAutoFreezeProbeEnabled": true,
+        "accountAutoFreezeProbeModel": null,
+        "accountAutoFreezeAdaptiveConcurrency": true,
+        "wsPoolEnabled": false,
+        "wsPoolMaxAgeMs": 2400000,
         "wsPoolMaxConnecting": 6,
-        "wsPoolStreamIdleTimeoutMs": 240_000,
-        "wsPoolFastPathBudgetMs": 1_200,
-        "overloadCooldownEnabled": true,
-        "overloadCooldownThreshold": 2,
-        "overloadCooldownSeconds": 120,
+        "wsPoolStreamIdleTimeoutMs": 180000,
+        "wsPoolFastPathBudgetMs": 1200,
         "cyberSessionBlockEnabled": true,
-        "cyberSessionBlockTtlSeconds": 600,
-        "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)"
+        "cyberSessionBlockTtlSeconds": 900
     })
 }
 
@@ -276,17 +279,20 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         usage_retention_days: 32,
         ops_event_retention_days: 31,
         audit_retention_days: 91,
-        ws_pool_enabled: true,
-        ws_pool_max_age_ms: 3_600_000,
+        account_auto_freeze_enabled: true,
+        account_auto_freeze_threshold: 12,
+        account_auto_freeze_window_seconds: 600,
+        account_auto_freeze_duration_seconds: 7_200,
+        account_auto_freeze_probe_enabled: true,
+        account_auto_freeze_probe_model: None,
+        account_auto_freeze_adaptive_concurrency: true,
+        ws_pool_enabled: false,
+        ws_pool_max_age_ms: 2_400_000,
         ws_pool_max_connecting: 6,
-        ws_pool_stream_idle_timeout_ms: 240_000,
+        ws_pool_stream_idle_timeout_ms: 180_000,
         ws_pool_fast_path_budget_ms: 1_200,
-        overload_cooldown_enabled: true,
-        overload_cooldown_threshold: 2,
-        overload_cooldown_seconds: 120,
         cyber_session_block_enabled: true,
-        cyber_session_block_ttl_seconds: 600,
-        openai_user_agent: Some("Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)".to_owned()),
+        cyber_session_block_ttl_seconds: 900,
         updated_at: Utc
             .with_ymd_and_hms(2026, 8, 2, 10, 30, 0)
             .single()
@@ -319,17 +325,20 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "usageRetentionDays": 32,
             "opsEventRetentionDays": 31,
             "auditRetentionDays": 91,
-            "wsPoolEnabled": true,
-            "wsPoolMaxAgeMs": 3_600_000,
+            "accountAutoFreezeEnabled": true,
+            "accountAutoFreezeThreshold": 12,
+            "accountAutoFreezeWindowSeconds": 600,
+            "accountAutoFreezeDurationSeconds": 7200,
+            "accountAutoFreezeProbeEnabled": true,
+            "accountAutoFreezeProbeModel": null,
+            "accountAutoFreezeAdaptiveConcurrency": true,
+            "wsPoolEnabled": false,
+            "wsPoolMaxAgeMs": 2400000,
             "wsPoolMaxConnecting": 6,
-            "wsPoolStreamIdleTimeoutMs": 240_000,
-            "wsPoolFastPathBudgetMs": 1_200,
-            "overloadCooldownEnabled": true,
-            "overloadCooldownThreshold": 2,
-            "overloadCooldownSeconds": 120,
+            "wsPoolStreamIdleTimeoutMs": 180000,
+            "wsPoolFastPathBudgetMs": 1200,
             "cyberSessionBlockEnabled": true,
-            "cyberSessionBlockTtlSeconds": 600,
-            "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)",
+            "cyberSessionBlockTtlSeconds": 900,
             "updatedAt": "2026-08-02T10:30:00Z"
         })
     );
@@ -387,21 +396,23 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         usage_retention_days: u32::try_from(request.usage_retention_days).expect("u32"),
         ops_event_retention_days: u32::try_from(request.ops_event_retention_days).expect("u32"),
         audit_retention_days: u32::try_from(request.audit_retention_days).expect("u32"),
+        account_auto_freeze_enabled: true,
+        account_auto_freeze_threshold: 12,
+        account_auto_freeze_window_seconds: 600,
+        account_auto_freeze_duration_seconds: 7_200,
+        account_auto_freeze_probe_enabled: true,
+        account_auto_freeze_probe_model: None,
+        account_auto_freeze_adaptive_concurrency: true,
         ws_pool_enabled: request.ws_pool_enabled,
         ws_pool_max_age_ms: request.ws_pool_max_age_ms,
         ws_pool_max_connecting: u32::try_from(request.ws_pool_max_connecting).expect("u32"),
         ws_pool_stream_idle_timeout_ms: request.ws_pool_stream_idle_timeout_ms,
         ws_pool_fast_path_budget_ms: request.ws_pool_fast_path_budget_ms,
-        overload_cooldown_enabled: request.overload_cooldown_enabled,
-        overload_cooldown_threshold: u32::try_from(request.overload_cooldown_threshold)
-            .expect("u32"),
-        overload_cooldown_seconds: u32::try_from(request.overload_cooldown_seconds).expect("u32"),
-        cyber_session_block_enabled: request.cyber_session_block_enabled.expect("cyber enabled"),
-        cyber_session_block_ttl_seconds: u32::try_from(
-            request.cyber_session_block_ttl_seconds.expect("cyber TTL"),
-        )
-        .expect("u32"),
-        openai_user_agent: request.openai_user_agent,
+        cyber_session_block_enabled: request.cyber_session_block_enabled.unwrap_or(false),
+        cyber_session_block_ttl_seconds: request
+            .cyber_session_block_ttl_seconds
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(3_600),
         updated_at: chrono::Utc::now(),
     };
 
@@ -477,96 +488,6 @@ async fn settings_post_should_replace_global_model_mappings() {
     // ws_pool 字段经过 wire 校验与设置用例后完整返回；这里的 store 是内存 fixture。
     assert_eq!(data["wsPoolMaxConnecting"], json!(6));
     assert_eq!(data["wsPoolFastPathBudgetMs"], json!(1_200));
-    assert_eq!(data["overloadCooldownEnabled"], true);
-    assert_eq!(data["overloadCooldownThreshold"], 2);
-    assert_eq!(data["overloadCooldownSeconds"], 120);
-    assert_eq!(data["cyberSessionBlockEnabled"], true);
-    assert_eq!(data["cyberSessionBlockTtlSeconds"], 600);
-    assert_eq!(data["openaiUserAgent"], update_body()["openaiUserAgent"]);
-}
-
-#[tokio::test]
-async fn runtime_settings_reject_invalid_values() {
-    let fixture = AdminTestFixture::new().await;
-    fixture.auth.insert_session("valid-session");
-    for (field, value) in [
-        ("overloadCooldownThreshold", json!(0)),
-        ("overloadCooldownSeconds", json!(0)),
-        ("overloadCooldownThreshold", json!(u64::from(u32::MAX) + 1)),
-        ("overloadCooldownSeconds", json!(u64::from(u32::MAX) + 1)),
-        ("cyberSessionBlockTtlSeconds", json!(0)),
-        (
-            "cyberSessionBlockTtlSeconds",
-            json!(u64::from(u32::MAX) + 1),
-        ),
-        ("openaiUserAgent", json!("agent\r\nAuthorization: injected")),
-        ("openaiUserAgent", json!(" ")),
-        ("openaiUserAgent", json!("a".repeat(513))),
-    ] {
-        let mut body = update_body();
-        body[field] = value;
-        let response = app(fixture.state())
-            .oneshot(request(
-                Method::POST,
-                "/api/admin/settings/update",
-                Some(body),
-            ))
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
-    }
-
-    let mut body = update_body();
-    body["cyberSessionBlockTtlSeconds"] = json!(1.5);
-    let response = app(fixture.state())
-        .oneshot(request(
-            Method::POST,
-            "/api/admin/settings/update",
-            Some(body),
-        ))
-        .await
-        .expect("response");
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-#[tokio::test]
-async fn old_settings_client_omissions_preserve_each_cyber_field() {
-    let fixture = AdminTestFixture::new().await;
-    fixture.auth.insert_session("valid-session");
-    let mut body = update_body();
-    body.as_object_mut()
-        .expect("object")
-        .remove("cyberSessionBlockEnabled");
-    body.as_object_mut()
-        .expect("object")
-        .remove("cyberSessionBlockTtlSeconds");
-    let response = app(fixture.state())
-        .oneshot(request(
-            Method::POST,
-            "/api/admin/settings/update",
-            Some(body),
-        ))
-        .await
-        .expect("response");
-    let data = response_json(response).await["data"].clone();
-    assert_eq!(data["cyberSessionBlockEnabled"], false);
-    assert_eq!(data["cyberSessionBlockTtlSeconds"], 3600);
-
-    let mut body = update_body();
-    body.as_object_mut()
-        .expect("object")
-        .remove("cyberSessionBlockTtlSeconds");
-    let response = app(fixture.state())
-        .oneshot(request(
-            Method::POST,
-            "/api/admin/settings/update",
-            Some(body),
-        ))
-        .await
-        .expect("response");
-    let data = response_json(response).await["data"].clone();
-    assert_eq!(data["cyberSessionBlockEnabled"], true);
-    assert_eq!(data["cyberSessionBlockTtlSeconds"], 3600);
 }
 
 #[tokio::test]

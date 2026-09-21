@@ -51,6 +51,8 @@ pub struct CodexWebSocketStreamingExchange {
     pub rate_limit_headers: Vec<(String, String)>,
     /// 上游内部 `codex.rate_limits` 事件里的结构化动态更新。
     pub rate_limit_updates: CodexWebSocketRateLimitUpdates,
+    /// 上游内部 metadata 事件里的请求级动态更新。
+    pub response_metadata_updates: CodexWebSocketResponseMetadataUpdates,
     /// 上游内部 metadata 事件里的首个动态 turn state。
     pub turn_state_update: CodexWebSocketTurnStateUpdate,
     pub turn_state_observations: CodexWebSocketTurnStateObservations,
@@ -69,6 +71,14 @@ pub type CodexWebSocketSseStream =
     Pin<Box<dyn Stream<Item = Result<Bytes, CodexWebSocketExchangeError>> + Send + 'static>>;
 /// live 流中的结构化限流动态更新。
 pub type CodexWebSocketRateLimitUpdates = Arc<Mutex<Vec<ParsedRateLimits>>>;
+/// 单次响应的动态 metadata，与连接池保存的握手快照隔离。
+#[derive(Debug, Default)]
+pub struct CodexWebSocketResponseMetadataUpdate {
+    pub turn_state: Option<String>,
+    pub reported_model: Option<String>,
+}
+
+pub type CodexWebSocketResponseMetadataUpdates = Arc<Mutex<CodexWebSocketResponseMetadataUpdate>>;
 /// live 流中的 turn state 动态更新。
 pub type CodexWebSocketTurnStateUpdate = Arc<CodexWebSocketTurnStateUpdateSlot>;
 pub type CodexWebSocketTurnStateObservations = Arc<Mutex<Vec<CodexObservedTurnState>>>;

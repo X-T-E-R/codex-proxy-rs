@@ -45,7 +45,7 @@ use gateway_core::routing::{
     RuntimeSnapshot, UpstreamModelId,
 };
 use gateway_core::task::{WorkerContribution, WorkerCycleContext, WorkerKind, WorkerRunnable};
-use provider_openai::config::{CodexWireProfileConfig, OpenAiConfig};
+use provider_openai::config::OpenAiConfig;
 use provider_openai::credential::{CodexCredentialCodec, ImportCodexOAuthCredential};
 use provider_openai::transport::profile::APPCAST_POLL_INTERVAL;
 use secrecy::SecretString;
@@ -75,7 +75,7 @@ async fn openai_bundle_exposes_one_core_provider_and_drains_worker_contributions
     assert_eq!(bundle.core_provider().name(), "openai");
     assert_eq!(bundle.admin_provider().provider_kind().as_str(), "openai");
     let contributions = bundle.take_worker_contributions();
-    assert_eq!(contributions.len(), 6);
+    assert_eq!(contributions.len(), 8);
     assert!(
         contributions
             .iter()
@@ -2356,6 +2356,7 @@ mod errors {
             Arc::new(TestCredentialState),
             Arc::new(TestCooldown),
             Arc::new(TestRuntimePolicy),
+            Arc::new(TestWsPoolPolicy::default()),
             Arc::new(TestOAuthPending::default()),
         )
     }

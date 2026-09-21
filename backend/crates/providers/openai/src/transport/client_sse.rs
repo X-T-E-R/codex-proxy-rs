@@ -146,8 +146,6 @@ impl CodexBackendClient {
                 .map(|(name, value)| (name.as_str(), value.as_bytes())),
         );
         trace.capture("upstream.request.body", &body);
-        let body = zstd::stream::encode_all(std::io::Cursor::new(body), 3)
-            .map_err(CodexClientError::RequestCompression)?;
         let sent_turn_state = headers
             .get_all("x-codex-turn-state")
             .iter()
@@ -155,14 +153,15 @@ impl CodexBackendClient {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let sent_at = chrono::Utc::now();
-        let response = self
-            .client
-            .post(endpoint)
-            .headers(headers)
-            .header(CONTENT_ENCODING, HeaderValue::from_static("zstd"))
-            .body(body)
-            .send()
-            .await?;
+        let mut outbound = self.client.post(endpoint).headers(headers);
+        let body = if self.protocol == OpenAiUpstreamProtocol::Codex {
+            outbound = outbound.header(CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+            zstd::stream::encode_all(std::io::Cursor::new(body), 3)
+                .map_err(CodexClientError::RequestCompression)?
+        } else {
+            body
+        };
+        let response = outbound.body(body).send().await?;
         if let (Some(store), Some(account_id), Some(attempt_index), Some(send), Some(value)) = (
             self.turn_state_store.as_ref(),
             provider_account_id,
@@ -323,6 +322,7 @@ impl CodexBackendClient {
             set_cookie_headers,
             rate_limit_headers,
             rate_limit_updates: Some(rate_limit_updates),
+            response_metadata_updates: None,
             turn_state_update: Some(turn_state_update),
             turn_state_observations: None,
             websocket_pool_decision: None,
@@ -676,6 +676,7 @@ impl CodexBackendClient {
                     set_cookie_headers: exchange.set_cookie_headers,
                     rate_limit_headers: exchange.rate_limit_headers,
                     rate_limit_updates: Some(exchange.rate_limit_updates),
+                    response_metadata_updates: Some(exchange.response_metadata_updates),
                     turn_state_update: Some(exchange.turn_state_update),
                     turn_state_observations: Some(exchange.turn_state_observations),
                     websocket_pool_decision: exchange.pool_decision,

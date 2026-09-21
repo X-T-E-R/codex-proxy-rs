@@ -1,9 +1,7 @@
 use std::path::Path;
 
-use chrono::{TimeZone as _, Utc};
 use provider_openai::config::{
-    CodexWebSocketPoolSettings, CodexWireProfileConfig, DEFAULT_STREAM_MAX_RETRIES,
-    MAX_STREAM_MAX_RETRIES, OpenAiConfig,
+    CodexWebSocketPoolSettings, DEFAULT_STREAM_MAX_RETRIES, MAX_STREAM_MAX_RETRIES, OpenAiConfig,
 };
 
 #[test]
@@ -29,7 +27,11 @@ fn openai_config_derives_identity_secret_from_runtime_data_dir() {
         .resolve_and_validate(Path::new("/srv/gateway/runtime-data"))
         .expect("valid OpenAI config");
 
-    assert!(format!("{config:?}").contains("/srv/gateway/runtime-data/identity_hmac_secret"));
+    let expected = format!(
+        "{:?}",
+        Path::new("/srv/gateway/runtime-data").join("identity_hmac_secret")
+    );
+    assert!(format!("{config:?}").contains(&expected));
 }
 
 #[test]

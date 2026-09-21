@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 use futures::{StreamExt, future::BoxFuture};
 use gateway_core::account::{AccountFeedbackStats, ProviderAccount};
 use gateway_core::engine::continuation::{ContinuationBinding, NativeContinuationScope};
@@ -72,7 +73,9 @@ use crate::transport::canonical::{
 use crate::transport::catalog::{
     CodexCatalogCapabilityEvidence, CodexCatalogModel, CodexCatalogVisibility,
 };
-use crate::transport::client::{CodexObservedTurnState, CodexTurnStateSendContext};
+use crate::transport::client::{
+    CodexObservedTurnState, CodexTurnStateSendContext, CodexTurnStateUpdate,
+};
 use crate::transport::diagnostics::{
     CodexFailureCategory, CodexUpstreamFailure, CodexUpstreamSendPhase,
 };
@@ -155,7 +158,6 @@ pub struct CodexProvider {
     search_url: Url,
     session_identity: Option<CodexSessionIdentity>,
     session_transport_recovery: CodexSessionTransportRecovery,
-    request_body_override: CodexRequestBodyOverrideState,
     turn_state_store: Option<Arc<dyn TurnStateStore>>,
     turn_state_capture: Arc<RwLock<Option<Arc<dyn ModelTurnStateCaptureCoordinator>>>>,
     stream_max_retries: u32,
@@ -212,9 +214,6 @@ impl CodexProvider {
             search_url,
             session_identity: None,
             session_transport_recovery: CodexSessionTransportRecovery::default(),
-            request_body_override: CodexRequestBodyOverrideState::new(
-                gateway_core::provider_ports::OpenAiRequestBodyOverride::disabled(),
-            ),
             turn_state_store: None,
             turn_state_capture: Arc::new(RwLock::new(None)),
             stream_max_retries,
@@ -223,14 +222,6 @@ impl CodexProvider {
 
     pub(crate) fn with_session_identity(mut self, identity: CodexSessionIdentity) -> Self {
         self.session_identity = Some(identity);
-        self
-    }
-
-    pub(crate) fn with_request_body_override(
-        mut self,
-        request_body_override: CodexRequestBodyOverrideState,
-    ) -> Self {
-        self.request_body_override = request_body_override;
         self
     }
 

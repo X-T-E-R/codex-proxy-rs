@@ -47,6 +47,7 @@ function openTurnState(account: AccountRow) {
   turnStateAccount.value = account
   showTurnStateModal.value = true
 }
+const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(accountColumns, 'accounts')
 const {
   loading,
   accounts,
@@ -383,6 +384,20 @@ const {
       :status-view="connectionTestStatusView"
       @refresh-models="handleRefreshConnectionTestModels()"
       @test="handleTestConnection()"
+    />
+
+    <AccountImportTasks
+      v-model="showImportTasks"
+      :tasks="recentImportTasks"
+      :selected-id="importTaskId"
+      :detail="importTaskDetail"
+      :loading="loadingImportTasks"
+      :stopping="stoppingImportTask"
+      :error="importTaskError"
+      @select="importTasks.select"
+      @refresh="importTasks.refresh"
+      @stop="importTasks.stop"
+      @view-accounts="showImportTasks = false; loadAccounts()"
     />
 
     <AccountTurnStateModal v-model="showTurnStateModal" :account="turnStateAccount" />

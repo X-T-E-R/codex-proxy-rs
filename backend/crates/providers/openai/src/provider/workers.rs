@@ -33,7 +33,7 @@ pub(crate) fn worker_contributions(
     catalog: Arc<CodexCredentialCatalogService>,
     quota_refresh_policy: CodexQuotaRefreshPolicy,
     oauth_refresh_enabled: bool,
-    desktop_release: Arc<CodexDesktopReleaseService>,
+    releases: ClientReleaseServices,
     websocket_pool: Arc<CodexWebSocketPool>,
     ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
 ) -> Result<Vec<WorkerContribution>, WorkerDefinitionError> {
@@ -43,6 +43,7 @@ pub(crate) fn worker_contributions(
     let etag_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, MODEL_ETAG_WORKER_OWNER)?;
     let desktop_release_id =
         WorkerId::try_new(WorkerKind::QuotaCatalogHealth, DESKTOP_RELEASE_WORKER_OWNER)?;
+    let cli_release_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "openai-cli-release")?;
     let ws_pool_policy_id = WorkerId::try_new(
         WorkerKind::RuntimeSnapshotReconciliation,
         WS_POOL_POLICY_WORKER_OWNER,

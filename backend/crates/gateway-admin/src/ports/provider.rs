@@ -197,6 +197,13 @@ pub trait ProviderAdmin: Send + Sync {
     /// 返回该 Provider 实际持有的 Dashboard 上游身份画像。
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile>;
 
+    fn configured_wire_profile(
+        &self,
+        _configuration: &gateway_core::account::OpaqueProviderData,
+    ) -> Option<DashboardWireProfile> {
+        self.dashboard_wire_profile()
+    }
+
     /// 发起一次不进入普通请求账本、额度、冷却或连接池的诊断捕获。
     async fn capture_turn_state(
         &self,

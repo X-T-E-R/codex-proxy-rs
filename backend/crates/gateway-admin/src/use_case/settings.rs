@@ -392,20 +392,19 @@ fn validate_settings(command: &ReplaceRuntimeSettings) -> Result<(), AdminError>
         && command.ws_pool_max_connecting > 0
         && command.ws_pool_stream_idle_timeout_ms > 0
         && command.ws_pool_fast_path_budget_ms > 0
-        && command.overload_cooldown_threshold > 0
-        && command.overload_cooldown_seconds > 0
         && command
             .cyber_session_block_ttl_seconds
             .is_none_or(|seconds| seconds > 0)
-        && gateway_core::provider_ports::valid_user_agent_override(
-            command.openai_user_agent.as_deref(),
-        )
         && valid_client_version(command.min_codex_desktop_version.as_deref())
         && valid_client_version(command.min_codex_cli_version.as_deref())
+        && valid_probe_model(command.account_auto_freeze_probe_model.as_deref())
         && i64::try_from(command.request_interval_ms).is_ok()
         && i64::try_from(command.ws_pool_max_age_ms).is_ok()
         && i64::try_from(command.ws_pool_stream_idle_timeout_ms).is_ok()
-        && i64::try_from(command.ws_pool_fast_path_budget_ms).is_ok();
+        && i64::try_from(command.ws_pool_fast_path_budget_ms).is_ok()
+        && (2..=1_000).contains(&command.account_auto_freeze_threshold)
+        && (60..=3_600).contains(&command.account_auto_freeze_window_seconds)
+        && (300..=604_800).contains(&command.account_auto_freeze_duration_seconds);
     if valid {
         Ok(())
     } else {

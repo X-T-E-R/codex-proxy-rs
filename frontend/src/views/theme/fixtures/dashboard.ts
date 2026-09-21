@@ -110,6 +110,7 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
   const stream = options.clientTransport !== 'http_json'
 
   return {
+    clientApiKeyName: null,
     id: options.id,
     turnState: options.provider === 'openai'
       ? { classification: 'observed292', bytes: 292, relation: 'same', sentBytes: 292, returnedBytes: 292 }

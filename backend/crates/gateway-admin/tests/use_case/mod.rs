@@ -103,6 +103,7 @@ pub(super) struct AdminHarness {
     providers: Vec<Arc<dyn ProviderAdmin>>,
     probe: Arc<dyn AccountProbe>,
     system: Arc<dyn SystemOperations>,
+    client_key_verifier: Arc<dyn ClientKeyVerifier>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
 }
 
@@ -128,6 +129,7 @@ impl AdminHarness {
             ],
             probe: Arc::new(UnavailableProbe),
             system: Arc::new(UnavailableSystem),
+            client_key_verifier: Arc::new(UnavailableClientKeyVerifier),
             turn_state: None,
         }
     }
@@ -249,12 +251,20 @@ impl AdminHarness {
                 default_username: "admin".to_owned(),
                 default_password: InitialAdminPassword::new(self.default_password),
             },
+            ClientConfig {
+                session_ttl_minutes: self.client_session_ttl_minutes,
+            },
             store,
-            self.providers,
-            Arc::new(NoopSnapshot),
-            (self.probe, Arc::new(proxies::TestProxies::default())),
-            Arc::new(NoopClientDistribution),
-            self.system,
+            gateway_admin::AdminRuntimePorts {
+                pricing_source: Arc::new(UnavailablePricingSource),
+                providers: self.providers,
+                snapshot: Arc::new(NoopSnapshot),
+                account_probe: self.probe,
+                proxy_probe: Arc::new(proxies::TestProxies::default()),
+                client_distribution: Arc::new(NoopClientDistribution),
+                system: self.system,
+                client_key_verifier: self.client_key_verifier,
+            },
         )
         .await
         .expect("initialize admin test harness")

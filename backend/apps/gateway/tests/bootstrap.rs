@@ -203,12 +203,19 @@ fn config_loader_should_share_resolved_assets_with_system_update() {
     document["api"]["asset_directory"] = serde_json::json!("../web/dist");
     let (config, directory) = parse_config(&document.to_string()).expect("binary configuration");
     let assets = match case.as_str() {
+        "docker" if cfg!(windows) => std::path::PathBuf::from(format!(
+            "{}/app/web/dist",
+            &directory.path().to_string_lossy()[..2]
+        )),
         "docker" => std::path::PathBuf::from("/app/web/dist"),
-        "relative" => directory.path().join("deploy/../custom/dist"),
-        _ => directory.path().join("deploy/../web/dist"),
+        "relative" => directory.path().join("deploy").join("../custom/dist"),
+        _ => directory.path().join("deploy").join("../web/dist"),
     };
     let debug = format!("{config:?}");
-    assert!(debug.contains(&format!("asset_directory: {assets:?}")));
+    assert!(
+        debug.contains(&format!("asset_directory: {assets:?}")),
+        "actual={debug}; expected={assets:?}"
+    );
     assert!(debug.contains(&format!("web_dist_dir: Some({assets:?})")));
 }
 

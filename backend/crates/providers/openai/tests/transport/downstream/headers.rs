@@ -147,7 +147,24 @@ async fn read_http_request_head(stream: &mut TcpStream) -> Vec<u8> {
         }
         request.extend_from_slice(&buffer[..read]);
         if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-            request.truncate(end + 4);
+            let head_len = end + 4;
+            let content_length = raw_header_values(&request[..head_len], "content-length")
+                .first()
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_default();
+            let mut body_read = request.len().saturating_sub(head_len);
+            while body_read < content_length {
+                let read = stream
+                    .read(&mut buffer)
+                    .await
+                    .expect("drain HTTP request body");
+                if read == 0 {
+                    break;
+                }
+                body_read = body_read.saturating_add(read);
+            }
+            request.truncate(head_len);
             break;
         }
     }

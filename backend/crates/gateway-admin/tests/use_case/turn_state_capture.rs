@@ -921,6 +921,7 @@ fn disabled_update(effective_model: &str) -> ModelTurnStateUpdate {
 fn capture_proxy() -> ProxyRecord {
     let now = Utc::now();
     ProxyRecord {
+        location: None,
         id: "proxy_capture".to_owned(),
         name: "Capture".to_owned(),
         proxy: OutboundProxy::parse("http://127.0.0.1:8080").expect("proxy"),
@@ -931,6 +932,8 @@ fn capture_proxy() -> ProxyRecord {
             success: true,
             latency_ms: 1,
             exit_ip: None,
+            exit_ipv4: None,
+            exit_ipv6: None,
             message: "ok".to_owned(),
         }),
         created_at: now,

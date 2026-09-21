@@ -42,9 +42,6 @@ pub struct SnapshotSettingsFacts {
     model_mappings: BTreeMap<String, String>,
     min_codex_desktop_version: Option<String>,
     min_codex_cli_version: Option<String>,
-    overload_cooldown_enabled: bool,
-    overload_cooldown_threshold: u32,
-    overload_cooldown_seconds: u32,
     cyber_session_block_enabled: bool,
     cyber_session_block_ttl_seconds: u32,
 }
@@ -119,25 +116,9 @@ impl SnapshotSettingsFacts {
             model_mappings,
             min_codex_desktop_version,
             min_codex_cli_version,
-            overload_cooldown_enabled: false,
-            overload_cooldown_threshold: 2,
-            overload_cooldown_seconds: 120,
             cyber_session_block_enabled: false,
             cyber_session_block_ttl_seconds: 3600,
         }
-    }
-
-    #[must_use]
-    pub const fn with_overload_cooldown(
-        mut self,
-        enabled: bool,
-        threshold: u32,
-        seconds: u32,
-    ) -> Self {
-        self.overload_cooldown_enabled = enabled;
-        self.overload_cooldown_threshold = threshold;
-        self.overload_cooldown_seconds = seconds;
-        self
     }
 
     #[must_use]
@@ -502,10 +483,6 @@ async fn compile_runtime_snapshot(
     );
     let rotation_strategy = RotationStrategy::parse(facts.settings.rotation_strategy.as_str())
         .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
-    let overload_threshold = NonZeroU32::new(facts.settings.overload_cooldown_threshold)
-        .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
-    let overload_seconds = NonZeroU32::new(facts.settings.overload_cooldown_seconds)
-        .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
     let cyber_session_ttl = NonZeroU32::new(facts.settings.cyber_session_block_ttl_seconds)
         .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
     let selection_policy = AccountSelectionPolicy::new(
@@ -793,8 +770,8 @@ impl RuntimeSnapshot {
     }
 
     #[must_use]
-    fn with_known_provider_catalogs(mut self, providers: BTreeSet<ProviderKind>) -> Self {
-        self.known_provider_catalogs = Arc::new(providers);
+    fn with_exhaustive_provider_catalogs(mut self, providers: BTreeSet<ProviderKind>) -> Self {
+        self.exhaustive_provider_catalogs = Arc::new(providers);
         self
     }
 

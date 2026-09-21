@@ -11,15 +11,16 @@ import BaseSelect from '@/components/base/BaseSelect.vue'
 
 import AccountAutoFreezeCard from './components/AccountAutoFreezeCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
-import ClientVersionSettings from './components/client-version/index.vue'
+import ClientProfileCard from './components/ClientProfileCard.vue'
 import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import RequestLocationCard from './components/RequestLocationCard.vue'
 import RequestQueueCard from './components/RequestQueueCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
+import SettingsAccessSection from './components/SettingsAccessSection.vue'
+import TokenRefreshCard from './components/TokenRefreshCard.vue'
 import WebSocketPoolCard from './components/WebSocketPoolCard.vue'
-import { useAdminApiKey } from './composables/useAdminApiKey'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { rotationOptions } from './constants'
 import PricingSection from './pricing/index.vue'
@@ -65,17 +66,21 @@ const {
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
   requestIntervalMsValue,
+  maxWaitingPerKeyValue,
+  maxWaitingPerAccountValue,
+  concurrencyWaitTimeoutSecondsValue,
+  responsesMaxDecompressedBodyMiBValue,
+  accountAutoFreezeThresholdValue,
+  accountAutoFreezeWindowSecondsValue,
+  accountAutoFreezeDurationSecondsValue,
   wsPoolMaxAgeMsValue,
   wsPoolMaxConnectingValue,
   wsPoolStreamIdleTimeoutMsValue,
   wsPoolFastPathBudgetMsValue,
   wsPoolErrors,
-  overloadCooldownThresholdValue,
-  overloadCooldownSecondsValue,
-  overloadCooldownErrors,
   cyberSessionBlockTtlSecondsValue,
   cyberSessionBlockTtlError,
-  openaiUserAgentError,
+
   minCodexDesktopVersionError,
   minCodexCliVersionError,
   saveSettings,
@@ -136,45 +141,9 @@ watch(section, (value) => {
         </BaseButton>
       </div>
 
-      <RuntimeSettingsCard
-        v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
-        v-model:refresh-margin-seconds="refreshMarginSecondsValue"
-        v-model:refresh-concurrency="refreshConcurrencyValue"
-        v-model:request-interval-ms="requestIntervalMsValue"
-      />
-
-      <WebSocketPoolCard
-        v-model:ws-pool-enabled="form.wsPoolEnabled"
-        v-model:ws-pool-max-age-ms="wsPoolMaxAgeMsValue"
-        v-model:ws-pool-max-connecting="wsPoolMaxConnectingValue"
-        v-model:ws-pool-stream-idle-timeout-ms="wsPoolStreamIdleTimeoutMsValue"
-        v-model:ws-pool-fast-path-budget-ms="wsPoolFastPathBudgetMsValue"
-        :disabled="loading || saving"
-        :errors="wsPoolErrors"
-      />
-
-      <OverloadCooldownCard
-        v-model:enabled="form.overloadCooldownEnabled"
-        v-model:threshold="overloadCooldownThresholdValue"
-        v-model:seconds="overloadCooldownSecondsValue"
-        :disabled="loading || saving"
-        :errors="overloadCooldownErrors"
-      />
-
-      <UserAgentCard
-        v-model="form.openaiUserAgent"
-        :disabled="loading || saving"
-        :error="openaiUserAgentError"
-      />
-
-      <CyberSessionBlockCard
-        v-model:enabled="form.cyberSessionBlockEnabled"
-        v-model:seconds="cyberSessionBlockTtlSecondsValue"
-        :disabled="loading || saving"
-        :error="cyberSessionBlockTtlError"
-      />
-
-      <ClientVersionSettings
+      <SettingsAccessSection
+        v-if="visited.has('access')"
+        v-show="section === 'access'"
         v-model:min-codex-desktop-version="form.minCodexDesktopVersion"
         v-model:min-codex-cli-version="form.minCodexCliVersion"
         v-model:responses-max-decompressed-body-mi-b="responsesMaxDecompressedBodyMiBValue"
@@ -204,6 +173,21 @@ watch(section, (value) => {
             v-model:probe-enabled="form.accountAutoFreezeProbeEnabled"
             v-model:probe-model="form.accountAutoFreezeProbeModel"
             v-model:adaptive-concurrency="form.accountAutoFreezeAdaptiveConcurrency"
+          />
+          <WebSocketPoolCard
+            v-model:ws-pool-enabled="form.wsPoolEnabled"
+            v-model:ws-pool-max-age-ms="wsPoolMaxAgeMsValue"
+            v-model:ws-pool-max-connecting="wsPoolMaxConnectingValue"
+            v-model:ws-pool-stream-idle-timeout-ms="wsPoolStreamIdleTimeoutMsValue"
+            v-model:ws-pool-fast-path-budget-ms="wsPoolFastPathBudgetMsValue"
+            :disabled="disabled"
+            :errors="wsPoolErrors"
+          />
+          <CyberSessionBlockCard
+            v-model:enabled="form.cyberSessionBlockEnabled"
+            v-model:seconds="cyberSessionBlockTtlSecondsValue"
+            :disabled="disabled"
+            :error="cyberSessionBlockTtlError"
           />
         </template>
 

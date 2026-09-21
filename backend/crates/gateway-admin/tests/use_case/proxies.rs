@@ -12,6 +12,7 @@ use gateway_core::account::{OutboundProxy, ProviderAccountId};
 pub(super) struct TestProxies {
     pub events: Option<super::accounts::EventLog>,
     pub accounts: Option<Vec<ProxyAccountRef>>,
+    pub record: Option<ProxyRecord>,
     pub capture_proxy: Option<ProxyRecord>,
 }
 
@@ -76,6 +77,7 @@ impl ProxyStore for TestProxies {
             .as_ref()
             .filter(|proxy| proxy.id == id)
             .cloned()
+            .or_else(|| self.record.clone().filter(|record| record.id == id))
             .ok_or_else(|| super::unavailable("proxy"))
     }
     async fn create(&self, _: NewProxy, _: &MutationContext) -> AdminStoreResult<ProxyMutation> {

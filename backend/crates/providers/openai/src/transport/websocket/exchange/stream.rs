@@ -22,9 +22,11 @@ use super::super::{
 use super::io::{next_websocket_message, reused_stream_receive_error};
 use super::reducer::{ExchangeAction, WebSocketTerminalKind, reduce_websocket_event};
 use super::{
-    CodexWebSocketExchangeError, CodexWebSocketRateLimitUpdates, CodexWebSocketStreamingExchange,
-    CodexWebSocketTurnStateObservations, CodexWebSocketTurnStateObserver,
-    CodexWebSocketTurnStateUpdate, CodexWebSocketTurnStateUpdateSlot, WEBSOCKET_STREAM_BUFFER,
+    CodexWebSocketExchangeError, CodexWebSocketRateLimitUpdates,
+    CodexWebSocketResponseMetadataUpdate, CodexWebSocketResponseMetadataUpdates,
+    CodexWebSocketStreamingExchange, CodexWebSocketTurnStateObservations,
+    CodexWebSocketTurnStateObserver, CodexWebSocketTurnStateUpdate,
+    CodexWebSocketTurnStateUpdateSlot, WEBSOCKET_STREAM_BUFFER,
     WEBSOCKET_TURN_STATE_OBSERVATION_BUFFER, reusable_websocket_metadata,
 };
 
@@ -74,6 +76,11 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
     let response_metadata = metadata.clone();
     let rate_limit_updates = Arc::new(Mutex::new(Vec::new()));
     let rate_limit_updates_for_task = Arc::clone(&rate_limit_updates);
+    let response_metadata_updates = Arc::new(Mutex::new(CodexWebSocketResponseMetadataUpdate {
+        turn_state: metadata.turn_state.clone(),
+        reported_model: None,
+    }));
+    let response_metadata_updates_for_task = Arc::clone(&response_metadata_updates);
     let turn_state_observation = metadata.turn_state.clone().map(CodexObservedTurnState::new);
     let turn_state_update = Arc::new(CodexWebSocketTurnStateUpdateSlot::new());
     let turn_state_update_for_task = Arc::clone(&turn_state_update);
@@ -97,6 +104,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
             trace,
             shutdown,
             rate_limit_updates: rate_limit_updates_for_task,
+            response_metadata_updates: response_metadata_updates_for_task,
             turn_state_update: turn_state_update_for_task,
             turn_state_observations: turn_state_observations_for_task,
             turn_state_observer,
@@ -122,6 +130,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
         set_cookie_headers: response_metadata.set_cookie_headers,
         rate_limit_headers: response_metadata.rate_limit_headers,
         rate_limit_updates,
+        response_metadata_updates,
         turn_state_update,
         turn_state_observations,
         pool_decision: None,
@@ -140,6 +149,7 @@ struct WebSocketStreamForwardState {
     stream_idle_timeout: Option<Duration>,
     shutdown: CancellationToken,
     rate_limit_updates: CodexWebSocketRateLimitUpdates,
+    response_metadata_updates: CodexWebSocketResponseMetadataUpdates,
     turn_state_update: CodexWebSocketTurnStateUpdate,
     turn_state_observations: CodexWebSocketTurnStateObservations,
     turn_state_observer: Option<CodexWebSocketTurnStateObserver>,
@@ -156,6 +166,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         stream_idle_timeout,
         shutdown,
         rate_limit_updates,
+        response_metadata_updates,
         turn_state_update,
         turn_state_observations,
         turn_state_observer,
@@ -315,7 +326,15 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             last_event_type = Some(event_type);
         }
         if let Some(turn_state) = reduced.turn_state_update {
+            let mut pending = response_metadata_updates.lock().await;
+            if pending.turn_state.is_none() {
+                pending.turn_state = Some(turn_state.clone());
+            }
+            drop(pending);
             turn_state_update.publish(turn_state);
+        }
+        if let Some(model) = metadata.response_metadata.effective_model.as_ref() {
+            response_metadata_updates.lock().await.reported_model = Some(model.clone());
         }
         if let Some(turn_state) = reduced.turn_state_observation {
             let receipt = CodexObservedTurnState::new(turn_state);
