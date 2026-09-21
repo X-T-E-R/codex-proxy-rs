@@ -200,7 +200,8 @@ pub(crate) async fn turn_state_counts(
 
 fn usage_list_record_select() -> String {
     format!(
-        "select mr.id, mr.endpoint, mr.client_transport, mr.requested_model_id,
+        "select mr.id, client_key.name as client_api_key_name,
+            mr.endpoint, mr.client_transport, mr.requested_model_id,
             mr.provider_kind, mr.provider_account_ref,
             mr.provider_account_name_snapshot as provider_account_name,
             mr.provider_account_email_snapshot as provider_account_email,
@@ -224,6 +225,8 @@ fn usage_list_record_select() -> String {
             octet_length(ts.sent_value)::bigint as turn_state_sent_bytes,
             octet_length(ts.value)::bigint as turn_state_returned_bytes
      from model_requests mr
+     left join client_api_keys client_key on client_key.id = mr.client_api_key_ref
+     left join provider_accounts account on account.id = mr.provider_account_ref
      left join request_turn_state_observations ts
        on ts.request_id = mr.id and ts.attempt_index = mr.attempt_count"
     )
