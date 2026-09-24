@@ -24,6 +24,15 @@ const quotaEntries = computed(() => groupedAccountQuotaWindows(
   orderedPanelQuotaWindows(props.account.quota.windows),
 ))
 const profileOpen = shallowRef(false)
+
+const overloadCooldownText = computed(() => {
+  const cooldown = props.account.overloadCooldown
+  if (!cooldown || cooldown.mode === 'inherit')
+    return '跟随全局设置'
+  if (cooldown.mode === 'disabled')
+    return '该账号永不触发过载冷号'
+  return `连续过载 ${cooldown.threshold ?? '—'} 次后冷号 ${cooldown.seconds ?? '—'} 秒`
+})
 </script>
 
 <template>
@@ -86,6 +95,10 @@ const profileOpen = shallowRef(false)
       />
       <p v-if="quotaEntries.length === 0" class="m-0 text-cp-sm font-emphasis text-cp-text-secondary">
         额度待观测
+      </p>
+      <p class="m-0 flex min-w-0 flex-wrap items-center gap-1.5 text-cp-xs font-emphasis text-cp-text-secondary">
+        <span class="shrink-0">过载冷号：</span>
+        <span class="min-w-0 truncate">{{ overloadCooldownText }}</span>
       </p>
     </div>
   </section>

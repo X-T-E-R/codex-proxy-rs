@@ -11,11 +11,12 @@ use serde_json::{Map, Value};
 
 use gateway_core::account::{
     AccountAttemptFeedback, AccountCandidate, AccountConcurrencyLimit, AccountEligibilityPolicy,
-    AccountFeedbackStats, AccountQuotaSignals, AccountRuntimeSignals, AccountSchedulingBlocker,
-    AccountSelectionContext, AccountSelectionPolicy, AccountSelector, AccountStatus, AccountWeight,
-    CredentialCasUpdate, CredentialRevision, CredentialState, OpaqueProviderData,
-    PlaintextCredential, PreferredAccountSelection, ProviderAccount, ProviderAccountId,
-    ProviderAccountIdentity, ProviderAccountUpdate, QuotaEvidence, QuotaState, RotationStrategy,
+    AccountFeedbackStats, AccountOverloadCooldownOverride, AccountQuotaSignals,
+    AccountRuntimeSignals, AccountSchedulingBlocker, AccountSelectionContext,
+    AccountSelectionPolicy, AccountSelector, AccountStatus, AccountWeight, CredentialCasUpdate,
+    CredentialRevision, CredentialState, OpaqueProviderData, PlaintextCredential,
+    PreferredAccountSelection, ProviderAccount, ProviderAccountId, ProviderAccountIdentity,
+    ProviderAccountUpdate, QuotaEvidence, QuotaState, RotationStrategy,
 };
 use gateway_core::routing::{
     ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
@@ -71,6 +72,47 @@ fn weighted_candidate(id: &str, weight: u16, in_flight: u32) -> AccountCandidate
         AccountWeight::new(weight).expect("valid account weight"),
     );
     candidate
+}
+
+#[test]
+fn overload_cooldown_override_resolves_account_effective_policy() {
+    let global = Some((
+        NonZeroU32::new(2).expect("threshold"),
+        NonZeroU32::new(120).expect("seconds"),
+    ));
+    assert_eq!(
+        AccountOverloadCooldownOverride::Inherit.effective(global),
+        global
+    );
+    assert_eq!(
+        AccountOverloadCooldownOverride::Inherit.effective(None),
+        None
+    );
+    assert_eq!(
+        AccountOverloadCooldownOverride::Disabled.effective(global),
+        None
+    );
+    assert_eq!(AccountOverloadCooldownOverride::custom(0, 900), None);
+    assert_eq!(AccountOverloadCooldownOverride::custom(5, 0), None);
+    let custom = AccountOverloadCooldownOverride::custom(5, 900).expect("custom");
+    assert_eq!(
+        custom.effective(global),
+        Some((
+            NonZeroU32::new(5).expect("threshold"),
+            NonZeroU32::new(900).expect("seconds"),
+        ))
+    );
+    // 默认账号跟随全局；显式覆盖优先于全局。
+    assert_eq!(
+        account("acct_inherit").effective_overload_cooldown(global),
+        global
+    );
+    assert_eq!(
+        account("acct_custom")
+            .with_overload_cooldown_override(custom)
+            .effective_overload_cooldown(global),
+        custom.effective(global)
+    );
 }
 
 #[test]

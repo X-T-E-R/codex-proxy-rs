@@ -17,9 +17,9 @@ use crate::validation::RoutingError;
 
 use super::{
     AccountGroupId, ClientRoutingScope, ConfigRevision, FrozenAccountScope, ModelCapabilities,
-    ProviderCandidate, ProviderCatalogGeneration, ProviderCatalogPort, ProviderKind, ProviderModel,
-    PublicModelId, RoutingContext, RoutingGroupSnapshot, RoutingPlan, RuntimeAccount,
-    RuntimeAccountDirectory, UpstreamModelId,
+    ModelRequestPolicy, ProviderCandidate, ProviderCatalogGeneration, ProviderCatalogPort,
+    ProviderKind, ProviderModel, PublicModelId, RoutingContext, RoutingGroupSnapshot, RoutingPlan,
+    RuntimeAccount, RuntimeAccountDirectory, UpstreamModelId,
 };
 
 const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
@@ -31,6 +31,7 @@ pub struct SnapshotSettingsFacts {
     request_interval_ms: u64,
     rotation_strategy: String,
     model_mappings: BTreeMap<String, String>,
+    model_policies: BTreeMap<String, ModelPolicyFact>,
     min_codex_desktop_version: Option<String>,
     min_codex_cli_version: Option<String>,
     overload_cooldown_enabled: bool,
@@ -38,6 +39,34 @@ pub struct SnapshotSettingsFacts {
     overload_cooldown_seconds: u32,
     cyber_session_block_enabled: bool,
     cyber_session_block_ttl_seconds: u32,
+}
+
+/// Store 读出的未校验模型请求策略；快照编译时统一校验。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelPolicyFact {
+    pub reasoning_effort_mode: Option<String>,
+    pub reasoning_effort_value: Option<String>,
+    pub service_tier: Option<String>,
+}
+
+impl ModelPolicyFact {
+    /// 编译为已校验策略；字段组合非法或两项皆为空时为 `None`。
+    #[must_use]
+    pub fn compile(&self) -> Option<ModelRequestPolicy> {
+        ModelRequestPolicy::from_facts(
+            self.reasoning_effort_mode.as_deref(),
+            self.reasoning_effort_value.as_deref(),
+            self.service_tier.as_deref(),
+        )
+    }
+
+    /// 是否存在任何非空字段；全空的持久化条目视为无策略而不是非法数据。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.reasoning_effort_mode.is_none()
+            && self.reasoning_effort_value.is_none()
+            && self.service_tier.is_none()
+    }
 }
 
 impl SnapshotSettingsFacts {
@@ -62,7 +91,14 @@ impl SnapshotSettingsFacts {
             overload_cooldown_seconds: 120,
             cyber_session_block_enabled: false,
             cyber_session_block_ttl_seconds: 3600,
+            model_policies: BTreeMap::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_model_policies(mut self, policies: BTreeMap<String, ModelPolicyFact>) -> Self {
+        self.model_policies = policies;
+        self
     }
 
     #[must_use]
@@ -367,6 +403,21 @@ async fn compile_runtime_snapshot(
     let account_directory = Arc::new(RuntimeAccountDirectory::new(accounts));
 
     let model_mappings = facts.settings.model_mappings;
+    let mut model_policies = BTreeMap::new();
+    for (model, fact) in facts.settings.model_policies {
+        // 全空条目在管理写入侧已被拒绝；这里兜底视为无策略而不是非法数据。
+        if fact.is_empty() {
+            continue;
+        }
+        let policy = fact
+            .compile()
+            .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
+        let model =
+            PublicModelId::new(model).map_err(|_| RuntimeSnapshotCompileError::InvalidData)?;
+        if model_policies.insert(model, policy).is_some() {
+            return Err(RuntimeSnapshotCompileError::InvalidData);
+        }
+    }
     let min_client_versions = CodexClientMinVersions::new(
         facts
             .settings
@@ -457,6 +508,7 @@ async fn compile_runtime_snapshot(
     .map(|snapshot| {
         snapshot
             .with_model_mappings(model_mappings)
+            .with_model_policies(model_policies)
             .with_account_directory(account_directory)
             .with_known_provider_catalogs(known_provider_catalogs)
             .with_min_codex_client_versions(min_client_versions)
@@ -479,6 +531,7 @@ pub struct RuntimeSnapshot {
     provider_model_presentations:
         Arc<BTreeMap<ProviderKind, BTreeMap<UpstreamModelId, super::ModelPresentation>>>,
     model_mappings: Arc<BTreeMap<String, String>>,
+    model_policies: Arc<BTreeMap<PublicModelId, ModelRequestPolicy>>,
     provider_catalog_generations: Arc<BTreeMap<ProviderKind, ProviderCatalogGeneration>>,
     known_provider_catalogs: Arc<BTreeSet<ProviderKind>>,
     account_directory: Arc<RuntimeAccountDirectory>,
@@ -562,6 +615,7 @@ impl RuntimeSnapshot {
             provider_models: Arc::new(model_map),
             provider_model_presentations: Arc::new(presentation_map),
             model_mappings: Arc::new(BTreeMap::new()),
+            model_policies: Arc::new(BTreeMap::new()),
             provider_catalog_generations: Arc::new(BTreeMap::new()),
             known_provider_catalogs: Arc::new(known_provider_catalogs),
             account_directory: Arc::new(RuntimeAccountDirectory::default()),
@@ -575,6 +629,21 @@ impl RuntimeSnapshot {
     pub fn with_model_mappings(mut self, mappings: BTreeMap<String, String>) -> Self {
         self.model_mappings = Arc::new(mappings);
         self
+    }
+
+    #[must_use]
+    pub fn with_model_policies(
+        mut self,
+        policies: BTreeMap<PublicModelId, ModelRequestPolicy>,
+    ) -> Self {
+        self.model_policies = Arc::new(policies);
+        self
+    }
+
+    /// 客户端请求模型冻结的请求策略；未配置时为 `None`。
+    #[must_use]
+    pub fn model_policy_for(&self, public_model: &PublicModelId) -> Option<ModelRequestPolicy> {
+        self.model_policies.get(public_model).copied()
     }
 
     #[must_use]
@@ -843,6 +912,7 @@ impl RuntimeSnapshot {
                 upstream_model: Some(upstream_model),
                 emulated_features,
                 account_scope: Arc::clone(&account_scope),
+                model_policy: self.model_policy_for(public_model),
             });
         }
 
@@ -906,6 +976,7 @@ impl RuntimeSnapshot {
             upstream_model: None,
             emulated_features: BTreeSet::new(),
             account_scope: Arc::clone(&account_scope),
+            model_policy: None,
         };
         Ok(RoutingPlan {
             config_revision: self.revision,

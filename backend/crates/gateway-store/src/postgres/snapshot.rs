@@ -7,9 +7,9 @@ use gateway_core::account::ProviderAccountId;
 use gateway_core::routing::{
     AccountGroupId, ConfigRevision,
     snapshot::{
-        SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts, SnapshotClientPolicyFacts,
-        SnapshotFacts, SnapshotProviderAccountFacts, SnapshotSettingsFacts, SnapshotStoreError,
-        SnapshotStorePort,
+        ModelPolicyFact, SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts,
+        SnapshotClientPolicyFacts, SnapshotFacts, SnapshotProviderAccountFacts,
+        SnapshotSettingsFacts, SnapshotStoreError, SnapshotStorePort,
     },
 };
 use sqlx::{PgPool, Postgres, Transaction};
@@ -26,6 +26,7 @@ pub struct SnapshotRuntimeSettings {
     pub request_interval_ms: u64,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
+    pub model_policies: BTreeMap<String, ModelPolicyFact>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
     pub overload_cooldown_enabled: bool,
@@ -161,7 +162,8 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
             .with_cyber_session_block(
                 data.settings.cyber_session_block_enabled,
                 data.settings.cyber_session_block_ttl_seconds,
-            );
+            )
+            .with_model_policies(data.settings.model_policies);
             let client_policies = data
                 .client_api_keys
                 .into_iter()
@@ -240,6 +242,7 @@ async fn load_settings(
             i64,
             String,
             sqlx::types::Json<BTreeMap<String, String>>,
+            sqlx::types::Json<BTreeMap<String, super::ModelPolicyJson>>,
             Option<String>,
             Option<String>,
             bool,
@@ -251,7 +254,7 @@ async fn load_settings(
     >(
         "select config_revision, refresh_margin_seconds, refresh_concurrency,
                 max_concurrent_per_account, request_interval_ms, rotation_strategy,
-                model_mappings_json, min_codex_desktop_version,
+                model_mappings_json, model_policies_json, min_codex_desktop_version,
                 min_codex_cli_version, overload_cooldown_enabled,
                 overload_cooldown_threshold, overload_cooldown_seconds,
                 cyber_session_block_enabled, cyber_session_block_ttl_seconds
@@ -273,15 +276,38 @@ async fn load_settings(
             request_interval_ms: to_u64(row.4)?,
             rotation_strategy: row.5,
             model_mappings: row.6.0,
-            min_codex_desktop_version: row.7,
-            min_codex_cli_version: row.8,
-            overload_cooldown_enabled: row.9,
-            overload_cooldown_threshold: to_u32(row.10)?,
-            overload_cooldown_seconds: to_u32(row.11)?,
-            cyber_session_block_enabled: row.12,
-            cyber_session_block_ttl_seconds: to_u32(row.13)?,
+            model_policies: model_policy_facts(row.7.0),
+            min_codex_desktop_version: row.8,
+            min_codex_cli_version: row.9,
+            overload_cooldown_enabled: row.10,
+            overload_cooldown_threshold: to_u32(row.11)?,
+            overload_cooldown_seconds: to_u32(row.12)?,
+            cyber_session_block_enabled: row.13,
+            cyber_session_block_ttl_seconds: to_u32(row.14)?,
         },
     ))
+}
+
+/// 持久化 JSON 到快照事实的转换；取值校验由快照编译统一完成。
+fn model_policy_facts(
+    policies: BTreeMap<String, super::ModelPolicyJson>,
+) -> BTreeMap<String, ModelPolicyFact> {
+    policies
+        .into_iter()
+        .map(|(model, policy)| {
+            (
+                model,
+                ModelPolicyFact {
+                    reasoning_effort_mode: policy
+                        .reasoning_effort
+                        .as_ref()
+                        .map(|rule| rule.mode.clone()),
+                    reasoning_effort_value: policy.reasoning_effort.map(|rule| rule.value),
+                    service_tier: policy.service_tier,
+                },
+            )
+        })
+        .collect()
 }
 
 async fn load_client_keys(

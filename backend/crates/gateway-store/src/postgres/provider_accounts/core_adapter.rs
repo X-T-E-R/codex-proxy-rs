@@ -43,6 +43,7 @@ impl ProviderAccountStore for PgProviderAccountRepository {
             enabled: account.account.enabled(),
             concurrency_limit: account.account.concurrency_limit(),
             weight: account.account.weight(),
+            overload_cooldown: account.account.overload_cooldown_override(),
             credential_state: account.account.credential_state(),
             credential_observed_at: Utc::now(),
         })

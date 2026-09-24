@@ -5,7 +5,7 @@ import { computed, ref, shallowRef, watch } from 'vue'
 import { updateAccount } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
-import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
+import { concurrencyLimitInput, parseAccountSchedulingForm, parseOverloadCooldownForm } from '../utils/schedulingForm'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
 
@@ -21,6 +21,9 @@ export function useAccountEditor(options: {
   const weight = shallowRef('1')
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
+  const overloadCooldownMode = shallowRef('inherit')
+  const overloadCooldownThreshold = shallowRef('')
+  const overloadCooldownSeconds = shallowRef('')
   const selectedGroupIds = ref<string[]>([])
   const saveAction = useAsyncAction()
   const saving = saveAction.loading
@@ -38,6 +41,9 @@ export function useAccountEditor(options: {
     schedulingEnabled.value = account.enabled
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
     weight.value = String(account.weight)
+    overloadCooldownMode.value = account.overloadCooldown?.mode ?? 'inherit'
+    overloadCooldownThreshold.value = account.overloadCooldown?.threshold != null ? String(account.overloadCooldown.threshold) : ''
+    overloadCooldownSeconds.value = account.overloadCooldown?.seconds != null ? String(account.overloadCooldown.seconds) : ''
     selectedGroupIds.value = account.groups.map(group => group.id)
     showEditModal.value = true
   }
@@ -47,12 +53,21 @@ export function useAccountEditor(options: {
     if (!accountId || saving.value)
       return
     const scheduling = parseAccountSchedulingForm(concurrencyLimit.value, weight.value)
+    const cooldown = parseOverloadCooldownForm(
+      overloadCooldownMode.value,
+      overloadCooldownThreshold.value,
+      overloadCooldownSeconds.value,
+    )
     if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
       toast.warning('请选择已通过测试的代理')
       return
     }
     if (!scheduling.valid) {
       toast.warning(scheduling.message)
+      return
+    }
+    if (!cooldown.valid) {
+      toast.warning(cooldown.message)
       return
     }
 
@@ -63,6 +78,7 @@ export function useAccountEditor(options: {
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
         weight: scheduling.values.weight,
+        overloadCooldown: cooldown.value,
         groupIds: [...new Set(selectedGroupIds.value)],
       })
       showEditModal.value = false
@@ -80,6 +96,9 @@ export function useAccountEditor(options: {
     schedulingEnabled.value = true
     concurrencyLimit.value = ''
     weight.value = '1'
+    overloadCooldownMode.value = 'inherit'
+    overloadCooldownThreshold.value = ''
+    overloadCooldownSeconds.value = ''
     selectedGroupIds.value = []
   })
 
@@ -91,6 +110,9 @@ export function useAccountEditor(options: {
     weight,
     proxyMode,
     proxyId,
+    overloadCooldownMode,
+    overloadCooldownThreshold,
+    overloadCooldownSeconds,
     selectedGroupIds,
     saving,
     open,

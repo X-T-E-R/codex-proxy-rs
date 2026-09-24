@@ -65,6 +65,7 @@ fn tool_request(body: Value) -> GrokResponsesRequest {
         &request,
         "grok-4.5",
         &ClientApiKeyId::new("key_xai_canonical_tools").expect("client key"),
+        None,
     )
     .expect("tool request")
 }

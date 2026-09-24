@@ -4,12 +4,15 @@ use std::{collections::BTreeMap, fmt};
 
 use chrono::{DateTime, Utc};
 
-use gateway_core::routing::{PublicModelId, UpstreamModelId};
+use gateway_core::routing::{ModelRequestPolicy, PublicModelId, UpstreamModelId};
 
 use super::Revision;
 
 /// 客户端模型到上游模型的全局精确映射。
 pub type ModelMappings = BTreeMap<PublicModelId, UpstreamModelId>;
+
+/// 客户端请求模型到请求策略的精确映射。
+pub type ModelPolicies = BTreeMap<PublicModelId, ModelRequestPolicy>;
 
 /// 账号调度策略；由 Core 拥有稳定值与 wire 映射。
 pub use gateway_core::account::RotationStrategy;
@@ -19,6 +22,7 @@ pub use gateway_core::account::RotationStrategy;
 pub struct RuntimeSettings {
     pub config_revision: Revision,
     pub model_mappings: ModelMappings,
+    pub model_policies: ModelPolicies,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
@@ -50,6 +54,8 @@ pub struct RuntimeSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplaceRuntimeSettings {
     pub model_mappings: ModelMappings,
+    /// 省略时保留当前模型策略。
+    pub model_policies: Option<ModelPolicies>,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,

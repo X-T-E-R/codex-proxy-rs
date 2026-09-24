@@ -8,9 +8,10 @@ use futures::future::BoxFuture;
 use gateway_core::operation::OperationKind;
 use gateway_core::policy::{ClientApiKeyId, PlaintextClientApiKey, RateLimits};
 use gateway_core::routing::snapshot::{
-    RuntimeSnapshotCompileError, RuntimeSnapshotCompiler, SnapshotAccountGroupFacts,
-    SnapshotAccountGroupMemberFacts, SnapshotClientPolicyFacts, SnapshotFacts,
-    SnapshotProviderAccountFacts, SnapshotSettingsFacts, SnapshotStoreError, SnapshotStorePort,
+    ModelPolicyFact, RuntimeSnapshotCompileError, RuntimeSnapshotCompiler,
+    SnapshotAccountGroupFacts, SnapshotAccountGroupMemberFacts, SnapshotClientPolicyFacts,
+    SnapshotFacts, SnapshotProviderAccountFacts, SnapshotSettingsFacts, SnapshotStoreError,
+    SnapshotStorePort,
 };
 use gateway_core::routing::{
     ConfigRevision, ModelCapabilities, ModelPresentation, ProviderCatalogGeneration,
@@ -297,6 +298,82 @@ fn overload_cooldown_policy_is_frozen_and_validated() {
             assert_eq!(policy, enabled.then_some((threshold, seconds)));
         }
     }
+}
+
+#[test]
+fn model_policies_are_compiled_frozen_and_validated() {
+    let settings = SnapshotSettingsFacts::new(3, 0, "smart", BTreeMap::new(), None, None)
+        .with_model_policies(BTreeMap::from([
+            (
+                "gpt-5.4".to_owned(),
+                ModelPolicyFact {
+                    reasoning_effort_mode: Some("locked".to_owned()),
+                    reasoning_effort_value: Some("xhigh".to_owned()),
+                    service_tier: Some("lock_fast".to_owned()),
+                },
+            ),
+            // 全空条目按无策略跳过，不视为非法数据。
+            (
+                "grok-4.5".to_owned(),
+                ModelPolicyFact {
+                    reasoning_effort_mode: None,
+                    reasoning_effort_value: None,
+                    service_tier: None,
+                },
+            ),
+        ]));
+    let store = Arc::new(TestSnapshotStore::new(Ok(SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        settings,
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    ))));
+    let snapshot =
+        block_on(RuntimeSnapshotCompiler::new(store, Arc::new(TestCatalog::Unavailable)).compile())
+            .expect("snapshot");
+    let policy = snapshot
+        .model_policy_for(&PublicModelId::new("gpt-5.4").expect("model"))
+        .expect("model policy");
+    let rule = policy.reasoning_effort().expect("effort rule");
+    assert_eq!(rule.mode().as_str(), "locked");
+    assert_eq!(rule.value().as_str(), "xhigh");
+    assert_eq!(
+        policy.service_tier().map(|tier| tier.as_str()),
+        Some("lock_fast")
+    );
+    assert!(
+        snapshot
+            .model_policy_for(&PublicModelId::new("grok-4.5").expect("model"))
+            .is_none()
+    );
+
+    // 非空但字段组合非法的条目按 InvalidData 拒绝。
+    let invalid = SnapshotSettingsFacts::new(3, 0, "smart", BTreeMap::new(), None, None)
+        .with_model_policies(BTreeMap::from([(
+            "gpt-5.4".to_owned(),
+            ModelPolicyFact {
+                reasoning_effort_mode: Some("locked".to_owned()),
+                reasoning_effort_value: None,
+                service_tier: None,
+            },
+        )]));
+    let store = Arc::new(TestSnapshotStore::new(Ok(SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        invalid,
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+    ))));
+    assert_eq!(
+        block_on(RuntimeSnapshotCompiler::new(store, Arc::new(TestCatalog::Unavailable)).compile())
+            .expect_err("invalid model policy"),
+        RuntimeSnapshotCompileError::InvalidData
+    );
 }
 
 fn facts_with_min_versions(

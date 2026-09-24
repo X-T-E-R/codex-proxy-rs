@@ -14,10 +14,14 @@ use gateway_admin::model::client_distribution::{
     ClientDownloadPackage, CodexDesktopWindowsDownloads,
 };
 use gateway_admin::model::settings::{
-    ModelMappings as DomainModelMappings, ReplaceRuntimeSettings, RotationStrategy, RuntimeSettings,
+    ModelMappings as DomainModelMappings, ModelPolicies as DomainModelPolicies,
+    ReplaceRuntimeSettings, RotationStrategy, RuntimeSettings,
 };
 use gateway_core::policy::CodexClientVersion;
-use gateway_core::routing::{PublicModelId, UpstreamModelId};
+use gateway_core::routing::{
+    ModelRequestPolicy, PublicModelId, ReasoningEffort, ReasoningEffortRule,
+    ReasoningEffortRuleMode, ServiceTierRule, UpstreamModelId,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -28,11 +32,45 @@ use super::{
 /// 客户端模型到上游模型的全局精确映射。
 pub type ModelMappings = BTreeMap<String, String>;
 
+/// 客户端请求模型到请求策略的精确映射。
+pub type ModelPolicies = BTreeMap<String, ModelRequestPolicyWire>;
+
+/// 单条模型请求策略 wire；两项均为 `null` 的条目不合法。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelRequestPolicyWire {
+    pub reasoning_effort: Option<ReasoningEffortRuleWire>,
+    pub service_tier: Option<String>,
+}
+
+/// 推理强度策略 wire。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReasoningEffortRuleWire {
+    pub mode: String,
+    pub value: String,
+}
+
+impl From<ModelRequestPolicy> for ModelRequestPolicyWire {
+    fn from(policy: ModelRequestPolicy) -> Self {
+        Self {
+            reasoning_effort: policy
+                .reasoning_effort()
+                .map(|rule| ReasoningEffortRuleWire {
+                    mode: rule.mode().as_str().to_owned(),
+                    value: rule.value().as_str().to_owned(),
+                }),
+            service_tier: policy.service_tier().map(|tier| tier.as_str().to_owned()),
+        }
+    }
+}
+
 /// 运行配置投影与设置页字段的聚合响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettingsView {
     pub model_mappings: ModelMappings,
+    pub model_policies: ModelPolicies,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u64,
     pub max_concurrent_per_account: u64,
@@ -65,6 +103,8 @@ pub struct RuntimeSettingsView {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateRuntimeSettingsRequest {
     pub model_mappings: ModelMappings,
+    #[serde(default)]
+    pub model_policies: Option<ModelPolicies>,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u64,
     pub max_concurrent_per_account: u64,
@@ -100,6 +140,9 @@ impl UpdateRuntimeSettingsRequest {
     /// 校验公共运行参数。
     pub fn validate(&self) -> Result<(), WireValidationError> {
         validate_model_mappings(&self.model_mappings)?;
+        if let Some(policies) = &self.model_policies {
+            validate_model_policies(policies)?;
+        }
         if !gateway_core::provider_ports::valid_user_agent_override(
             self.openai_user_agent.as_deref(),
         ) {
@@ -167,6 +210,7 @@ impl UpdateRuntimeSettingsRequest {
         self.validate()?;
         Ok(ReplaceRuntimeSettings {
             model_mappings: domain_model_mappings(self.model_mappings)?,
+            model_policies: self.model_policies.map(domain_model_policies).transpose()?,
             refresh_margin_seconds: self.refresh_margin_seconds,
             refresh_concurrency: u32::try_from(self.refresh_concurrency)
                 .map_err(|_| WireValidationError::new("settingsRefreshConcurrencyOverflow"))?,
@@ -224,6 +268,7 @@ impl From<RuntimeSettings> for RuntimeSettingsView {
     fn from(settings: RuntimeSettings) -> Self {
         Self {
             model_mappings: wire_model_mappings(settings.model_mappings),
+            model_policies: wire_model_policies(settings.model_policies),
             refresh_margin_seconds: settings.refresh_margin_seconds,
             refresh_concurrency: u64::from(settings.refresh_concurrency),
             max_concurrent_per_account: u64::from(settings.max_concurrent_per_account),
@@ -524,6 +569,75 @@ fn wire_model_mappings(mappings: DomainModelMappings) -> ModelMappings {
     mappings
         .into_iter()
         .map(|(requested, upstream)| (requested.to_string(), upstream.to_string()))
+        .collect()
+}
+
+/// 模型策略条目上限与字段校验；两项均为空的条目不合法。
+fn validate_model_policies(policies: &ModelPolicies) -> Result<(), WireValidationError> {
+    if policies.len() > 512 {
+        return Err(WireValidationError::new("modelPolicies"));
+    }
+    for (model, policy) in policies {
+        if !valid_model_name(model, 256) {
+            return Err(WireValidationError::new("modelPolicies"));
+        }
+        if policy.reasoning_effort.is_none() && policy.service_tier.is_none() {
+            return Err(WireValidationError::new("modelPolicies"));
+        }
+        if let Some(rule) = &policy.reasoning_effort
+            && (ReasoningEffortRuleMode::parse(&rule.mode).is_none()
+                || ReasoningEffort::parse(&rule.value).is_none())
+        {
+            return Err(WireValidationError::new("modelPolicies.reasoningEffort"));
+        }
+        if let Some(tier) = &policy.service_tier
+            && ServiceTierRule::parse(tier).is_none()
+        {
+            return Err(WireValidationError::new("modelPolicies.serviceTier"));
+        }
+    }
+    Ok(())
+}
+
+fn domain_model_policies(
+    policies: ModelPolicies,
+) -> Result<DomainModelPolicies, WireValidationError> {
+    policies
+        .into_iter()
+        .map(|(model, policy)| {
+            let model =
+                PublicModelId::new(model).map_err(|_| WireValidationError::new("modelPolicies"))?;
+            let reasoning_effort = policy
+                .reasoning_effort
+                .map(|rule| {
+                    Ok(ReasoningEffortRule::new(
+                        ReasoningEffortRuleMode::parse(&rule.mode).ok_or_else(|| {
+                            WireValidationError::new("modelPolicies.reasoningEffort")
+                        })?,
+                        ReasoningEffort::parse(&rule.value).ok_or_else(|| {
+                            WireValidationError::new("modelPolicies.reasoningEffort")
+                        })?,
+                    ))
+                })
+                .transpose()?;
+            let service_tier = policy
+                .service_tier
+                .map(|tier| {
+                    ServiceTierRule::parse(&tier)
+                        .ok_or_else(|| WireValidationError::new("modelPolicies.serviceTier"))
+                })
+                .transpose()?;
+            let policy = ModelRequestPolicy::new(reasoning_effort, service_tier)
+                .ok_or_else(|| WireValidationError::new("modelPolicies"))?;
+            Ok((model, policy))
+        })
+        .collect()
+}
+
+fn wire_model_policies(policies: DomainModelPolicies) -> ModelPolicies {
+    policies
+        .into_iter()
+        .map(|(model, policy)| (model.to_string(), ModelRequestPolicyWire::from(policy)))
         .collect()
 }
 

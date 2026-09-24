@@ -68,7 +68,39 @@ pub struct BatchUpdateAccountsRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub concurrency_limit: Option<u64>,
     pub weight: u64,
+    pub overload_cooldown: AccountOverloadCooldownWire,
     pub group_ids: Vec<String>,
+}
+
+/// 账号级过载冷号覆盖的请求与响应共享形状。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountOverloadCooldownWire {
+    pub mode: String,
+    pub threshold: Option<u64>,
+    pub seconds: Option<u64>,
+}
+
+impl From<AccountOverloadCooldownOverride> for AccountOverloadCooldownWire {
+    fn from(override_policy: AccountOverloadCooldownOverride) -> Self {
+        match override_policy {
+            AccountOverloadCooldownOverride::Inherit => Self {
+                mode: "inherit".to_owned(),
+                threshold: None,
+                seconds: None,
+            },
+            AccountOverloadCooldownOverride::Disabled => Self {
+                mode: "disabled".to_owned(),
+                threshold: None,
+                seconds: None,
+            },
+            AccountOverloadCooldownOverride::Custom { threshold, seconds } => Self {
+                mode: "custom".to_owned(),
+                threshold: Some(u64::from(threshold.get())),
+                seconds: Some(u64::from(seconds.get())),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +138,7 @@ impl BatchUpdateAccountsRequest {
         validate_wire_group_ids(&self.group_ids)?;
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
+        parse_overload_cooldown(&self.overload_cooldown)?;
         Ok(())
     }
 
@@ -117,6 +150,7 @@ impl BatchUpdateAccountsRequest {
             enabled: self.enabled,
             concurrency_limit: parse_concurrency_limit(self.concurrency_limit)?,
             weight: parse_account_weight(self.weight)?,
+            overload_cooldown: parse_overload_cooldown(&self.overload_cooldown)?,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
         })
     }
@@ -260,6 +294,7 @@ pub struct AccountView {
     pub enabled: bool,
     pub concurrency_limit: Option<u32>,
     pub weight: u16,
+    pub overload_cooldown: AccountOverloadCooldownWire,
     pub access_token_expires_at: Option<String>,
     pub access_token_expires_at_display: Option<String>,
     pub refresh_token_expires_at: Option<String>,

@@ -13,9 +13,9 @@ use gateway_core::{
 use super::{PageSize, Revision, account_groups::AccountGroupRef, observability::TimeRange};
 
 pub use gateway_core::account::{
-    AccountConcurrencyLimit, AccountErrorReason, AccountStatus, AccountStatusFacts,
-    AccountStatusProjection, AccountWeight, CredentialState, QuotaAccessState, QuotaEvidence,
-    QuotaState, resolve_account_status,
+    AccountConcurrencyLimit, AccountErrorReason, AccountOverloadCooldownOverride, AccountStatus,
+    AccountStatusFacts, AccountStatusProjection, AccountWeight, CredentialState, QuotaAccessState,
+    QuotaEvidence, QuotaState, resolve_account_status,
 };
 
 /// 导入时统一应用的账号调度与分组设置；缺省时保留原有导入语义。
@@ -24,6 +24,7 @@ pub struct AccountImportSettings {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub overload_cooldown: AccountOverloadCooldownOverride,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
 }
 
@@ -98,6 +99,7 @@ pub struct AccountRecord {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub overload_cooldown: AccountOverloadCooldownOverride,
     pub outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     pub credential_state: CredentialState,
     pub credential_observed_at: DateTime<Utc>,
@@ -220,6 +222,7 @@ pub struct UpdateAccount {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub overload_cooldown: AccountOverloadCooldownOverride,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
 }
@@ -238,6 +241,7 @@ pub struct BatchUpdateAccounts {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub overload_cooldown: AccountOverloadCooldownOverride,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
 }

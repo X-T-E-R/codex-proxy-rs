@@ -865,6 +865,7 @@ impl SettingsStore for StaticSettingsStore {
             overload_cooldown_enabled: false,
             overload_cooldown_threshold: 2,
             overload_cooldown_seconds: 120,
+            model_policies: Default::default(),
             cyber_session_block_enabled: false,
             cyber_session_block_ttl_seconds: 3600,
             openai_user_agent: None,
@@ -1278,6 +1279,7 @@ async fn accounts_update_should_commit_then_release_disabled_account_and_publish
                 enabled: false,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
+                overload_cooldown: gateway_core::account::AccountOverloadCooldownOverride::Inherit,
                 group_ids: Vec::new(),
             },
         )
@@ -1315,6 +1317,7 @@ async fn accounts_update_should_not_notify_provider_when_store_commit_fails() {
                 enabled: false,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
+                overload_cooldown: gateway_core::account::AccountOverloadCooldownOverride::Inherit,
                 group_ids: Vec::new(),
             },
         )
@@ -1357,6 +1360,7 @@ async fn accounts_batch_update_should_commit_once_and_notify_each_provider() {
                 enabled: false,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
+                overload_cooldown: gateway_core::account::AccountOverloadCooldownOverride::Inherit,
                 group_ids: Vec::new(),
             },
         )
@@ -2194,6 +2198,7 @@ pub(super) fn account_record(kind: &str) -> AccountRecord {
         enabled: true,
         concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
+        overload_cooldown: gateway_core::account::AccountOverloadCooldownOverride::Inherit,
         credential_state: CredentialState::Ready,
         credential_observed_at: now,
         quota: QuotaState::allowed(now.into()),
@@ -2354,6 +2359,7 @@ pub(super) fn import_settings() -> gateway_admin::model::accounts::AccountImport
             gateway_core::account::AccountConcurrencyLimit::new(3).expect("concurrency"),
         ),
         weight: gateway_core::account::AccountWeight::new(7).expect("weight"),
+        overload_cooldown: gateway_core::account::AccountOverloadCooldownOverride::Inherit,
         group_ids: vec![
             gateway_core::routing::AccountGroupId::new("grp_00000000000000000000000000000091")
                 .expect("group ID"),

@@ -13,6 +13,7 @@ import SettingsBackupSection from './components/backup/SettingsBackupSection.vue
 import ClientVersionSettings from './components/client-version/index.vue'
 import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
+import ModelPoliciesCard from './components/ModelPoliciesCard.vue'
 import OverloadCooldownCard from './components/OverloadCooldownCard.vue'
 import RequestLocaleCard from './components/RequestLocaleCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
@@ -50,6 +51,11 @@ const {
   addMapping,
   updateMapping,
   removeMapping,
+  policyRows,
+  addPolicyRow,
+  updatePolicyRow,
+  removePolicyRow,
+  policyRowsError,
   refreshMarginSecondsValue,
   refreshConcurrencyValue,
   maxConcurrentPerAccountValue,
@@ -200,6 +206,15 @@ watch(
         @add-mapping="addMapping"
         @update-mapping="updateMapping"
         @remove-mapping="removeMapping"
+      />
+
+      <ModelPoliciesCard
+        :rows="policyRows"
+        :loading="loading"
+        :error="error || policyRowsError"
+        @add-row="addPolicyRow"
+        @update-row="updatePolicyRow"
+        @remove-row="removePolicyRow"
       />
 
       <RotationStrategyCard v-model="form.rotationStrategy" :options="rotationOptions" />

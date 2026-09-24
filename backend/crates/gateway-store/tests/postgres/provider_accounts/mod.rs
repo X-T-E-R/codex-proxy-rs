@@ -23,11 +23,11 @@ use gateway_admin::{
     ports::store::AccountStore,
 };
 use gateway_core::account::{
-    AccountErrorReason, AccountStateChange, CredentialCasOutcome, CredentialCasUpdate,
-    CredentialRevision, CredentialState, OpaqueProviderData, PlaintextCredential,
-    ProviderAccountId, ProviderAccountIdentity, ProviderAccountStore, ProviderAccountUpdate,
-    ProviderRefreshQuery, QuotaAccessChange, QuotaAccessState, QuotaEvidence, QuotaObservation,
-    QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
+    AccountErrorReason, AccountOverloadCooldownOverride, AccountStateChange, CredentialCasOutcome,
+    CredentialCasUpdate, CredentialRevision, CredentialState, OpaqueProviderData,
+    PlaintextCredential, ProviderAccountId, ProviderAccountIdentity, ProviderAccountStore,
+    ProviderAccountUpdate, ProviderRefreshQuery, QuotaAccessChange, QuotaAccessState,
+    QuotaEvidence, QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
 };
 use gateway_core::routing::{AccountGroupId, ProviderKind};
 use gateway_store::{
@@ -1051,6 +1051,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
                 enabled: false,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
+                overload_cooldown: AccountOverloadCooldownOverride::Inherit,
                 group_ids: Vec::new(),
             },
             &context,
@@ -1129,6 +1130,7 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
         enabled: true,
         concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
+        overload_cooldown: AccountOverloadCooldownOverride::Inherit,
         group_ids: vec![],
         outbound_proxy: None,
     };
@@ -1342,6 +1344,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
                 enabled: false,
                 concurrency_limit: gateway_core::account::AccountConcurrencyLimit::new(7),
                 weight: gateway_core::account::AccountWeight::new(25).expect("weight"),
+                overload_cooldown: AccountOverloadCooldownOverride::Inherit,
                 group_ids: vec![AccountGroupId::new(GROUP_ID).expect("group ID")],
             },
             &context,
@@ -1378,6 +1381,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
                 enabled: true,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
+                overload_cooldown: AccountOverloadCooldownOverride::Inherit,
                 group_ids: vec![
                     AccountGroupId::new("grp_00000000000000000000000000000072")
                         .expect("missing group ID"),
@@ -1570,6 +1574,7 @@ async fn authorization_create_returns_existing_account_id_when_identity_is_upser
                     enabled: false,
                     concurrency_limit: None,
                     weight: gateway_core::account::AccountWeight::new(9).expect("weight"),
+                    overload_cooldown: AccountOverloadCooldownOverride::Inherit,
                     group_ids: Vec::new(),
                 }),
                 pending: PendingAuthorizationMutation::new(
@@ -1747,6 +1752,7 @@ async fn core_refresh_cas_updates_profile_and_credential_under_one_revision() {
             enabled: true,
             concurrency_limit: None,
             weight: gateway_core::account::AccountWeight::DEFAULT,
+            overload_cooldown: AccountOverloadCooldownOverride::Inherit,
             credential_state: CredentialState::Ready,
             credential_observed_at: Utc::now(),
         })
@@ -2074,6 +2080,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
             enabled: false,
             concurrency_limit: None,
             weight: gateway_core::account::AccountWeight::DEFAULT,
+            overload_cooldown: AccountOverloadCooldownOverride::Inherit,
             group_ids: Vec::new(),
             audit: audit("audit_account_disable", "disable", "acct_admin_a"),
         })
@@ -2452,6 +2459,7 @@ pub(super) fn account(id: &str, upstream_user_id: &str) -> NewProviderAccount {
         enabled: true,
         concurrency_limit: None,
         weight: gateway_core::account::AccountWeight::DEFAULT,
+        overload_cooldown: AccountOverloadCooldownOverride::Inherit,
         credential_state: CredentialState::Ready,
         credential_observed_at: Utc::now(),
     }
@@ -2639,6 +2647,7 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
                 enabled: true,
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
+                overload_cooldown: AccountOverloadCooldownOverride::Inherit,
                 group_ids: vec![],
                 outbound_proxy: Some(gateway_admin::model::proxies::AccountProxySelection::Url(
                     gateway_core::account::OutboundProxy::parse("http://127.0.0.1:18080").unwrap(),
@@ -2694,6 +2703,7 @@ async fn account_import_settings_apply_atomically_to_new_and_existing_identities
         enabled: false,
         concurrency_limit: Some(AccountConcurrencyLimit::new(3).expect("concurrency")),
         weight: AccountWeight::new(7).expect("weight"),
+        overload_cooldown: AccountOverloadCooldownOverride::Inherit,
         group_ids: vec![AccountGroupId::new(GROUP_ID).expect("group ID")],
     };
     let result = repository

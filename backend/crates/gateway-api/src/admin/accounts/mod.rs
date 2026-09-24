@@ -20,9 +20,10 @@ use gateway_admin::model::{
     AdminError as AdminServiceError, PageSize,
     accounts::{
         AccountConcurrencyLimit, AccountConnectionTestEvent as DomainConnectionTestEvent,
-        AccountCost, AccountGroupFilter, AccountListQuery, AccountModelUsage, AccountSort,
-        AccountSortField, AccountStatus as DomainAccountStatus, AccountUpdateResult, AccountUsage,
-        AccountWeight, AccountsUpdateResult, BatchUpdateAccounts, SortDirection, UpdateAccount,
+        AccountCost, AccountGroupFilter, AccountListQuery, AccountModelUsage,
+        AccountOverloadCooldownOverride, AccountSort, AccountSortField,
+        AccountStatus as DomainAccountStatus, AccountUpdateResult, AccountUsage, AccountWeight,
+        AccountsUpdateResult, BatchUpdateAccounts, SortDirection, UpdateAccount,
     },
     provider_credentials::{
         AccountDirectoryItem, AccountDirectoryPage, AccountExportBundle, AccountRefreshResult,
@@ -75,7 +76,7 @@ pub use wire::*;
 
 use credentials::{
     AccountProvider, deserialize_required_nullable, parse_account_weight, parse_concurrency_limit,
-    provider_document_value, require_account_id, validate_wire_group_ids,
+    parse_overload_cooldown, provider_document_value, require_account_id, validate_wire_group_ids,
 };
 use presenter::*;
 use wire::BatchUpdatedAccountsData;

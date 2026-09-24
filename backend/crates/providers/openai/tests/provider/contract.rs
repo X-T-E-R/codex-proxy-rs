@@ -9,9 +9,9 @@ use bytes::Bytes;
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use gateway_core::account::{
-    AccountFeedbackStats, AccountWeight, CredentialState, OpaqueProviderData, ProviderAccountId,
-    ProviderAccountStore as _, QuotaAccessChange, QuotaAccessState, QuotaEvidence,
-    QuotaObservation, QuotaState,
+    AccountFeedbackStats, AccountOverloadCooldownOverride, AccountWeight, CredentialState,
+    OpaqueProviderData, ProviderAccountId, ProviderAccountStore as _, QuotaAccessChange,
+    QuotaAccessState, QuotaEvidence, QuotaObservation, QuotaState,
 };
 use gateway_core::engine::continuation::{
     ContinuationBinding, NativeContinuationPin, PreviousResponseId,
@@ -688,6 +688,51 @@ async fn overload_cooldown_expiry_and_late_success_preserve_the_configured_inter
     overload_request(&provider, account, policy)
         .await
         .expect("expiry restores admission");
+}
+
+#[tokio::test]
+async fn overload_cooldown_account_override_disables_or_customizes_trigger() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    create_account(&store, "acct_scope_new").await;
+    let server = MockServer::start().await;
+    let provider = provider_with_base_url(&store, server.uri());
+    let account = "acct_provider_contract";
+    let global = Some((1, 120));
+
+    // disabled：全局开启也不触发新冷号，请求始终到达上游。
+    store.set_overload_cooldown_override(account, AccountOverloadCooldownOverride::Disabled);
+    for _ in 0..3 {
+        overload_response(&server, overloaded_response()).await;
+        let error = overload_request(&provider, account, global)
+            .await
+            .expect_err("upstream overload");
+        assert_eq!(error.send_state(), UpstreamSendState::Sent);
+    }
+
+    // custom：自有阈值一次即触发，即使全局未开启。
+    store.set_overload_cooldown_override(
+        account,
+        AccountOverloadCooldownOverride::custom(1, 120).expect("custom override"),
+    );
+    overload_response(&server, overloaded_response()).await;
+    let error = overload_request(&provider, account, None)
+        .await
+        .expect_err("upstream overload");
+    assert_eq!(error.send_state(), UpstreamSendState::Sent);
+    let blocked = overload_request(&provider, account, None)
+        .await
+        .expect_err("custom override triggers cooldown without global policy");
+    assert_eq!(blocked.send_state(), UpstreamSendState::NotSent);
+
+    // inherit：跟随全局，全局未开启时重复过载也不触发。
+    for _ in 0..2 {
+        overload_response(&server, overloaded_response()).await;
+        let error = overload_request(&provider, "acct_scope_new", None)
+            .await
+            .expect_err("upstream overload");
+        assert_eq!(error.send_state(), UpstreamSendState::Sent, "{error:?}");
+    }
 }
 
 fn diagnostic_context(request_id: &str, account_id: &str) -> AttemptContext {

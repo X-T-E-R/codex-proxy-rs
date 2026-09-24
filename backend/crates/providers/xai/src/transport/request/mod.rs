@@ -5,6 +5,7 @@ use std::fmt;
 
 use gateway_core::operation::GenerateRequest;
 use gateway_core::policy::ClientApiKeyId;
+use gateway_core::routing::ModelRequestPolicy;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 
@@ -178,16 +179,32 @@ impl GrokResponsesRequest {
         request: &GenerateRequest,
         upstream_model: &str,
         client_api_key_ref: &ClientApiKeyId,
+        model_policy: Option<ModelRequestPolicy>,
     ) -> Result<Self, GrokRequestEncodeError> {
-        Self::encode_inner(request, upstream_model, client_api_key_ref, true, false)
+        Self::encode_inner(
+            request,
+            upstream_model,
+            client_api_key_ref,
+            true,
+            false,
+            model_policy,
+        )
     }
 
     pub(super) fn encode_compaction_source(
         request: &GenerateRequest,
         upstream_model: &str,
         client_api_key_ref: &ClientApiKeyId,
+        model_policy: Option<ModelRequestPolicy>,
     ) -> Result<Self, GrokRequestEncodeError> {
-        Self::encode_inner(request, upstream_model, client_api_key_ref, false, true)
+        Self::encode_inner(
+            request,
+            upstream_model,
+            client_api_key_ref,
+            false,
+            true,
+            model_policy,
+        )
     }
 
     fn encode_inner(
@@ -196,6 +213,7 @@ impl GrokResponsesRequest {
         client_api_key_ref: &ClientApiKeyId,
         allow_cache_route: bool,
         should_consume_terminal_compaction_trigger: bool,
+        model_policy: Option<ModelRequestPolicy>,
     ) -> Result<Self, GrokRequestEncodeError> {
         let payload = request.protocol_payload();
         if payload.protocol() != "openai" {
@@ -220,7 +238,7 @@ impl GrokResponsesRequest {
         );
         sanitize_account_identity(&mut body);
         sanitize_client_metadata(&mut body);
-        normalize_build_request(&mut body, &upstream_model)?;
+        normalize_build_request(&mut body, &upstream_model, model_policy.as_ref())?;
         let mut response_transform = normalize_responses_request(&mut body)?;
         response_transform.observe_client_cache_tools();
         if enable_cache_route {

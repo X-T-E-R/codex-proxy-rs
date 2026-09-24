@@ -9,7 +9,7 @@ use std::{fmt, num::NonZeroU64, str::FromStr};
 
 use gateway_admin::model::auth::{AdminAuditEvent as AdminAuditModel, AdminSession};
 use gateway_admin::model::settings::{
-    AdminApiKey, AdminApiKeyMutation, ModelMappings, ReplaceRuntimeSettings,
+    AdminApiKey, AdminApiKeyMutation, ModelMappings, ModelPolicies, ReplaceRuntimeSettings,
     RotationStrategy as AdminRotationStrategy, RuntimeSettings as AdminRuntimeSettings,
 };
 use gateway_admin::model::{MutationActor, MutationContext, Revision as AdminRevision};

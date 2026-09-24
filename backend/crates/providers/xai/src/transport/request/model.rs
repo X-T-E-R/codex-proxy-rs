@@ -1,15 +1,58 @@
 //! 当前 Responses 参数到 Grok 模型能力的转换。
 
+use gateway_core::routing::{ModelRequestPolicy, ReasoningEffort, RequestedReasoningEffort};
+
 use super::*;
 
 pub(super) fn normalize_build_request(
     body: &mut Map<String, Value>,
     upstream_model: &str,
+    model_policy: Option<&ModelRequestPolicy>,
 ) -> Result<(), GrokRequestEncodeError> {
     apply_build_response_defaults(body)?;
+    apply_model_effort_policy(body, model_policy);
     normalize_build_reasoning_effort(body, upstream_model);
     sanitize_build_model_fields(body, upstream_model);
     Ok(())
+}
+
+/// 先应用路由计划冻结的强度策略，再按 Grok 模型能力归一化，
+/// 保证最终值不超出上游支持范围。xAI 边界不透传 service_tier，fast 策略不适用。
+fn apply_model_effort_policy(body: &mut Map<String, Value>, policy: Option<&ModelRequestPolicy>) {
+    let Some(rule) = policy.and_then(|policy| policy.reasoning_effort()) else {
+        return;
+    };
+    let requested = match body
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .and_then(|reasoning| reasoning.get("effort"))
+    {
+        None => RequestedReasoningEffort::Absent,
+        Some(value) => value
+            .as_str()
+            .map_or(RequestedReasoningEffort::Unknown, |effort| {
+                ReasoningEffort::parse(effort).map_or(
+                    RequestedReasoningEffort::Unknown,
+                    RequestedReasoningEffort::Known,
+                )
+            }),
+    };
+    let Some(effort) = rule.resolve(requested) else {
+        return;
+    };
+    // `reasoning: null` 视为缺失对象直接替换；其他非对象形状保持原样不写入。
+    if body.get("reasoning").is_some_and(Value::is_null) {
+        body.insert("reasoning".to_owned(), Value::Object(Map::new()));
+    }
+    let reasoning = body
+        .entry("reasoning".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Some(object) = reasoning.as_object_mut() {
+        object.insert(
+            "effort".to_owned(),
+            Value::String(effort.as_str().to_owned()),
+        );
+    }
 }
 
 fn apply_build_response_defaults(

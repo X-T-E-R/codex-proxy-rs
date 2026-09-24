@@ -110,7 +110,8 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         let rows = sqlx::query(
             "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
-                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight,
+                    overload_cooldown_mode, overload_cooldown_threshold, overload_cooldown_seconds, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
                     quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
@@ -146,16 +147,20 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
             ),
             None => None,
         };
+        let (overload_mode, overload_threshold, overload_seconds) =
+            overload_cooldown_parts(account.overload_cooldown);
         sqlx::query(
             "insert into provider_accounts (
                outbound_proxy_url, outbound_proxy_id, id, provider_kind, name, email, upstream_user_id,
                upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
                has_refresh_token, access_token_expires_at, next_refresh_at, enabled,
                concurrency_limit, weight, credential_state, provider_quota_json,
-               credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at
+               credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at,
+               overload_cooldown_mode, overload_cooldown_threshold, overload_cooldown_seconds
              ) values (
                $18, $19, $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13,
-               $14, $15, $16, null, $17, null, null, now(), greatest(now(), $17)
+               $14, $15, $16, null, $17, null, null, now(), greatest(now(), $17),
+               $20, $21, $22
              )",
         )
         .bind(account.id)
@@ -177,6 +182,9 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         .bind(account.credential_observed_at)
         .bind(account.outbound_proxy.as_ref().map(|proxy| proxy.expose_url()))
         .bind(proxy_id)
+        .bind(overload_mode)
+        .bind(overload_threshold)
+        .bind(overload_seconds)
         .execute(&mut *transaction)
         .await
         .map_err(|_| postgres_unavailable("insert provider account"))?;
@@ -495,6 +503,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                     settings.enabled,
                     settings.concurrency_limit,
                     settings.weight,
+                    settings.overload_cooldown,
                     None,
                 )
                 .await?;
@@ -582,6 +591,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 command.enabled,
                 command.concurrency_limit,
                 command.weight,
+                command.overload_cooldown,
                 command.outbound_proxy.as_ref(),
             )
             .await?;
@@ -743,16 +753,20 @@ pub(crate) async fn upsert_provider_account_in_transaction(
         ),
         None => None,
     };
+    let (overload_mode, overload_threshold, overload_seconds) =
+        overload_cooldown_parts(account.overload_cooldown);
     let imported_id = sqlx::query_scalar::<_, String>(
         "insert into provider_accounts (
            outbound_proxy_url, outbound_proxy_id, id, provider_kind, name, email, upstream_user_id,
            upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
            has_refresh_token, access_token_expires_at, next_refresh_at, enabled,
            concurrency_limit, weight, credential_state, provider_quota_json,
-           credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at
+           credential_observed_at, quota_access_observed_at, quota_observed_at, created_at, updated_at,
+           overload_cooldown_mode, overload_cooldown_threshold, overload_cooldown_seconds
          ) values (
            $18, $19, $1, $2, $3, $4, $5, $6, $7, $8, $9, 1, $10, $11, $12, $13,
-           $14, $15, $16, null, $17, null, null, now(), greatest(now(), $17)
+           $14, $15, $16, null, $17, null, null, now(), greatest(now(), $17),
+           $20, $21, $22
          )
          on conflict (
            provider_kind,
@@ -803,6 +817,9 @@ pub(crate) async fn upsert_provider_account_in_transaction(
     .bind(account.credential_observed_at)
     .bind(account.outbound_proxy.as_ref().map(|proxy| proxy.expose_url()))
     .bind(proxy_id)
+    .bind(overload_mode)
+    .bind(overload_threshold)
+    .bind(overload_seconds)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| {
@@ -909,6 +926,7 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     enabled: bool,
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
+    overload_cooldown: AccountOverloadCooldownOverride,
     outbound_proxy: Option<&gateway_admin::model::proxies::AccountProxySelection>,
 ) -> StoreResult<()> {
     let (proxy_id, proxy) = match outbound_proxy {
@@ -917,9 +935,12 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
         }
         None => (None, None),
     };
+    let (overload_mode, overload_threshold, overload_seconds) =
+        overload_cooldown_parts(overload_cooldown);
     let updated = sqlx::query_scalar::<_, String>(
         "update provider_accounts
          set enabled = $2, concurrency_limit = $3, weight = $4, updated_at = greatest(now(), updated_at),
+             overload_cooldown_mode = $8, overload_cooldown_threshold = $9, overload_cooldown_seconds = $10,
              outbound_proxy_url = case when $5 then $6 else outbound_proxy_url end,
              outbound_proxy_id = case when $5 then $7 else outbound_proxy_id end
          where id = any($1::text[])
@@ -932,6 +953,9 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     .bind(outbound_proxy.is_some())
     .bind(proxy.as_ref().map(gateway_core::account::OutboundProxy::expose_url))
     .bind(proxy_id)
+    .bind(overload_mode)
+    .bind(overload_threshold)
+    .bind(overload_seconds)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("set provider accounts state in admin transaction"))?

@@ -247,8 +247,8 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 管理员显式清除该账号的本地错误/额度/cooldown 事实并重新启用，不访问上游 |
 | `POST` | `/api/admin/accounts/rotate` | OpenAI rotation 字段 | 手工替换 OpenAI OAuth token |
-| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组与出站代理 |
-| `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled, concurrencyLimit, weight, groupIds, outboundProxyId?, outboundProxyUrl? }` | 一次事务统一更新所选账号的调度字段、完整分组集合与可选代理 |
+| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, overloadCooldown, outboundProxyId?, outboundProxyUrl? }` | 一次更新账号调度状态、并发上限（`null` 表示继承运行参数）、权重（1–100）、所属分组、过载冷号覆盖与出站代理 |
+| `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled, concurrencyLimit, weight, groupIds, overloadCooldown, outboundProxyId?, outboundProxyUrl? }` | 一次事务统一更新所选账号的调度字段、完整分组集合、过载冷号覆盖与可选代理 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
 | `POST` | `/api/admin/accounts/quota/refresh` | `{ accountId }` | 访问 Provider 并刷新额度，同时同步额度所属状态 |
@@ -282,6 +282,12 @@ OpenAI 的 `self_serve_business_prolite` 等 Team 套餐显示为 `Business`；�
 指定代理后，推理、OAuth 服务端交换/刷新及账号辅助请求使用同一出口；代理失败不会退回直连。
 浏览器打开的第三方 OAuth 授权页仍使用浏览器自身网络。
 账号出口与连接隔离见 [架构说明](architecture.md#账号出站代理)。
+
+`overloadCooldown` 为账号级过载冷号覆盖，更新与批量更新时必填，形状为 `{ mode, threshold?, seconds? }`：
+`mode: "inherit"` 跟随全局过载冷号设置；`"disabled"` 表示该账号不触发新的过载冷号，已有冷却按原到期时间解除；
+`"custom"` 使用自有阈值，此时 `threshold`（连续过载次数）与 `seconds`（冷号时长）均必填，取 1–4294967295 的整数，
+其余模式下两者必须为 `null`。账号视图返回当前保存的覆盖配置；生效规则见
+[运行设置](#8-运行设置)的过载冷号说明。
 
 ### 独立代理管理 / Managed Proxies
 
@@ -393,9 +399,9 @@ concurrent proxy mutations return 409. OAuth commits still reject a deleted, cha
 
 RT-only 使用同一形状，只提交 `refreshToken`。不得把真实 token 写入日志、issue、fixture 或文档。
 
-账号导入与首次 OAuth complete 可附带 `settings: { enabled, concurrencyLimit, weight, groupIds }`。
-提供 `settings` 时四项均必填，`concurrencyLimit: null` 继承运行参数，否则为 1–4294967295 的整数；
-`weight` 为 1–100，`groupIds` 为完整分组集合。设置应用于本次导入的全部账号，包括匹配到的已有账号，
+账号导入与首次 OAuth complete 可附带 `settings: { enabled, concurrencyLimit, weight, groupIds, overloadCooldown }`。
+提供 `settings` 时五项均必填，`concurrencyLimit: null` 继承运行参数，否则为 1–4294967295 的整数；
+`weight` 为 1–100，`groupIds` 为完整分组集合，`overloadCooldown` 形状与校验同账号更新。设置应用于本次导入的全部账号，包括匹配到的已有账号，
 与凭据在同一事务内提交；分组不存在时整次回滚。省略 `settings` 时新账号使用默认设置并保持未分组，
 已有账号保留原有分组、权重与并发设置。重新授权不接受 `settings`，普通 credential refresh/rotation 也保留账号设置。
 
@@ -615,6 +621,7 @@ costs reach the daily or weekly limit; requests already admitted can finish abov
 
 ```text
 modelMappings
+modelPolicies
 refreshMarginSeconds
 refreshConcurrency
 maxConcurrentPerAccount
@@ -679,6 +686,26 @@ openaiSearchCountry
 两个关键词共享同一账号的计数，成功响应或其他错误清零。计数在各进程内独立维护，重启后重新计数；
 冷却到期时间保存在共享 Redis。冷号期间拒绝该账号的新推理、指定账号请求和连接测试，已有请求可继续完成，
 其成功不会提前解冻。关闭开关停止新触发，已有冷却按原期限结束。账号列表通过 `rate_limited` 展示冷却状态。
+单个账号可用 `overloadCooldown` 覆盖全局设置（见[账号](#5-账号)）；`disabled` 账号不累计也不触发新冷却。
+
+模型级请求策略由 `modelPolicies` 控制：按键精确匹配客户端请求的 public 模型名（与 `modelMappings`
+同键空间），在生成路由计划时冻结进候选，由 Provider 在发送前改写请求体；Images、Search 等 Provider
+原生端点不适用。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `modelPolicies` | `object` | 键为模型名（1–256 字节 UTF-8，不含控制字符，与 `modelMappings` 键同一规则），最多 512 条；每条策略至少包含下列一项 |
+
+每条策略的两个可选项：
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `reasoningEffort` | `{ mode, value } \| null` | 思考强度策略：`locked` 无条件改写为 `value`；`min` 在请求缺失或低于 `value` 时提升；`max` 在请求缺失或高于 `value` 时降低。`value` 取 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`（强度递增） |
+| `serviceTier` | `string \| null` | `lock_fast` 无条件写入 `service_tier: "fast"`；`lock_never_fast` 在请求携带 `fast`/`priority` 时删除该字段，按默认档处理 |
+
+更新时省略 `modelPolicies` 表示保留当前已保存值；提供时整体替换，并与其余运行设置原子保存、推进
+`config_revision`。请求中无法识别的强度值在 `min`/`max` 下保持原值，`locked` 一律覆盖。
+xAI 边界不透传 `service_tier`，fast 策略仅对经 OpenAI 路由的模型生效。
 
 Cyber 会话自动屏蔽由以下两个字段控制：
 

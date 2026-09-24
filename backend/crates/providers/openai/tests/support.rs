@@ -9,12 +9,12 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use gateway_core::account::{
-    AccountConcurrencyLimit, AccountErrorReason, AccountRuntimeSignals, AccountStateChange,
-    AccountWeight, CredentialCasOutcome, CredentialCasUpdate, CredentialCasUpdateParts,
-    CredentialRevision, CredentialState, LoadedCredential, NewProviderAccount, OpaqueProviderData,
-    ProviderAccount, ProviderAccountId, ProviderAccountStore, ProviderAccountUpdate,
-    ProviderRefreshQuery, QuotaAccessChange, QuotaObservation, QuotaObservationTouch, QuotaState,
-    QuotaWriteOutcome,
+    AccountConcurrencyLimit, AccountErrorReason, AccountOverloadCooldownOverride,
+    AccountRuntimeSignals, AccountStateChange, AccountWeight, CredentialCasOutcome,
+    CredentialCasUpdate, CredentialCasUpdateParts, CredentialRevision, CredentialState,
+    LoadedCredential, NewProviderAccount, OpaqueProviderData, ProviderAccount, ProviderAccountId,
+    ProviderAccountStore, ProviderAccountUpdate, ProviderRefreshQuery, QuotaAccessChange,
+    QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,
 };
 use gateway_core::error::{StoreError, StoreErrorKind};
 use gateway_core::policy::ClientApiKeyId;
@@ -84,6 +84,20 @@ impl MemoryAccountStore {
             .account
             .clone()
             .with_scheduling(concurrency_limit, weight);
+    }
+
+    pub(crate) fn set_overload_cooldown_override(
+        &self,
+        id: &str,
+        override_policy: AccountOverloadCooldownOverride,
+    ) {
+        let id = ProviderAccountId::new(id).expect("valid account ID");
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts.get_mut(&id).expect("seeded account");
+        stored.account = stored
+            .account
+            .clone()
+            .with_overload_cooldown_override(override_policy);
     }
 
     pub(crate) fn quota_reads(&self) -> usize {

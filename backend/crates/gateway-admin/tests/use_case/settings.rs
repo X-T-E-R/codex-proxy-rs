@@ -50,6 +50,7 @@ impl SettingsStore for UnusedSettingsStore {
 fn valid_replace_command() -> ReplaceRuntimeSettings {
     ReplaceRuntimeSettings {
         model_mappings: Default::default(),
+        model_policies: None,
         refresh_margin_seconds: 3_600,
         refresh_concurrency: 1,
         max_concurrent_per_account: 1,

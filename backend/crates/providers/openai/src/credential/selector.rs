@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -82,7 +83,8 @@ struct RiskRecoveryState {
 
 #[derive(Debug)]
 struct OverloadStreak {
-    policy: AccountSelectionPolicy,
+    // 解析账号覆盖后的生效策略；生效值变化时重新计数。
+    effective_policy: Option<(NonZeroU32, NonZeroU32)>,
     count: u32,
 }
 
@@ -1019,8 +1021,9 @@ impl CodexCredentialSelector {
         policy: AccountSelectionPolicy,
         matches_overload: bool,
     ) -> Result<bool, ProviderStoreError> {
-        let Some((threshold, seconds)) = policy.overload_cooldown().filter(|_| matches_overload)
-        else {
+        // 账号级覆盖优先于全局策略；disabled 与全局关闭一样只停止触发新冷却。
+        let effective = account.effective_overload_cooldown(policy.overload_cooldown());
+        let Some((threshold, seconds)) = effective.filter(|_| matches_overload) else {
             self.reset_overload_streak(account);
             return Ok(false);
         };
@@ -1035,9 +1038,15 @@ impl CodexCredentialSelector {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let streak = streaks
                 .entry(account.id().clone())
-                .or_insert(OverloadStreak { policy, count: 0 });
-            if streak.policy.overload_cooldown() != policy.overload_cooldown() {
-                *streak = OverloadStreak { policy, count: 0 };
+                .or_insert(OverloadStreak {
+                    effective_policy: effective,
+                    count: 0,
+                });
+            if streak.effective_policy != effective {
+                *streak = OverloadStreak {
+                    effective_policy: effective,
+                    count: 0,
+                };
             }
             streak.count = streak.count.saturating_add(1);
             streak.count >= threshold.get()

@@ -219,6 +219,7 @@ impl GrokBuildProvider {
             generate,
             upstream_model.as_str(),
             context.client_api_key_ref(),
+            candidate.model_policy(),
         )
         .map_err(map_request_error)?;
         let wire_upstream_model = UpstreamModelId::new(
@@ -367,6 +368,7 @@ impl GrokBuildProvider {
             generate,
             upstream_model.as_str(),
             context.client_api_key_ref(),
+            candidate.model_policy(),
         )
         .map_err(map_request_error)?;
         let wire_upstream_model = UpstreamModelId::new(

@@ -22,6 +22,7 @@ fn encode(body: Value) -> Result<GrokCompactionRequest, GrokRequestEncodeError> 
         &compaction_request(body),
         "grok-4.5",
         &ClientApiKeyId::new("key_compaction").expect("client API key ID"),
+        None,
     )
 }
 

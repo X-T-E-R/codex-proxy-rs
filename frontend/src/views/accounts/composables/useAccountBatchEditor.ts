@@ -5,7 +5,7 @@ import { ref, shallowRef, watch } from 'vue'
 import { batchUpdateAccounts } from '@/api'
 import { toast } from '@/components/base/BaseToast'
 import { useAsyncAction } from '@/composables/useAsyncAction'
-import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
+import { concurrencyLimitInput, parseAccountSchedulingForm, parseOverloadCooldownForm } from '../utils/schedulingForm'
 
 type AccountRow = Awaited<ReturnType<typeof getAccounts>>['items'][number]
 
@@ -22,6 +22,9 @@ export function useAccountBatchEditor(options: {
   const weight = shallowRef('1')
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
+  const overloadCooldownMode = shallowRef('inherit')
+  const overloadCooldownThreshold = shallowRef('')
+  const overloadCooldownSeconds = shallowRef('')
   const selectedGroupIds = ref<string[]>([])
   const saveAction = useAsyncAction()
   const saving = saveAction.loading
@@ -44,12 +47,21 @@ export function useAccountBatchEditor(options: {
     if (saving.value || options.selectedIds.value.size === 0)
       return
     const scheduling = parseAccountSchedulingForm(concurrencyLimit.value, weight.value)
+    const cooldown = parseOverloadCooldownForm(
+      overloadCooldownMode.value,
+      overloadCooldownThreshold.value,
+      overloadCooldownSeconds.value,
+    )
     if (proxyMode.value === 'proxy' && !proxyId.value.trim()) {
       toast.warning('请选择已通过测试的代理')
       return
     }
     if (!scheduling.valid) {
       toast.warning(scheduling.message)
+      return
+    }
+    if (!cooldown.valid) {
+      toast.warning(cooldown.message)
       return
     }
 
@@ -61,6 +73,7 @@ export function useAccountBatchEditor(options: {
         enabled: schedulingEnabled.value,
         concurrencyLimit: scheduling.values.concurrencyLimit,
         weight: scheduling.values.weight,
+        overloadCooldown: cooldown.value,
         groupIds: [...new Set(selectedGroupIds.value)],
       })
       showBatchEditModal.value = false
@@ -102,6 +115,9 @@ export function useAccountBatchEditor(options: {
     proxyId.value = ''
     concurrencyLimit.value = ''
     weight.value = '1'
+    overloadCooldownMode.value = 'inherit'
+    overloadCooldownThreshold.value = ''
+    overloadCooldownSeconds.value = ''
     selectedGroupIds.value = []
   })
 
@@ -112,6 +128,9 @@ export function useAccountBatchEditor(options: {
     weight,
     proxyMode,
     proxyId,
+    overloadCooldownMode,
+    overloadCooldownThreshold,
+    overloadCooldownSeconds,
     selectedGroupIds,
     saving,
     open,

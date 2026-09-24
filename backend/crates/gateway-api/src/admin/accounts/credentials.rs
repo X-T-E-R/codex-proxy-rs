@@ -26,6 +26,7 @@ pub struct AccountImportSettingsRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub concurrency_limit: Option<u64>,
     pub weight: u64,
+    pub overload_cooldown: AccountOverloadCooldownWire,
     pub group_ids: Vec<String>,
 }
 
@@ -33,6 +34,7 @@ impl AccountImportSettingsRequest {
     fn validate(&self) -> Result<(), WireValidationError> {
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
+        parse_overload_cooldown(&self.overload_cooldown)?;
         validate_wire_group_ids(&self.group_ids)?;
         Ok(())
     }
@@ -44,6 +46,7 @@ impl AccountImportSettingsRequest {
             enabled: self.enabled,
             concurrency_limit: parse_concurrency_limit(self.concurrency_limit)?,
             weight: parse_account_weight(self.weight)?,
+            overload_cooldown: parse_overload_cooldown(&self.overload_cooldown)?,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
         })
     }
@@ -204,6 +207,7 @@ pub struct UpdateAccountRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub concurrency_limit: Option<u64>,
     pub weight: u64,
+    pub overload_cooldown: AccountOverloadCooldownWire,
     pub group_ids: Vec<String>,
 }
 
@@ -212,6 +216,7 @@ impl UpdateAccountRequest {
         require_account_id(&self.account_id, "accountId")?;
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
+        parse_overload_cooldown(&self.overload_cooldown)?;
         validate_wire_group_ids(&self.group_ids)?;
         Ok(())
     }
@@ -227,6 +232,7 @@ impl UpdateAccountRequest {
             enabled: self.enabled,
             concurrency_limit: parse_concurrency_limit(self.concurrency_limit)?,
             weight: parse_account_weight(self.weight)?,
+            overload_cooldown: parse_overload_cooldown(&self.overload_cooldown)?,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
         })
     }
@@ -456,6 +462,32 @@ pub(super) fn parse_account_weight(value: u64) -> Result<AccountWeight, WireVali
         .ok()
         .and_then(AccountWeight::new)
         .ok_or_else(|| WireValidationError::new("weight"))
+}
+
+/// 校验账号级过载冷号覆盖；custom 必须携带正整数阈值与秒数，其他模式不得携带。
+pub(super) fn parse_overload_cooldown(
+    value: &AccountOverloadCooldownWire,
+) -> Result<AccountOverloadCooldownOverride, WireValidationError> {
+    match value.mode.trim() {
+        "inherit" if value.threshold.is_none() && value.seconds.is_none() => {
+            Ok(AccountOverloadCooldownOverride::Inherit)
+        }
+        "disabled" if value.threshold.is_none() && value.seconds.is_none() => {
+            Ok(AccountOverloadCooldownOverride::Disabled)
+        }
+        "custom" => {
+            let (Some(threshold), Some(seconds)) = (value.threshold, value.seconds) else {
+                return Err(WireValidationError::new("overloadCooldown"));
+            };
+            let threshold = u32::try_from(threshold)
+                .map_err(|_| WireValidationError::new("overloadCooldown.threshold"))?;
+            let seconds = u32::try_from(seconds)
+                .map_err(|_| WireValidationError::new("overloadCooldown.seconds"))?;
+            AccountOverloadCooldownOverride::custom(threshold, seconds)
+                .ok_or_else(|| WireValidationError::new("overloadCooldown"))
+        }
+        _ => Err(WireValidationError::new("overloadCooldown")),
+    }
 }
 
 pub(super) fn validate_wire_group_ids(

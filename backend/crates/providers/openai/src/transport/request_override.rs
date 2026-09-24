@@ -6,6 +6,9 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use gateway_core::provider_ports::OpenAiRequestBodyOverride;
+use gateway_core::routing::{
+    ModelRequestPolicy, ReasoningEffort, RequestedReasoningEffort, ServiceTierRule,
+};
 use roxmltree::{Document, Node};
 use serde_json::{Map, Value};
 
@@ -44,6 +47,78 @@ impl CodexRequestBodyOverrideState {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
     }
+}
+
+/// 应用路由计划冻结的模型请求策略：改写推理强度与服务档位。
+///
+/// 需要写入时创建缺失的 `reasoning` 对象；其他字段与顺序保持不变。
+/// 返回值表示正文是否发生变化。
+pub fn apply_model_request_policy(
+    request: &mut CodexResponsesRequest,
+    policy: &ModelRequestPolicy,
+) -> bool {
+    let body = request.body_mut();
+    let mut changed = false;
+    if let Some(rule) = policy.reasoning_effort() {
+        let requested = match body
+            .get("reasoning")
+            .and_then(Value::as_object)
+            .and_then(|reasoning| reasoning.get("effort"))
+        {
+            None => RequestedReasoningEffort::Absent,
+            Some(value) => value
+                .as_str()
+                .map_or(RequestedReasoningEffort::Unknown, |effort| {
+                    ReasoningEffort::parse(effort).map_or(
+                        RequestedReasoningEffort::Unknown,
+                        RequestedReasoningEffort::Known,
+                    )
+                }),
+        };
+        if let Some(effort) = rule.resolve(requested) {
+            // `reasoning: null` 视为缺失对象直接替换；其他非对象形状保持原样不写入。
+            if body.get("reasoning").is_some_and(Value::is_null) {
+                body.insert("reasoning".to_owned(), Value::Object(Map::new()));
+            }
+            let reasoning = body
+                .entry("reasoning".to_owned())
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(object) = reasoning.as_object_mut()
+                && object.get("effort").and_then(Value::as_str) != Some(effort.as_str())
+            {
+                object.insert(
+                    "effort".to_owned(),
+                    Value::String(effort.as_str().to_owned()),
+                );
+                changed = true;
+            }
+        }
+    }
+    match policy.service_tier() {
+        Some(ServiceTierRule::LockFast) => {
+            if body.get("service_tier").and_then(Value::as_str) != Some("fast") {
+                body.insert("service_tier".to_owned(), Value::String("fast".to_owned()));
+                changed = true;
+            }
+        }
+        Some(ServiceTierRule::LockNeverFast) => {
+            let requests_fast = body
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .is_some_and(|tier| {
+                    matches!(
+                        tier.trim().to_ascii_lowercase().as_str(),
+                        "fast" | "priority"
+                    )
+                });
+            if requests_fast {
+                body.remove("service_tier");
+                changed = true;
+            }
+        }
+        None => {}
+    }
+    changed
 }
 
 /// 改写已有 Responses 请求中的最新专用环境块与已声明搜索工具。

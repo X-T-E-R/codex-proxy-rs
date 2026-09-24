@@ -227,8 +227,16 @@ impl PgAdminAccountStore {
             .map_err(|error| admin_store_error(ENTITY, error))?;
         let mut changed_fields = vec!["credentials".to_owned()];
         if settings.is_some() {
-            changed_fields
-                .extend(["enabled", "concurrency_limit", "weight", "group_ids"].map(str::to_owned));
+            changed_fields.extend(
+                [
+                    "enabled",
+                    "concurrency_limit",
+                    "weight",
+                    "overload_cooldown",
+                    "group_ids",
+                ]
+                .map(str::to_owned),
+            );
         }
         let imported = self
             .accounts
@@ -658,6 +666,7 @@ impl AccountStore for PgAdminAccountStore {
             "enabled".to_owned(),
             "concurrency_limit".to_owned(),
             "weight".to_owned(),
+            "overload_cooldown".to_owned(),
             "groups".to_owned(),
         ];
         if command.outbound_proxy.is_some() {
@@ -670,6 +679,7 @@ impl AccountStore for PgAdminAccountStore {
                 enabled: command.enabled,
                 concurrency_limit: command.concurrency_limit,
                 weight: command.weight,
+                overload_cooldown: command.overload_cooldown,
                 group_ids: command.group_ids,
                 outbound_proxy: command.outbound_proxy,
                 audit: mutation_audit(
@@ -751,6 +761,7 @@ impl AccountStore for PgAdminAccountStore {
             "enabled".to_owned(),
             "concurrency_limit".to_owned(),
             "weight".to_owned(),
+            "overload_cooldown".to_owned(),
             "groups".to_owned(),
         ];
         if command.outbound_proxy.is_some() {
@@ -763,6 +774,7 @@ impl AccountStore for PgAdminAccountStore {
                 enabled: command.enabled,
                 concurrency_limit: command.concurrency_limit,
                 weight: command.weight,
+                overload_cooldown: command.overload_cooldown,
                 group_ids: command.group_ids,
                 outbound_proxy: command.outbound_proxy,
                 audit: mutation_audit(

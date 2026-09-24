@@ -15,8 +15,27 @@ use gateway_core::provider_ports::{
     ProviderStoreError, ProviderStoreErrorKind, ProviderWebSocketPoolPolicy,
     ProviderWebSocketPoolPolicyPort,
 };
+use gateway_core::routing::{ReasoningEffort, ReasoningEffortRuleMode, ServiceTierRule};
 
 use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
+
+/// `model_policies_json` 中单条模型策略的持久化形状。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelPolicyJson {
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffortRuleJson>,
+    #[serde(default)]
+    pub service_tier: Option<String>,
+}
+
+/// 模型策略中推理强度规则的持久化形状。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReasoningEffortRuleJson {
+    pub mode: String,
+    pub value: String,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct RuntimeSettings {
@@ -28,6 +47,7 @@ pub struct RuntimeSettings {
     pub request_interval_ms: u64,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
+    pub model_policies: BTreeMap<String, ModelPolicyJson>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
     pub usage_retention_days: u32,
@@ -68,6 +88,7 @@ impl fmt::Debug for RuntimeSettings {
             .field("request_interval_ms", &self.request_interval_ms)
             .field("rotation_strategy", &self.rotation_strategy)
             .field("model_mappings", &self.model_mappings)
+            .field("model_policies", &self.model_policies)
             .field("min_codex_desktop_version", &self.min_codex_desktop_version)
             .field("min_codex_cli_version", &self.min_codex_cli_version)
             .field("usage_retention_days", &self.usage_retention_days)
@@ -119,6 +140,8 @@ pub struct RuntimeSettingsUpdate {
     pub request_interval_ms: u64,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
+    /// 省略时保留当前模型策略。
+    pub model_policies: Option<BTreeMap<String, ModelPolicyJson>>,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
     pub usage_retention_days: u32,
@@ -184,6 +207,10 @@ impl RuntimeSettingsUpdate {
                 gateway_core::provider_ports::canonical_openai_search_country(value).is_none()
             })
             || !valid_model_mappings(&self.model_mappings)
+            || self
+                .model_policies
+                .as_ref()
+                .is_some_and(|policies| !valid_model_policies(policies))
             || !valid_client_version(self.min_codex_desktop_version.as_deref())
             || !valid_client_version(self.min_codex_cli_version.as_deref())
             || RotationStrategy::parse(&self.rotation_strategy).is_none()
@@ -245,7 +272,7 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
     let row = sqlx::query_as::<_, RuntimeSettingsRow>(
             "select config_revision, admin_api_key, refresh_margin_seconds,
                     refresh_concurrency, max_concurrent_per_account, request_interval_ms,
-                    rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
+                    rotation_strategy, model_mappings_json, model_policies_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
                     min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
                     ws_pool_max_connecting, ws_pool_stream_idle_timeout_ms,
@@ -343,7 +370,7 @@ pub(crate) async fn load_runtime_settings_in_transaction(
     let row = sqlx::query_as::<_, RuntimeSettingsRow>(
         "select config_revision, admin_api_key, refresh_margin_seconds,
                 refresh_concurrency, max_concurrent_per_account, request_interval_ms,
-                rotation_strategy, model_mappings_json, usage_retention_days, ops_event_retention_days,
+                rotation_strategy, model_mappings_json, model_policies_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
                 min_codex_cli_version, ws_pool_enabled, ws_pool_max_age_ms,
                 ws_pool_max_connecting, ws_pool_stream_idle_timeout_ms,
@@ -395,6 +422,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
 	                 request_interval_ms = $5,
 	                 rotation_strategy = $6,
 	                 model_mappings_json = $7,
+	                 model_policies_json = coalesce($27, model_policies_json),
 	                 usage_retention_days = $8,
 	                 ops_event_retention_days = $9,
 	                 audit_retention_days = $10,
@@ -444,6 +472,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(update.openai_request_body_override_enabled)
     .bind(openai_request_timezone.as_deref())
     .bind(openai_search_country.as_deref())
+    .bind(update.model_policies.as_ref().map(sqlx::types::Json))
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("update runtime settings in transaction"))?
@@ -502,6 +531,7 @@ struct RuntimeSettingsRow {
     request_interval_ms: i64,
     rotation_strategy: String,
     model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
+    model_policies_json: sqlx::types::Json<BTreeMap<String, ModelPolicyJson>>,
     usage_retention_days: i64,
     ops_event_retention_days: i64,
     audit_retention_days: i64,
@@ -534,6 +564,7 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
         request_interval_ms: to_u64(row.request_interval_ms)?,
         rotation_strategy: row.rotation_strategy,
         model_mappings: row.model_mappings_json.0,
+        model_policies: row.model_policies_json.0,
         usage_retention_days: to_u32(row.usage_retention_days)?,
         ops_event_retention_days: to_u32(row.ops_event_retention_days)?,
         audit_retention_days: to_u32(row.audit_retention_days)?,
@@ -591,6 +622,23 @@ fn valid_model_mappings(mappings: &BTreeMap<String, String>) -> bool {
     mappings.len() <= 512
         && mappings.iter().all(|(requested, upstream)| {
             valid_model_name(requested, 256) && valid_model_name(upstream, 256)
+        })
+}
+
+/// 模型策略条目上限、模型名与取值校验；两项均为空的条目不合法。
+fn valid_model_policies(policies: &BTreeMap<String, ModelPolicyJson>) -> bool {
+    policies.len() <= 512
+        && policies.iter().all(|(model, policy)| {
+            valid_model_name(model, 256)
+                && (policy.reasoning_effort.is_some() || policy.service_tier.is_some())
+                && policy.reasoning_effort.as_ref().is_none_or(|rule| {
+                    ReasoningEffortRuleMode::parse(&rule.mode).is_some()
+                        && ReasoningEffort::parse(&rule.value).is_some()
+                })
+                && policy
+                    .service_tier
+                    .as_deref()
+                    .is_none_or(|tier| ServiceTierRule::parse(tier).is_some())
         })
 }
 

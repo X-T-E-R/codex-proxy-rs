@@ -110,6 +110,15 @@ export interface AccountUsage {
   models: AccountModelUsage[]
 }
 
+// 账号级过载冷号覆盖：inherit 跟随全局，disabled 永不触发，custom 使用自有阈值。
+export type AccountOverloadCooldownMode = 'inherit' | 'disabled' | 'custom'
+
+export interface AccountOverloadCooldown {
+  mode: AccountOverloadCooldownMode
+  threshold: number | null
+  seconds: number | null
+}
+
 export interface Account {
   outboundProxyEndpoint: string | null
   id: string
@@ -130,6 +139,7 @@ export interface Account {
   enabled: boolean
   concurrencyLimit: number | null
   weight: number
+  overloadCooldown: AccountOverloadCooldown
   accessTokenExpiresAt: string | null
   accessTokenExpiresAtDisplay: string | null
   refreshTokenExpiresAt: string | null
@@ -297,6 +307,7 @@ interface AccountUpdateParam {
   enabled: boolean
   concurrencyLimit: number | null
   weight: number
+  overloadCooldown: AccountOverloadCooldown
   groupIds: string[]
 }
 
@@ -307,6 +318,7 @@ interface AccountBatchUpdateParam {
   enabled: boolean
   concurrencyLimit: number | null
   weight: number
+  overloadCooldown: AccountOverloadCooldown
   groupIds: string[]
 }
 
@@ -319,6 +331,7 @@ interface AccountImportSettings {
   enabled: boolean
   concurrencyLimit: number | null
   weight: number
+  overloadCooldown: AccountOverloadCooldown
   groupIds: string[]
 }
 

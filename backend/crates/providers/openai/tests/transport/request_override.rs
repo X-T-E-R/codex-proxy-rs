@@ -1,8 +1,9 @@
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
 use gateway_core::provider_ports::OpenAiRequestBodyOverride;
+use gateway_core::routing::ModelRequestPolicy;
 use provider_openai::transport::request_override::{
-    apply_responses_request_override, apply_standalone_search_override,
+    apply_model_request_policy, apply_responses_request_override, apply_standalone_search_override,
 };
 
 use super::*;
@@ -498,4 +499,86 @@ async fn websocket_transport_sends_overridden_body_on_the_actual_wire() {
     let value: Value = serde_json::from_str(&payload).expect("WebSocket wire JSON");
     assert_eq!(value["type"], "response.create");
     assert_wire_override(&value);
+}
+
+fn policy_facts(mode: Option<&str>, value: Option<&str>, tier: Option<&str>) -> ModelRequestPolicy {
+    ModelRequestPolicy::from_facts(mode, value, tier).expect("valid policy")
+}
+
+fn request_with_entries(entries: Vec<(&str, Value)>) -> CodexResponsesRequest {
+    CodexResponsesRequest::from_body(Map::from_iter(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value)),
+    ))
+}
+
+#[test]
+fn model_policy_lock_fast_writes_service_tier() {
+    let policy = policy_facts(None, None, Some("lock_fast"));
+    let mut request = request_with_entries(vec![("model", json!("gpt-test"))]);
+    assert!(apply_model_request_policy(&mut request, &policy));
+    assert_eq!(request.body()["service_tier"], json!("fast"));
+    // 已是 fast 时不重复改写。
+    assert!(!apply_model_request_policy(&mut request, &policy));
+}
+
+#[test]
+fn model_policy_lock_never_fast_strips_fast_and_priority_only() {
+    let policy = policy_facts(None, None, Some("lock_never_fast"));
+    for fast in ["fast", " priority ", "FAST"] {
+        let mut request = request_with_entries(vec![("service_tier", json!(fast))]);
+        assert!(apply_model_request_policy(&mut request, &policy));
+        assert!(request.body().get("service_tier").is_none());
+    }
+    let mut request = request_with_entries(vec![("service_tier", json!("flex"))]);
+    assert!(!apply_model_request_policy(&mut request, &policy));
+    assert_eq!(request.body()["service_tier"], json!("flex"));
+    let mut request = request_with_entries(vec![("model", json!("gpt-test"))]);
+    assert!(!apply_model_request_policy(&mut request, &policy));
+}
+
+#[test]
+fn model_policy_locked_effort_overwrites_and_creates_reasoning() {
+    let policy = policy_facts(Some("locked"), Some("xhigh"), None);
+    let mut request = request_with_entries(vec![("model", json!("gpt-test"))]);
+    assert!(apply_model_request_policy(&mut request, &policy));
+    assert_eq!(request.body()["reasoning"]["effort"], json!("xhigh"));
+
+    let mut request = request_with_entries(vec![(
+        "reasoning",
+        json!({"effort": "low", "summary": "auto"}),
+    )]);
+    assert!(apply_model_request_policy(&mut request, &policy));
+    assert_eq!(request.body()["reasoning"]["effort"], json!("xhigh"));
+    // 其他 reasoning 字段保持不变。
+    assert_eq!(request.body()["reasoning"]["summary"], json!("auto"));
+
+    // reasoning 为 null 时按缺失对象处理并写入。
+    let mut request = request_with_entries(vec![("reasoning", Value::Null)]);
+    assert!(apply_model_request_policy(&mut request, &policy));
+    assert_eq!(request.body()["reasoning"]["effort"], json!("xhigh"));
+}
+
+#[test]
+fn model_policy_min_max_clamp_respects_known_effort_and_skips_unknown() {
+    let min = policy_facts(Some("min"), Some("high"), None);
+    let mut absent = request_with_entries(vec![("model", json!("gpt-test"))]);
+    assert!(apply_model_request_policy(&mut absent, &min));
+    assert_eq!(absent.body()["reasoning"]["effort"], json!("high"));
+    let mut lower = request_with_entries(vec![("reasoning", json!({"effort": "minimal"}))]);
+    assert!(apply_model_request_policy(&mut lower, &min));
+    assert_eq!(lower.body()["reasoning"]["effort"], json!("high"));
+    let mut higher = request_with_entries(vec![("reasoning", json!({"effort": "max"}))]);
+    assert!(!apply_model_request_policy(&mut higher, &min));
+    assert_eq!(higher.body()["reasoning"]["effort"], json!("max"));
+    let mut unknown = request_with_entries(vec![("reasoning", json!({"effort": "ultra"}))]);
+    assert!(!apply_model_request_policy(&mut unknown, &min));
+
+    let max = policy_facts(Some("max"), Some("medium"), None);
+    let mut above = request_with_entries(vec![("reasoning", json!({"effort": "xhigh"}))]);
+    assert!(apply_model_request_policy(&mut above, &max));
+    assert_eq!(above.body()["reasoning"]["effort"], json!("medium"));
+    let mut below = request_with_entries(vec![("reasoning", json!({"effort": "none"}))]);
+    assert!(!apply_model_request_policy(&mut below, &max));
 }

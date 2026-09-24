@@ -130,6 +130,9 @@ const {
   weight: batchWeight,
   proxyMode: batchProxyMode,
   proxyId: batchProxyId,
+  overloadCooldownMode: batchOverloadCooldownMode,
+  overloadCooldownThreshold: batchOverloadCooldownThreshold,
+  overloadCooldownSeconds: batchOverloadCooldownSeconds,
   selectedGroupIds: batchGroupIds,
   saving: savingBatchEdit,
   open: openBatchEdit,
@@ -149,6 +152,9 @@ const {
   weight: editingWeight,
   proxyMode: editingProxyMode,
   proxyId: editingProxyId,
+  overloadCooldownMode: editingOverloadCooldownMode,
+  overloadCooldownThreshold: editingOverloadCooldownThreshold,
+  overloadCooldownSeconds: editingOverloadCooldownSeconds,
   selectedGroupIds: editingGroupIds,
   saving: savingAccountEdit,
   open: openAccountEdit,
@@ -352,6 +358,9 @@ const {
       v-model:proxy-mode="editingProxyMode"
       v-model:proxy-id="editingProxyId"
       v-model:selected-group-ids="editingGroupIds"
+      v-model:overload-cooldown-mode="editingOverloadCooldownMode"
+      v-model:overload-cooldown-threshold="editingOverloadCooldownThreshold"
+      v-model:overload-cooldown-seconds="editingOverloadCooldownSeconds"
       :account="editingAccount"
       :groups="groups"
       :groups-loading="groupsLoading"
@@ -367,6 +376,9 @@ const {
       v-model:proxy-mode="batchProxyMode"
       v-model:proxy-id="batchProxyId"
       v-model:selected-group-ids="batchGroupIds"
+      v-model:overload-cooldown-mode="batchOverloadCooldownMode"
+      v-model:overload-cooldown-threshold="batchOverloadCooldownThreshold"
+      v-model:overload-cooldown-seconds="batchOverloadCooldownSeconds"
       :selected-count="selectedIds.size"
       :groups="groups"
       :groups-loading="groupsLoading"

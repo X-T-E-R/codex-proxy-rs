@@ -38,6 +38,7 @@ fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
         enabled: true,
         concurrency_limit: None,
         weight: AccountWeight::DEFAULT,
+        overload_cooldown: gateway_core::account::AccountOverloadCooldownOverride::Inherit,
         group_ids: vec![],
         outbound_proxy: Some(selection),
     }
@@ -636,6 +637,8 @@ async fn legacy_urls_join_one_catalog_entry_and_invalid_batch_rolls_back() {
                     enabled: false,
                     concurrency_limit: None,
                     weight: AccountWeight::DEFAULT,
+                    overload_cooldown:
+                        gateway_core::account::AccountOverloadCooldownOverride::Inherit,
                     group_ids: vec![],
                     outbound_proxy: Some(AccountProxySelection::Url(
                         OutboundProxy::parse("http://127.0.0.1:9090").unwrap()

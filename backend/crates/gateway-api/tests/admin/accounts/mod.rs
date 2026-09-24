@@ -215,7 +215,8 @@ mod batch_update {
             "enabled": false,
             "concurrencyLimit": null,
             "weight": 1,
-            "groupIds": ["grp_00000000000000000000000000000001"]
+            "groupIds": ["grp_00000000000000000000000000000001"],
+            "overloadCooldown": {"mode": "inherit"}
         }))
         .expect("deserialize batch update");
 
@@ -234,7 +235,8 @@ mod batch_update {
                 "enabled": true,
                 "concurrencyLimit": 8,
                 "weight": 100,
-                "groupIds": []
+                "groupIds": [],
+                "overloadCooldown": {"mode": "inherit"}
             }))
             .expect("deserialize invalid batch update");
             assert_eq!(
@@ -251,7 +253,8 @@ mod batch_update {
             "accountIds": ["acct_test"],
             "concurrencyLimit": null,
             "weight": 1,
-            "groupIds": []
+            "groupIds": [],
+            "overloadCooldown": {"mode": "inherit"}
             }))
             .is_err()
         );
@@ -262,6 +265,7 @@ mod batch_update {
                 "concurrencyLimit": null,
                 "weight": 1,
                 "groupIds": [],
+                "overloadCooldown": {"mode": "inherit"},
                 "legacy": true
             }))
             .is_err()
@@ -281,7 +285,8 @@ mod batch_update {
                 "enabled": true,
                 "concurrencyLimit": concurrency_limit,
                 "weight": weight,
-                "groupIds": []
+                "groupIds": [],
+                "overloadCooldown": {"mode": "inherit"}
             }))
             .expect("deserialize invalid scheduling");
             assert_eq!(
@@ -294,7 +299,8 @@ mod batch_update {
                 "accountIds": ["acct_test"],
                 "enabled": true,
                 "weight": 1,
-                "groupIds": []
+                "groupIds": [],
+                "overloadCooldown": {"mode": "inherit"}
             }))
             .is_err()
         );
@@ -303,10 +309,54 @@ mod batch_update {
                 "accountIds": ["acct_test"],
                 "enabled": true,
                 "concurrencyLimit": null,
-                "groupIds": []
+                "groupIds": [],
+                "overloadCooldown": {"mode": "inherit"}
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn batch_update_should_validate_overload_cooldown_override() {
+        for (overload_cooldown, field) in [
+            (
+                json!({"mode": "custom", "threshold": 5}),
+                "overloadCooldown",
+            ),
+            (
+                json!({"mode": "disabled", "seconds": 60}),
+                "overloadCooldown",
+            ),
+            (json!({"mode": "other"}), "overloadCooldown"),
+        ] {
+            let request: BatchUpdateAccountsRequest = serde_json::from_value(json!({
+                "accountIds": ["acct_test"],
+                "enabled": true,
+                "concurrencyLimit": null,
+                "weight": 1,
+                "groupIds": [],
+                "overloadCooldown": overload_cooldown
+            }))
+            .expect("deserialize overload cooldown");
+            assert_eq!(
+                request
+                    .validate()
+                    .expect_err("reject overload cooldown")
+                    .field(),
+                field
+            );
+        }
+
+        let request: BatchUpdateAccountsRequest = serde_json::from_value(json!({
+            "accountIds": ["acct_test"],
+            "enabled": true,
+            "concurrencyLimit": null,
+            "weight": 1,
+            "groupIds": [],
+            "overloadCooldown": {"mode": "custom", "threshold": 5, "seconds": 900}
+        }))
+        .expect("deserialize custom overload cooldown");
+        request.validate().expect("valid custom overload cooldown");
     }
 
     #[test]
@@ -316,7 +366,8 @@ mod batch_update {
             "enabled": true,
             "concurrencyLimit": 4294967295_u64,
             "weight": 100,
-            "groupIds": []
+            "groupIds": [],
+            "overloadCooldown": {"mode": "inherit"}
         }))
         .expect("deserialize single update");
         request.validate().expect("validate single update");
@@ -326,7 +377,8 @@ mod batch_update {
                 "accountId": "acct_test",
                 "enabled": true,
                 "weight": 1,
-                "groupIds": []
+                "groupIds": [],
+                "overloadCooldown": {"mode": "inherit"}
             }))
             .is_err()
         );
@@ -771,9 +823,22 @@ mod import_settings {
             ("weight", json!(0)),
             ("weight", json!(101)),
             ("groupIds", json!(["invalid-group"])),
+            (
+                "overloadCooldown",
+                json!({"mode": "custom", "threshold": 5}),
+            ),
+            (
+                "overloadCooldown",
+                json!({"mode": "inherit", "seconds": 60}),
+            ),
         ] {
-            let mut settings =
-                json!({"enabled": false, "concurrencyLimit": null, "weight": 1, "groupIds": []});
+            let mut settings = json!({
+                "enabled": false,
+                "concurrencyLimit": null,
+                "weight": 1,
+                "groupIds": [],
+                "overloadCooldown": {"mode": "inherit"}
+            });
             settings[field] = value;
             let import: AccountImportRequest = serde_json::from_value(
                 json!({"provider": "openai", "data": {}, "settings": settings}),
@@ -793,13 +858,24 @@ mod import_settings {
 
     #[test]
     fn import_settings_require_a_complete_explicit_configuration() {
-        let settings =
-            json!({"enabled": false, "concurrencyLimit": null, "weight": 100, "groupIds": []});
+        let settings = json!({
+            "enabled": false,
+            "concurrencyLimit": null,
+            "weight": 100,
+            "groupIds": [],
+            "overloadCooldown": {"mode": "custom", "threshold": 5, "seconds": 900}
+        });
         let request: AccountImportRequest =
             serde_json::from_value(json!({"provider": "openai", "data": {}, "settings": settings}))
                 .expect("settings");
         assert!(request.validate().is_ok());
-        for field in ["enabled", "concurrencyLimit", "weight", "groupIds"] {
+        for field in [
+            "enabled",
+            "concurrencyLimit",
+            "weight",
+            "groupIds",
+            "overloadCooldown",
+        ] {
             let mut incomplete = settings.clone();
             incomplete
                 .as_object_mut()

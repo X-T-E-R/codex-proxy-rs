@@ -371,6 +371,9 @@ impl SettingsStore for MemorySettingsStore {
             overload_cooldown_enabled: command.overload_cooldown_enabled,
             overload_cooldown_threshold: command.overload_cooldown_threshold,
             overload_cooldown_seconds: command.overload_cooldown_seconds,
+            model_policies: command
+                .model_policies
+                .unwrap_or_else(|| settings.model_policies.clone()),
             cyber_session_block_enabled: command
                 .cyber_session_block_enabled
                 .unwrap_or(settings.cyber_session_block_enabled),
@@ -1161,6 +1164,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         overload_cooldown_enabled: false,
         overload_cooldown_threshold: 2,
         overload_cooldown_seconds: 120,
+        model_policies: BTreeMap::new(),
         cyber_session_block_enabled: false,
         cyber_session_block_ttl_seconds: 3600,
         openai_user_agent: None,

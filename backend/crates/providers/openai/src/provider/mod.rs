@@ -84,7 +84,7 @@ use crate::transport::request::{
     CodexRequestEncodeError, RequestAccountScope, encode_generate_request, scope_request_to_account,
 };
 use crate::transport::request_override::{
-    CodexRequestBodyOverrideState, apply_responses_request_override,
+    CodexRequestBodyOverrideState, apply_model_request_policy, apply_responses_request_override,
     apply_standalone_search_override,
 };
 use crate::transport::session::CodexSessionIdentity;
@@ -354,6 +354,9 @@ impl Provider for CodexProvider {
         let continuation_requested = generate.native_continuation_requested();
         let mut upstream_request = encode_generate_request(generate, upstream_model.as_str())
             .map_err(map_request_error)?;
+        if let Some(model_policy) = candidate.model_policy() {
+            apply_model_request_policy(&mut upstream_request, &model_policy);
+        }
         let request_body_override = self.request_body_override.snapshot();
         apply_responses_request_override(&mut upstream_request, &request_body_override, Utc::now());
         if let Some(conversation_id) = previous_session

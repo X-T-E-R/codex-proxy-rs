@@ -1,4 +1,5 @@
 import type { rotationOptions } from '../constants'
+import type { ModelRequestPolicy, ReasoningEffortMode, ReasoningEffortRule, ReasoningEffortValue, ServiceTierRule } from '@/api'
 import { computed, reactive, ref, shallowRef } from 'vue'
 
 import { getSettings, updateSettings } from '@/api'
@@ -12,6 +13,10 @@ export function useSettingsForm() {
   const saving = shallowRef(false)
   const error = shallowRef('')
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
+  // 模型策略行编辑态；空行（两项都不干预）不落盘。
+  const policyRows = ref<Array<{ model: string, effortMode: ReasoningEffortMode | '', effortValue: ReasoningEffortValue | '', serviceTier: ServiceTierRule | '' }>>([])
+  // 已保存的 modelPolicies，用于部分更新语义下的脏比较。
+  const savedPolicies = shallowRef<Record<string, ModelRequestPolicy>>({})
   const form = reactive({
     refreshMarginSeconds: null as number | null,
     refreshConcurrency: null as number | null,
@@ -145,6 +150,13 @@ export function useSettingsForm() {
       requestedModel,
       upstreamModel: String(upstreamModel),
     }))
+    savedPolicies.value = data.modelPolicies ?? {}
+    policyRows.value = Object.entries(savedPolicies.value).map(([model, policy]) => ({
+      model,
+      effortMode: policy.reasoningEffort?.mode ?? '',
+      effortValue: policy.reasoningEffort?.value ?? '',
+      serviceTier: policy.serviceTier ?? '',
+    }))
   }
 
   async function loadSettings() {
@@ -194,6 +206,72 @@ export function useSettingsForm() {
     return entries
   }
 
+  function addPolicyRow() {
+    policyRows.value = [...policyRows.value, { model: '', effortMode: '', effortValue: '', serviceTier: '' }]
+  }
+
+  function updatePolicyRow(index: number, key: 'model' | 'effortMode' | 'effortValue' | 'serviceTier', value: string) {
+    const rows = [...policyRows.value]
+    if (!rows[index])
+      return
+    const row = { ...rows[index], [key]: value } as typeof rows[number]
+    if (key === 'effortMode') {
+      // 模式切回不干预时清空档位。
+      if (!value)
+        row.effortValue = ''
+    }
+    else if (key === 'effortValue') {
+      // 选择了档位但没有模式时默认按锁定处理。
+      if (value && !row.effortMode)
+        row.effortMode = 'locked'
+    }
+    rows[index] = row
+    policyRows.value = rows
+  }
+
+  function removePolicyRow(index: number) {
+    const rows = [...policyRows.value]
+    rows.splice(index, 1)
+    policyRows.value = rows
+  }
+
+  function policyError(row: { model: string, effortMode: string, effortValue: string, serviceTier: string }): string {
+    const model = row.model.trim()
+    if (!model)
+      return '请填写模型名'
+    // 后端按 UTF-8 字节限制模型名（与 modelMappings 键同一规则）。
+    if (new TextEncoder().encode(model).length > 256)
+      return '模型名最多 256 字节（UTF-8）'
+    if (row.effortMode && !row.effortValue)
+      return '选择了推理强度模式时必须选择档位'
+    return ''
+  }
+
+  const policyRowsError = computed(() =>
+    loading.value ? '' : policyRows.value.map(policyError).find(Boolean) ?? '',
+  )
+
+  // modelPolicies 转换：空行不落盘。仅在校验通过后调用。
+  function policyPayload(): Record<string, ModelRequestPolicy> | undefined {
+    const saved = savedPolicies.value
+    const entries: Record<string, ModelRequestPolicy> = {}
+    for (const row of policyRows.value) {
+      if (!row.effortMode && !row.serviceTier)
+        continue
+      const model = row.model.trim()
+      if (entries[model])
+        throw new Error(`存在重复的模型策略：${model}`)
+      const reasoningEffort: ReasoningEffortRule | null = row.effortMode && row.effortValue
+        ? { mode: row.effortMode as ReasoningEffortMode, value: row.effortValue as ReasoningEffortValue }
+        : null
+      const serviceTier = (row.serviceTier || null) as ServiceTierRule | null
+      entries[model] = { reasoningEffort, serviceTier }
+    }
+    if (JSON.stringify(entries) === JSON.stringify(saved))
+      return undefined
+    return entries
+  }
+
   async function saveSettings() {
     if (saving.value || loading.value)
       return
@@ -230,10 +308,16 @@ export function useSettingsForm() {
       toast.warning('请修正请求正文的时区与国家代码')
       return
     }
+    if (policyRowsError.value) {
+      toast.warning(policyRowsError.value)
+      return
+    }
+    const modelPolicies = policyPayload()
     try {
       saving.value = true
       const result = await updateSettings({
         modelMappings: mappingPayload(),
+        ...modelPolicies === undefined ? {} : { modelPolicies },
         refreshMarginSeconds,
         refreshConcurrency,
         maxConcurrentPerAccount,
@@ -281,6 +365,11 @@ export function useSettingsForm() {
     addMapping,
     updateMapping,
     removeMapping,
+    policyRows,
+    addPolicyRow,
+    updatePolicyRow,
+    removePolicyRow,
+    policyRowsError,
     refreshMarginSecondsValue,
     refreshConcurrencyValue,
     maxConcurrentPerAccountValue,

@@ -86,6 +86,45 @@ impl Default for AccountWeight {
     }
 }
 
+/// 账号级过载冷号覆盖；决定账号跟随全局策略、永不触发或使用自有阈值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AccountOverloadCooldownOverride {
+    /// 跟随全局过载冷号设置。
+    #[default]
+    Inherit,
+    /// 该账号不触发新的过载冷号；已存在的冷却仍按原到期时间解除。
+    Disabled,
+    /// 该账号使用自有的连续过载次数与冷号秒数。
+    Custom {
+        threshold: NonZeroU32,
+        seconds: NonZeroU32,
+    },
+}
+
+impl AccountOverloadCooldownOverride {
+    /// 校验并创建自定义覆盖；任一值为零时返回 `None`。
+    #[must_use]
+    pub const fn custom(threshold: u32, seconds: u32) -> Option<Self> {
+        match (NonZeroU32::new(threshold), NonZeroU32::new(seconds)) {
+            (Some(threshold), Some(seconds)) => Some(Self::Custom { threshold, seconds }),
+            _ => None,
+        }
+    }
+
+    /// 结合全局策略解析该账号的最终过载冷号配置。
+    #[must_use]
+    pub const fn effective(
+        self,
+        global: Option<(NonZeroU32, NonZeroU32)>,
+    ) -> Option<(NonZeroU32, NonZeroU32)> {
+        match self {
+            Self::Inherit => global,
+            Self::Disabled => None,
+            Self::Custom { threshold, seconds } => Some((threshold, seconds)),
+        }
+    }
+}
+
 impl fmt::Display for ProviderAccountId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
@@ -669,6 +708,7 @@ pub struct ProviderAccount {
     enabled: bool,
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
+    overload_cooldown_override: AccountOverloadCooldownOverride,
     credential_state: CredentialState,
     quota: QuotaState,
     last_error_reason: Option<AccountErrorReason>,
@@ -704,6 +744,7 @@ impl ProviderAccount {
             enabled: true,
             concurrency_limit: None,
             weight: AccountWeight::DEFAULT,
+            overload_cooldown_override: AccountOverloadCooldownOverride::Inherit,
             credential_state: CredentialState::Unknown,
             quota: QuotaState::unknown(),
             last_error_reason: None,
@@ -768,6 +809,16 @@ impl ProviderAccount {
     ) -> Self {
         self.concurrency_limit = concurrency_limit;
         self.weight = weight;
+        self
+    }
+
+    /// 持久化的账号级过载冷号覆盖。
+    #[must_use]
+    pub const fn with_overload_cooldown_override(
+        mut self,
+        override_policy: AccountOverloadCooldownOverride,
+    ) -> Self {
+        self.overload_cooldown_override = override_policy;
         self
     }
 
@@ -864,6 +915,20 @@ impl ProviderAccount {
     #[must_use]
     pub const fn weight(&self) -> AccountWeight {
         self.weight
+    }
+
+    #[must_use]
+    pub const fn overload_cooldown_override(&self) -> AccountOverloadCooldownOverride {
+        self.overload_cooldown_override
+    }
+
+    /// 结合请求级全局策略解析该账号最终生效的过载冷号配置。
+    #[must_use]
+    pub const fn effective_overload_cooldown(
+        &self,
+        global: Option<(NonZeroU32, NonZeroU32)>,
+    ) -> Option<(NonZeroU32, NonZeroU32)> {
+        self.overload_cooldown_override.effective(global)
     }
 
     #[must_use]

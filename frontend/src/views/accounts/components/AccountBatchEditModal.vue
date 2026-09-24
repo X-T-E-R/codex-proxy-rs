@@ -23,6 +23,9 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const overloadCooldownMode = defineModel<string>('overloadCooldownMode', { required: true })
+const overloadCooldownThreshold = defineModel<string>('overloadCooldownThreshold', { required: true })
+const overloadCooldownSeconds = defineModel<string>('overloadCooldownSeconds', { required: true })
 </script>
 
 <template>
@@ -40,6 +43,9 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
       v-model:selected-group-ids="selectedGroupIds"
       v-model:proxy-mode="proxyMode"
       v-model:proxy-id="proxyId"
+      v-model:overload-cooldown-mode="overloadCooldownMode"
+      v-model:overload-cooldown-threshold="overloadCooldownThreshold"
+      v-model:overload-cooldown-seconds="overloadCooldownSeconds"
       :groups="groups"
       :groups-loading="groupsLoading"
       :disabled="saving"

@@ -102,6 +102,7 @@ pub(super) fn account_view(item: AccountDirectoryItem, now: DateTime<Utc>) -> Ac
         enabled: account.enabled,
         concurrency_limit: account.concurrency_limit.map(|limit| limit.get()),
         weight: account.weight.get(),
+        overload_cooldown: AccountOverloadCooldownWire::from(account.overload_cooldown),
         outbound_proxy_endpoint: account
             .outbound_proxy
             .as_ref()

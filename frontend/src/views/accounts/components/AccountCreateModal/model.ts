@@ -1,4 +1,4 @@
-import { parseAccountSchedulingForm } from '../../utils/schedulingForm'
+import { parseAccountSchedulingForm, parseOverloadCooldownForm } from '../../utils/schedulingForm'
 
 export type AccountCreateProvider = 'batch' | 'openai' | 'xai'
 export type AccountImportMode = 'oauth' | 'access_token' | 'refresh_token' | 'json'
@@ -18,6 +18,9 @@ export interface AccountCreateForm {
   oauthCallback: string
   proxyMode: string
   proxyId: string
+  overloadCooldownMode: string
+  overloadCooldownThreshold: string
+  overloadCooldownSeconds: string
 }
 
 export function emptyAccountCreateForm(): AccountCreateForm {
@@ -35,6 +38,9 @@ export function emptyAccountCreateForm(): AccountCreateForm {
     oauthCallback: '',
     proxyMode: 'direct',
     proxyId: '',
+    overloadCooldownMode: 'inherit',
+    overloadCooldownThreshold: '',
+    overloadCooldownSeconds: '',
   }
 }
 
@@ -50,5 +56,17 @@ export function accountImportSettings(form: AccountCreateForm) {
   const scheduling = parseAccountSchedulingForm(form.concurrencyLimit, form.weight)
   if (!scheduling.valid)
     throw new Error(scheduling.message)
-  return { enabled: form.enabled, ...scheduling.values, groupIds: [...new Set(form.groupIds)] }
+  const cooldown = parseOverloadCooldownForm(
+    form.overloadCooldownMode,
+    form.overloadCooldownThreshold,
+    form.overloadCooldownSeconds,
+  )
+  if (!cooldown.valid)
+    throw new Error(cooldown.message)
+  return {
+    enabled: form.enabled,
+    ...scheduling.values,
+    overloadCooldown: cooldown.value,
+    groupIds: [...new Set(form.groupIds)],
+  }
 }

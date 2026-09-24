@@ -17,6 +17,7 @@ use gateway_core::routing::{
     UpstreamModelId,
 };
 
+mod policy;
 mod snapshot;
 
 fn scheduling() -> AccountSelectionPolicy {

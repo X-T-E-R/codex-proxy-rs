@@ -45,6 +45,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                 request_interval_ms: command.request_interval_ms,
                 rotation_strategy: command.rotation_strategy.as_str().to_owned(),
                 model_mappings: store_model_mappings(command.model_mappings),
+                model_policies: command.model_policies.map(store_model_policies),
                 min_codex_desktop_version: command.min_codex_desktop_version,
                 min_codex_cli_version: command.min_codex_cli_version,
                 usage_retention_days: command.usage_retention_days,
@@ -72,6 +73,7 @@ impl SettingsStore for AdminSettingsStoreAdapter {
                 "1",
                 vec![
                     "model_mappings_json".to_owned(),
+                    "model_policies_json".to_owned(),
                     "refresh_margin_seconds".to_owned(),
                     "refresh_concurrency".to_owned(),
                     "max_concurrent_per_account".to_owned(),
@@ -177,9 +179,67 @@ pub(crate) fn admin_runtime_settings(
             Ok((public, upstream))
         })
         .collect::<AdminStoreResult<ModelMappings>>()?;
+    let model_policies = settings
+        .model_policies
+        .into_iter()
+        .map(|(model, policy)| {
+            let model = gateway_core::routing::PublicModelId::new(model).map_err(|_| {
+                AdminStoreError::new(
+                    AdminStoreErrorKind::Invalid,
+                    "runtime settings",
+                    "model policy model is invalid",
+                )
+            })?;
+            let reasoning_effort = policy
+                .reasoning_effort
+                .map(|rule| {
+                    let mode = gateway_core::routing::ReasoningEffortRuleMode::parse(&rule.mode)
+                        .ok_or_else(|| {
+                            AdminStoreError::new(
+                                AdminStoreErrorKind::Invalid,
+                                "runtime settings",
+                                "model policy reasoning effort mode is invalid",
+                            )
+                        })?;
+                    let value = gateway_core::routing::ReasoningEffort::parse(&rule.value)
+                        .ok_or_else(|| {
+                            AdminStoreError::new(
+                                AdminStoreErrorKind::Invalid,
+                                "runtime settings",
+                                "model policy reasoning effort value is invalid",
+                            )
+                        })?;
+                    Ok(gateway_core::routing::ReasoningEffortRule::new(mode, value))
+                })
+                .transpose()?;
+            let service_tier = policy
+                .service_tier
+                .map(|tier| {
+                    gateway_core::routing::ServiceTierRule::parse(&tier).ok_or_else(|| {
+                        AdminStoreError::new(
+                            AdminStoreErrorKind::Invalid,
+                            "runtime settings",
+                            "model policy service tier is invalid",
+                        )
+                    })
+                })
+                .transpose()?;
+            let policy =
+                gateway_core::routing::ModelRequestPolicy::new(reasoning_effort, service_tier)
+                    .ok_or_else(|| {
+                        AdminStoreError::new(
+                            AdminStoreErrorKind::Invalid,
+                            "runtime settings",
+                            "model policy is empty",
+                        )
+                    })?;
+            Ok((model, policy))
+        })
+        .collect::<AdminStoreResult<ModelPolicies>>()?;
     Ok(AdminRuntimeSettings {
         config_revision: admin_revision(settings.config_revision)?,
         model_mappings,
+        model_policies,
         refresh_margin_seconds: settings.refresh_margin_seconds,
         refresh_concurrency: settings.refresh_concurrency,
         max_concurrent_per_account: settings.max_concurrent_per_account,
@@ -214,6 +274,28 @@ pub(crate) fn store_model_mappings(
     mappings
         .into_iter()
         .map(|(public, upstream)| (public.as_str().to_owned(), upstream.as_str().to_owned()))
+        .collect()
+}
+
+pub(crate) fn store_model_policies(
+    policies: ModelPolicies,
+) -> std::collections::BTreeMap<String, postgres::ModelPolicyJson> {
+    policies
+        .into_iter()
+        .map(|(model, policy)| {
+            (
+                model.as_str().to_owned(),
+                postgres::ModelPolicyJson {
+                    reasoning_effort: policy.reasoning_effort().map(|rule| {
+                        postgres::ReasoningEffortRuleJson {
+                            mode: rule.mode().as_str().to_owned(),
+                            value: rule.value().as_str().to_owned(),
+                        }
+                    }),
+                    service_tier: policy.service_tier().map(|tier| tier.as_str().to_owned()),
+                },
+            )
+        })
         .collect()
 }
 

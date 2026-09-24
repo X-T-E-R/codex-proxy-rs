@@ -417,6 +417,7 @@ async fn xai_admin_provider_projects_cached_quota_models_and_canonical_export() 
         &request,
         "grok-4.5",
         &ClientApiKeyId::new("admin_connection_test").expect("client key"),
+        None,
     )
     .expect("official xAI request");
     assert_eq!(
@@ -636,6 +637,7 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         enabled: account.enabled(),
         concurrency_limit: account.concurrency_limit(),
         weight: account.weight(),
+        overload_cooldown: account.overload_cooldown_override(),
         credential_state: account.credential_state(),
         credential_observed_at: now,
         quota: account.quota(),

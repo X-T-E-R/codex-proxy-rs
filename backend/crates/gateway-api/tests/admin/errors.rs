@@ -332,7 +332,8 @@ mod provider {
     };
     use gateway_core::{
         account::{
-            AccountStatusFacts, AccountWeight, CredentialState, QuotaState, resolve_account_status,
+            AccountOverloadCooldownOverride, AccountStatusFacts, AccountWeight, CredentialState,
+            QuotaState, resolve_account_status,
         },
         routing::ProviderKind,
     };
@@ -489,6 +490,7 @@ mod provider {
                 enabled: facts.enabled,
                 concurrency_limit: None,
                 weight: AccountWeight::default(),
+                overload_cooldown: AccountOverloadCooldownOverride::Inherit,
                 outbound_proxy: None,
                 credential_state: facts.credential_state,
                 credential_observed_at: now,

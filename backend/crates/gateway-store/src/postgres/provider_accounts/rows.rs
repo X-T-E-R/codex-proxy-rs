@@ -118,6 +118,45 @@ pub(crate) fn parse_error_reason(value: Option<String>) -> StoreResult<Option<Ac
         .transpose()
 }
 
+/// 解析持久化的账号级过载冷号覆盖；列组合由表约束保证。
+pub(crate) fn parse_overload_cooldown(
+    mode: &str,
+    threshold: Option<i64>,
+    seconds: Option<i64>,
+) -> StoreResult<AccountOverloadCooldownOverride> {
+    match mode {
+        "inherit" => Ok(AccountOverloadCooldownOverride::Inherit),
+        "disabled" => Ok(AccountOverloadCooldownOverride::Disabled),
+        "custom" => {
+            let (Some(threshold), Some(seconds)) = (threshold, seconds) else {
+                return Err(invalid("invalid overload cooldown custom values"));
+            };
+            let threshold = u32::try_from(threshold)
+                .map_err(|_| invalid("invalid overload cooldown threshold"))?;
+            let seconds =
+                u32::try_from(seconds).map_err(|_| invalid("invalid overload cooldown seconds"))?;
+            AccountOverloadCooldownOverride::custom(threshold, seconds)
+                .ok_or_else(|| invalid("invalid overload cooldown custom values"))
+        }
+        _ => Err(invalid("unknown overload_cooldown_mode value")),
+    }
+}
+
+/// 序列化账号级过载冷号覆盖为写库三元组。
+pub(crate) fn overload_cooldown_parts(
+    override_policy: AccountOverloadCooldownOverride,
+) -> (&'static str, Option<i64>, Option<i64>) {
+    match override_policy {
+        AccountOverloadCooldownOverride::Inherit => ("inherit", None, None),
+        AccountOverloadCooldownOverride::Disabled => ("disabled", None, None),
+        AccountOverloadCooldownOverride::Custom { threshold, seconds } => (
+            "custom",
+            Some(i64::from(threshold.get())),
+            Some(i64::from(seconds.get())),
+        ),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAccountSummary {
     pub outbound_proxy: Option<gateway_core::account::OutboundProxy>,
@@ -136,6 +175,7 @@ pub struct ProviderAccountSummary {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub overload_cooldown: AccountOverloadCooldownOverride,
     pub credential_state: CredentialState,
     pub credential_observed_at: DateTime<Utc>,
     pub quota: QuotaState,
@@ -184,6 +224,7 @@ pub struct NewProviderAccount {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub overload_cooldown: AccountOverloadCooldownOverride,
     pub credential_state: CredentialState,
     pub credential_observed_at: DateTime<Utc>,
 }
@@ -319,6 +360,7 @@ pub struct BatchUpdateProviderAccountsAdmin {
     pub enabled: bool,
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
+    pub overload_cooldown: AccountOverloadCooldownOverride,
     pub group_ids: Vec<AccountGroupId>,
     pub audit: AdminAuditEvent,
 }
@@ -382,7 +424,8 @@ impl ProviderAccountStateUpdate {
 
 pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight,
+            overload_cooldown_mode, overload_cooldown_threshold, overload_cooldown_seconds, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -390,7 +433,8 @@ pub(crate) const ACCOUNT_SELECT: &str = "select outbound_proxy_url, id, provider
 
 pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight,
+            overload_cooldown_mode, overload_cooldown_threshold, overload_cooldown_seconds, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -400,7 +444,8 @@ pub(crate) const ACCOUNT_SELECT_BY_IDS: &str = "select outbound_proxy_url, id, p
 
 pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_url, id, provider_kind, name, email, upstream_user_id,
             upstream_account_id, plan_type, authentication_kind, provider_credentials_json, credential_revision,
-            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, credential_state,
+            has_refresh_token, access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight,
+            overload_cooldown_mode, overload_cooldown_threshold, overload_cooldown_seconds, credential_state,
             provider_quota_json, quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
             last_error_reason, last_error_message,
             credential_observed_at, quota_observed_at, created_at, updated_at
@@ -473,6 +518,7 @@ pub(crate) fn core_account_from_summary(
         summary.last_error_message,
     )
     .with_scheduling(summary.concurrency_limit, summary.weight)
+    .with_overload_cooldown_override(summary.overload_cooldown)
     .with_outbound_proxy(summary.outbound_proxy)
     .with_refresh_schedule(
         summary.has_refresh_token,
@@ -531,6 +577,11 @@ pub(crate) fn account_summary_from_row(
         .ok()
         .and_then(AccountWeight::new)
         .ok_or_else(|| invalid("invalid weight"))?;
+    let overload_cooldown = parse_overload_cooldown(
+        &get::<String>(&row, "overload_cooldown_mode")?,
+        get::<Option<i64>>(&row, "overload_cooldown_threshold")?,
+        get::<Option<i64>>(&row, "overload_cooldown_seconds")?,
+    )?;
     Ok(ProviderAccountSummary {
         outbound_proxy: get::<Option<String>>(&row, "outbound_proxy_url")?
             .map(|url| {
@@ -553,6 +604,7 @@ pub(crate) fn account_summary_from_row(
         enabled: get(&row, "enabled")?,
         concurrency_limit,
         weight,
+        overload_cooldown,
         credential_state: parse_credential_state(&credential_state)?,
         credential_observed_at: get(&row, "credential_observed_at")?,
         quota,

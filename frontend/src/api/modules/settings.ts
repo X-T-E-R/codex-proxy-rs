@@ -2,8 +2,25 @@ import request from '../request'
 
 export type RotationStrategy = 'smart' | 'quota_reset_priority' | 'round_robin' | 'sticky'
 
+// 模型级请求策略：按客户端请求的 public 模型名精确匹配。
+export type ReasoningEffortMode = 'locked' | 'min' | 'max'
+export type ReasoningEffortValue
+  = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type ServiceTierRule = 'lock_fast' | 'lock_never_fast'
+
+export interface ReasoningEffortRule {
+  mode: ReasoningEffortMode
+  value: ReasoningEffortValue
+}
+
+export interface ModelRequestPolicy {
+  reasoningEffort: ReasoningEffortRule | null
+  serviceTier: ServiceTierRule | null
+}
+
 export interface RuntimeSettings {
   modelMappings: Record<string, string>
+  modelPolicies: Record<string, ModelRequestPolicy>
   refreshMarginSeconds: number
   refreshConcurrency: number
   maxConcurrentPerAccount: number
@@ -70,7 +87,10 @@ export function getSettings() {
   })
 }
 
-type UpdateSettingsParam = Omit<RuntimeSettings, 'updatedAt'>
+type UpdateSettingsParam = Omit<RuntimeSettings, 'updatedAt' | 'modelPolicies'> & {
+  // 部分更新语义：省略时保留当前值；提供时整体替换。
+  modelPolicies?: Record<string, ModelRequestPolicy>
+}
 
 export function updateSettings(data: UpdateSettingsParam) {
   return request<RuntimeSettings>({

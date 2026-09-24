@@ -64,7 +64,13 @@ fn update_body() -> Value {
         "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)",
         "openaiRequestBodyOverrideEnabled": true,
         "openaiRequestTimezone": "America/Los_Angeles",
-        "openaiSearchCountry": "US"
+        "openaiSearchCountry": "US",
+        "modelPolicies": {
+            "gpt-5.4": {
+                "reasoningEffort": {"mode": "locked", "value": "xhigh"},
+                "serviceTier": "lock_fast"
+            }
+        }
     })
 }
 
@@ -273,6 +279,15 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
         overload_cooldown_enabled: true,
         overload_cooldown_threshold: 2,
         overload_cooldown_seconds: 120,
+        model_policies: BTreeMap::from([(
+            PublicModelId::new("gpt-5.4").expect("public model"),
+            gateway_core::routing::ModelRequestPolicy::from_facts(
+                Some("locked"),
+                Some("xhigh"),
+                Some("lock_fast"),
+            )
+            .expect("model policy"),
+        )]),
         cyber_session_block_enabled: true,
         cyber_session_block_ttl_seconds: 600,
         openai_user_agent: Some("Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)".to_owned()),
@@ -311,6 +326,12 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             "overloadCooldownEnabled": true,
             "overloadCooldownThreshold": 2,
             "overloadCooldownSeconds": 120,
+            "modelPolicies": {
+                "gpt-5.4": {
+                    "reasoningEffort": {"mode": "locked", "value": "xhigh"},
+                    "serviceTier": "lock_fast"
+                }
+            },
             "cyberSessionBlockEnabled": true,
             "cyberSessionBlockTtlSeconds": 600,
             "openaiUserAgent": "Codex Desktop/0.153.4 (Windows 10.0.26100; x86_64)",
@@ -375,6 +396,32 @@ fn settings_request_and_response_fields_should_stay_in_lockstep() {
         overload_cooldown_threshold: u32::try_from(request.overload_cooldown_threshold)
             .expect("u32"),
         overload_cooldown_seconds: u32::try_from(request.overload_cooldown_seconds).expect("u32"),
+        model_policies: request
+            .model_policies
+            .map(|policies| {
+                policies
+                    .into_iter()
+                    .map(|(model, policy)| {
+                        Ok((
+                            PublicModelId::new(model)?,
+                            gateway_core::routing::ModelRequestPolicy::from_facts(
+                                policy
+                                    .reasoning_effort
+                                    .as_ref()
+                                    .map(|rule| rule.mode.as_str()),
+                                policy
+                                    .reasoning_effort
+                                    .as_ref()
+                                    .map(|rule| rule.value.as_str()),
+                                policy.service_tier.as_deref(),
+                            )
+                            .expect("model policy"),
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, gateway_core::error::IdentifierError>>()
+                    .expect("valid model policies")
+            })
+            .expect("model policies"),
         cyber_session_block_enabled: request.cyber_session_block_enabled.expect("cyber enabled"),
         cyber_session_block_ttl_seconds: u32::try_from(
             request.cyber_session_block_ttl_seconds.expect("cyber TTL"),

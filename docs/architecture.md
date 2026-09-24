@@ -178,6 +178,13 @@ Images 与 standalone Search 是 OpenAI Provider 自有端点：两者都不参�
 及其他未涉及字段和顺序保持不变并由上游解释；启用环境与设备 metadata 覆盖时，只有下述位置和 metadata
 字段例外更新。
 
+模型级请求策略（思考强度与 service tier 规则）按客户端请求的 public 模型名精确匹配，与全局模型映射共用
+键空间，在路由计划编译时冻结进 `ProviderCandidate`；Provider 在每次 attempt 编码前应用一次，不改变 Core
+的路由、历史与计费事实。`lock_fast` 无条件写入 `service_tier: "fast"`，`lock_never_fast` 在请求携带
+`fast`/`priority` 时移除该字段；强度 `locked` 无条件覆盖，`min`/`max` 只在请求缺失或越界时补写，
+无法识别的请求强度保持原值。xAI 边界本就剥离 `service_tier`，fast 规则只对经 OpenAI 路由的模型生效；
+Images 与 standalone Search 候选不携带模型策略。
+
 ## 5. Provider 与协议边界
 
 Core 只理解 `Operation`、能力要求、Provider 候选、稳定错误和 canonical event，不读取 Provider SDK
@@ -308,6 +315,9 @@ Client Key 与账号分组形成授权范围：
 - 分组可以包含多个 Provider，账号也可以属于多个分组。
 
 账号选择综合启停状态、credential/quota 事实、Redis cooldown、并发上限、权重、请求间隔和会话亲和。
+过载冷号按账号生效策略判定：`inherit` 跟随全局设置，`disabled` 不触发新冷却（已有冷却按原到期解除），
+`custom` 使用账号自有的连续过载次数与冷号秒数；覆盖随账号调度事实在同一事务中替换，选择器在判定前解析
+生效值，已存在的冷却不受后续编辑影响。
 账号编辑在一个事务中替换完整调度事实。导入与首次 OAuth 可携带统一账号设置，由 Admin 传递给 Store，
 与凭据在同一事务中提交；Provider 仍独占凭据解析。未附带设置的导入、重新授权和后台刷新保留已有分组、
 权重与并发设置。管理端导入和账号编辑共用设置表单，凭据输入独立于设置。

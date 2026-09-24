@@ -1,6 +1,7 @@
 //! Provider、模型目录、精确模型映射与请求级候选计划。
 
 mod catalog;
+pub mod policy;
 pub mod snapshot;
 
 pub use crate::account::scope::{
@@ -11,6 +12,10 @@ pub use crate::identity::ProviderKind;
 pub use catalog::{
     ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
     ProviderModelCapabilities,
+};
+pub use policy::{
+    ModelRequestPolicy, ReasoningEffort, ReasoningEffortRule, ReasoningEffortRuleMode,
+    RequestedReasoningEffort, ServiceTierRule,
 };
 pub use snapshot::RuntimeSnapshot;
 
@@ -508,6 +513,7 @@ pub struct ProviderCandidate {
     upstream_model: Option<UpstreamModelId>,
     emulated_features: BTreeSet<Feature>,
     account_scope: Arc<FrozenAccountScope>,
+    model_policy: Option<ModelRequestPolicy>,
 }
 
 impl ProviderCandidate {
@@ -529,6 +535,12 @@ impl ProviderCandidate {
     #[must_use]
     pub const fn account_scope(&self) -> &Arc<FrozenAccountScope> {
         &self.account_scope
+    }
+
+    /// 按客户端请求模型冻结的请求策略；原生端点与未命中策略的模型为 `None`。
+    #[must_use]
+    pub const fn model_policy(&self) -> Option<ModelRequestPolicy> {
+        self.model_policy
     }
 }
 

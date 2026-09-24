@@ -30,12 +30,12 @@ use gateway_admin::{
     ports::store::{AccountStore, AdminStoreError, AdminStoreErrorKind, AdminStoreResult},
 };
 use gateway_core::account::{
-    AccountConcurrencyLimit, AccountErrorReason, AccountStateChange, AccountWeight,
-    CredentialCasOutcome, CredentialCasUpdate, CredentialCasUpdateParts,
-    CredentialRevision as CoreCredentialRevision, CredentialState, LoadedCredential,
-    NewProviderAccount as CoreNewProviderAccount, OpaqueProviderData, PlaintextCredential,
-    ProviderAccount as CoreProviderAccount, ProviderAccountId as CoreProviderAccountId,
-    ProviderAccountIdentity, ProviderAccountStore,
+    AccountConcurrencyLimit, AccountErrorReason, AccountOverloadCooldownOverride,
+    AccountStateChange, AccountWeight, CredentialCasOutcome, CredentialCasUpdate,
+    CredentialCasUpdateParts, CredentialRevision as CoreCredentialRevision, CredentialState,
+    LoadedCredential, NewProviderAccount as CoreNewProviderAccount, OpaqueProviderData,
+    PlaintextCredential, ProviderAccount as CoreProviderAccount,
+    ProviderAccountId as CoreProviderAccountId, ProviderAccountIdentity, ProviderAccountStore,
     ProviderAccountUpdate as CoreProviderAccountUpdate,
     ProviderRefreshQuery as CoreProviderRefreshQuery, QuotaAccessChange, QuotaAccessState,
     QuotaEvidence, QuotaObservation, QuotaObservationTouch, QuotaState, QuotaWriteOutcome,

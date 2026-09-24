@@ -5,6 +5,7 @@ use gateway_core::error::IdentifierError;
 use gateway_core::event::{GatewayEvent, ProtocolWireEvent, ProviderEvent, ResponseMeta};
 use gateway_core::operation::GenerateRequest;
 use gateway_core::policy::ClientApiKeyId;
+use gateway_core::routing::ModelRequestPolicy;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -54,11 +55,13 @@ impl GrokCompactionRequest {
         request: &GenerateRequest,
         upstream_model: &str,
         client_api_key_ref: &ClientApiKeyId,
+        model_policy: Option<ModelRequestPolicy>,
     ) -> Result<Self, GrokRequestEncodeError> {
         let normalized = GrokResponsesRequest::encode_compaction_source(
             request,
             upstream_model,
             client_api_key_ref,
+            model_policy,
         )?;
         let reasoning_replay_session_id =
             normalized.reasoning_replay_session_id().map(str::to_owned);
