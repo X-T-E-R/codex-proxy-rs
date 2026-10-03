@@ -52,7 +52,7 @@ jobs:
           COPY backend/migrations ./migrations
           COPY release/version.yaml /app/release/version.yaml
           RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/usr/local/cargo/git --mount=type=cache,target=/app/backend/target \
-              rustc --version && cargo fmt --all -- --check \
+              rustc --version && rustup component add rustfmt && cargo fmt --all -- --check \
               && cargo test --locked -p gateway-core --test main policy::cyber_session \
               && cargo test --locked -p gateway-core --test main engine::execution \
               && cargo test --locked -p gateway-api --test main openai::responses::request \
