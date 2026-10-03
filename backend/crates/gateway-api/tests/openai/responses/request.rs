@@ -18,6 +18,7 @@ fn cyber_http_identity_uses_thread_header_instead_of_shared_session() {
                 .to_string()
                 .as_bytes(),
             &request_headers,
+            64 * 1024 * 1024,
         )
         .expect("decode")
     };
@@ -92,6 +93,7 @@ fn cyber_websocket_identity_uses_each_frame_thread_before_opening_headers() {
     let http = decode_request_with_headers(
         br#"{"model":"gpt-test","client_metadata":{"thread_id":"child-a"},"input":"other turn"}"#,
         &HeaderMap::new(),
+        64 * 1024 * 1024,
     )
     .expect("decode HTTP");
     assert!(
