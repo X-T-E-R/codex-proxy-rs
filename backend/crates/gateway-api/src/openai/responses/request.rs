@@ -486,6 +486,7 @@ pub(super) fn decode_request_object(
             .cyber_semantic_headers
             .iter()
             .map(String::as_str),
+        request_headers.thread_id.as_deref(),
     );
 
     request_headers.apply_subagent(&mut object);

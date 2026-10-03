@@ -94,31 +94,53 @@ impl fmt::Debug for CyberSessionRequest {
 }
 
 impl CyberSessionRequest {
-    /// 按 Responses 原生语义优先级提取显式会话；没有显式身份时才生成完整历史累计摘要。
+    /// 优先隔离当前线程；没有线程身份时保留会话与完整历史匹配。
     #[must_use]
     pub fn from_responses<'a>(
         body: &Map<String, Value>,
         turn_metadata_header: Option<&str>,
         semantic_headers: impl IntoIterator<Item = &'a str>,
+        thread_id_header: Option<&str>,
     ) -> Self {
-        let explicit = body
-            .get("client_metadata")
-            .and_then(Value::as_object)
-            .and_then(|metadata| {
-                valid_session_value(metadata.get("session_id")).or_else(|| {
-                    turn_metadata_session(
-                        metadata
-                            .get("x-codex-turn-metadata")
-                            .or_else(|| metadata.get("X-Codex-Turn-Metadata")),
-                    )
-                })
+        let metadata = body.get("client_metadata").and_then(Value::as_object);
+        let turn_metadata = metadata.and_then(|metadata| {
+            metadata
+                .get("x-codex-turn-metadata")
+                .or_else(|| metadata.get("X-Codex-Turn-Metadata"))
+        });
+        // Codex 的 session_id 可被父子线程共享；turn metadata 是当前 turn 的权威身份。
+        let thread_id = turn_metadata_identity(turn_metadata, "thread_id")
+            .or_else(|| {
+                metadata.and_then(|metadata| valid_session_value(metadata.get("thread_id")))
             })
-            .or_else(|| turn_metadata_header.and_then(parse_turn_metadata_session))
-            .or_else(|| semantic_headers.into_iter().find_map(valid_session_id));
-        if let Some(session_id) = explicit {
+            .or_else(|| {
+                turn_metadata_header
+                    .and_then(|encoded| parse_turn_metadata_identity(encoded, "thread_id"))
+            })
+            .or_else(|| thread_id_header.and_then(valid_session_id));
+        let thread_scoped = thread_id.is_some();
+        let explicit = thread_id.or_else(|| {
+            metadata
+                .and_then(|metadata| valid_session_value(metadata.get("session_id")))
+                .or_else(|| turn_metadata_identity(turn_metadata, "session_id"))
+                .or_else(|| {
+                    turn_metadata_header
+                        .and_then(|encoded| parse_turn_metadata_identity(encoded, "session_id"))
+                })
+                .or_else(|| semantic_headers.into_iter().find_map(valid_session_id))
+        });
+        if let Some(identity) = explicit {
             let mut hasher = Sha256::new();
-            hash_field(&mut hasher, b"codex-proxy-rs.cyber-session.explicit.v1");
-            hash_field(&mut hasher, session_id.as_bytes());
+            // 线程键与旧 session marker 分域，避免升级后继承已误伤整段对话的条目。
+            hash_field(
+                &mut hasher,
+                if thread_scoped {
+                    b"codex-proxy-rs.cyber-session.thread.v1"
+                } else {
+                    b"codex-proxy-rs.cyber-session.explicit.v1"
+                },
+            );
+            hash_field(&mut hasher, identity.as_bytes());
             return Self {
                 mode: CyberSessionMode::Explicit(hasher.finalize().into()),
             };
@@ -163,19 +185,18 @@ fn valid_session_value(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).and_then(valid_session_id)
 }
 
-fn turn_metadata_session(value: Option<&Value>) -> Option<String> {
+fn turn_metadata_identity(value: Option<&Value>, field: &str) -> Option<String> {
     match value? {
-        Value::Object(metadata) => valid_session_value(metadata.get("session_id")),
-        Value::String(encoded) => parse_turn_metadata_session(encoded),
+        Value::Object(metadata) => valid_session_value(metadata.get(field)),
+        Value::String(encoded) => parse_turn_metadata_identity(encoded, field),
         _ => None,
     }
 }
 
-fn parse_turn_metadata_session(encoded: &str) -> Option<String> {
+fn parse_turn_metadata_identity(encoded: &str, field: &str) -> Option<String> {
     serde_json::from_str::<Value>(encoded)
         .ok()
-        .and_then(|value| value.as_object().cloned())
-        .and_then(|metadata| valid_session_value(metadata.get("session_id")))
+        .and_then(|value| valid_session_value(value.as_object()?.get(field)))
 }
 
 fn valid_session_id(value: &str) -> Option<String> {

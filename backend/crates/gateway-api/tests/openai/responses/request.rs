@@ -6,6 +6,102 @@ use serde_json::json;
 
 use super::openai_wire_body;
 
+#[test]
+fn cyber_http_identity_uses_thread_header_instead_of_shared_session() {
+    let client_key = gateway_core::policy::ClientApiKeyId::new("key").expect("key");
+    let decode = |thread: &'static str, stream: bool| {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert("session-id", HeaderValue::from_static("shared-session"));
+        request_headers.insert("thread-id", HeaderValue::from_static(thread));
+        decode_request_with_headers(
+            json!({"model":"gpt-test","input":"turn","stream":stream})
+                .to_string()
+                .as_bytes(),
+            &request_headers,
+        )
+        .expect("decode")
+    };
+    let refused = decode("child-a", true)
+        .metadata()
+        .cyber_session()
+        .refusal_key(&client_key)
+        .expect("marker");
+    assert!(
+        decode("child-a", false)
+            .metadata()
+            .cyber_session()
+            .lookup_keys(&client_key)
+            .contains(&refused)
+    );
+    for thread in ["parent", "child-b"] {
+        assert!(
+            !decode(thread, true)
+                .metadata()
+                .cyber_session()
+                .lookup_keys(&client_key)
+                .contains(&refused)
+        );
+    }
+}
+
+#[test]
+fn cyber_websocket_identity_uses_each_frame_thread_before_opening_headers() {
+    let client_key = gateway_core::policy::ClientApiKeyId::new("key").expect("key");
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert("session-id", HeaderValue::from_static("shared-session"));
+    request_headers.insert("thread-id", HeaderValue::from_static("parent"));
+    request_headers.insert(
+        "x-codex-turn-metadata",
+        HeaderValue::from_static("{\"session_id\":\"shared-session\",\"thread_id\":\"parent\"}"),
+    );
+    let context =
+        gateway_api::openai::responses::OpenAiRequestHeaders::from_headers(&request_headers);
+    let decode = |thread: &str| {
+        gateway_api::openai::responses::decode_response_create_with_context(
+            &json!({
+                "type":"response.create", "model":"gpt-test", "input":"turn",
+                "client_metadata":{
+                    "session_id":"shared-session",
+                    "x-codex-turn-metadata":json!({"session_id":"shared-session","thread_id":thread}).to_string()
+                }
+            }).to_string(),
+            &context,
+        ).expect("decode frame")
+    };
+    let refused = decode("child-a")
+        .metadata()
+        .cyber_session()
+        .refusal_key(&client_key)
+        .expect("marker");
+    assert!(
+        decode("child-a")
+            .metadata()
+            .cyber_session()
+            .lookup_keys(&client_key)
+            .contains(&refused)
+    );
+    for thread in ["parent", "child-b"] {
+        assert!(
+            !decode(thread)
+                .metadata()
+                .cyber_session()
+                .lookup_keys(&client_key)
+                .contains(&refused)
+        );
+    }
+    let http = decode_request_with_headers(
+        br#"{"model":"gpt-test","client_metadata":{"thread_id":"child-a"},"input":"other turn"}"#,
+        &HeaderMap::new(),
+    )
+    .expect("decode HTTP");
+    assert!(
+        http.metadata()
+            .cyber_session()
+            .lookup_keys(&client_key)
+            .contains(&refused)
+    );
+}
+
 const ENCODINGS: [&str; 3] = ["gzip", "deflate", "zstd"];
 const REQUEST: &[u8] = br#"{"model":"gpt-test","input":"hello","future_field":{"value":1}}"#;
 const DECOMPRESSED_LIMIT: u64 = 64 * 1024 * 1024;

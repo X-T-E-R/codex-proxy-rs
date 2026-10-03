@@ -185,7 +185,7 @@ fn enabled_cyber_block_is_recorded_before_any_provider_attempt() {
         unreachable!()
     };
     next.metadata.cyber_session =
-        CyberSessionRequest::from_responses(&body, None, std::iter::empty());
+        CyberSessionRequest::from_responses(&body, None, std::iter::empty(), None);
 
     let result = block_on(service.start(next));
     let Err(error) = result else {
@@ -229,7 +229,7 @@ fn disabled_cyber_setting_does_not_query_block_state() {
         unreachable!()
     };
     next.metadata.cyber_session =
-        CyberSessionRequest::from_responses(&body, None, std::iter::empty());
+        CyberSessionRequest::from_responses(&body, None, std::iter::empty(), None);
 
     let started = block_on(service.start(next)).expect("disabled setting keeps baseline");
     assert_eq!(cyber.lookups.load(Ordering::SeqCst), 0);
@@ -340,24 +340,29 @@ impl Provider for AtomicCyberFailingProvider {
 #[derive(Default)]
 struct RecordingCyberSessions {
     records: AtomicUsize,
+    keys: Mutex<Vec<CyberSessionKey>>,
     record_gate: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl CyberSessionPort for RecordingCyberSessions {
     fn contains_any<'a>(
         &'a self,
-        _: &'a [CyberSessionKey],
+        keys: &'a [CyberSessionKey],
     ) -> BoxFuture<'a, Result<bool, CyberSessionStoreError>> {
-        Box::pin(async { Ok(false) })
+        Box::pin(async move {
+            let recorded = self.keys.lock().unwrap();
+            Ok(keys.iter().any(|key| recorded.contains(key)))
+        })
     }
 
     fn record<'a>(
         &'a self,
-        _: &'a CyberSessionKey,
+        key: &'a CyberSessionKey,
         _: Duration,
     ) -> BoxFuture<'a, Result<(), CyberSessionStoreError>> {
-        Box::pin(async {
+        Box::pin(async move {
             self.records.fetch_add(1, Ordering::SeqCst);
+            self.keys.lock().unwrap().push(key.clone());
             let gate = self.record_gate.lock().unwrap().take();
             if let Some(gate) = gate {
                 gate.await.expect("cyber record gate");
@@ -395,7 +400,7 @@ fn with_explicit_cyber_session(
         unreachable!()
     };
     next.metadata.cyber_session =
-        CyberSessionRequest::from_responses(&body, None, std::iter::empty());
+        CyberSessionRequest::from_responses(&body, None, std::iter::empty(), None);
     next
 }
 
@@ -445,6 +450,80 @@ fn cancelled_cyber_record_future_resumes_during_detached_finalization() {
             .expect("resume original record future");
         detached.await;
         assert_eq!(cyber.records.load(Ordering::SeqCst), 1);
+    });
+}
+
+#[test]
+fn cyber_refusal_blocks_only_the_refused_thread_across_transports() {
+    block_on(async {
+        let cyber = Arc::new(RecordingCyberSessions::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let snapshot = start_snapshot().with_cyber_session_block_policy(Some(
+            CyberSessionBlockPolicy::new(std::num::NonZeroU32::new(3600).expect("TTL")),
+        ));
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(snapshot),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::new([Arc::new(CyberFailingProvider {
+                attempts: attempts.clone(),
+            }) as Arc<dyn Provider>])
+            .expect("registry"),
+            Arc::new(Admissions::default()),
+            Arc::new(UnusedCircuits),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        )
+        .with_cyber_sessions(cyber.clone());
+        let next = |thread: &str, transport| {
+            let mut next = request(&service, transport);
+            let serde_json::Value::Object(body) = serde_json::json!({
+                "client_metadata":{"session_id":"shared-session","thread_id":thread},
+                "input":"turn"
+            }) else {
+                unreachable!()
+            };
+            next.metadata.cyber_session =
+                CyberSessionRequest::from_responses(&body, None, std::iter::empty(), None);
+            next
+        };
+        let mut refused = service
+            .start(next("child-a", ClientTransport::HttpSse))
+            .await
+            .expect("first attempt");
+        assert!(refused.session.next_event().await.is_err());
+        refused.session.detach_finalize().await;
+        assert_eq!(cyber.records.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        for transport in [
+            ClientTransport::HttpJson,
+            ClientTransport::HttpSse,
+            ClientTransport::WebSocket,
+        ] {
+            let Err(error) = service.start(next("child-a", transport)).await else {
+                panic!("refused child must be blocked locally");
+            };
+            assert_eq!(
+                error.client_error_code(),
+                Some("session_blocked_by_cyber_policy")
+            );
+        }
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        for (index, (thread, transport)) in [
+            ("parent", ClientTransport::HttpJson),
+            ("child-b", ClientTransport::WebSocket),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut allowed = service
+                .start(next(thread, transport))
+                .await
+                .expect("other thread admitted");
+            assert!(allowed.session.next_event().await.is_err());
+            allowed.session.detach_finalize().await;
+            assert_eq!(attempts.load(Ordering::SeqCst), index + 2);
+        }
     });
 }
 

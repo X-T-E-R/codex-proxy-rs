@@ -1,11 +1,7 @@
 name: Fork Image
 
-# Fork 自用镜像流水线：推送到 main 或手动触发时，用 deploy/Dockerfile 的 runtime
-# target 从源码构建并推送 GHCR。镜像名从 github.repository 小写派生，fork 仓库
-# 无需修改即可推送到自己的命名空间。
+# 仅用于线上 2653 基线的线程隔离热修复；不覆盖 latest，不重建前端与运行时基础。
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,12 +9,13 @@ permissions:
   packages: write
 
 concurrency:
-  group: fork-image-${{ github.ref }}
-  cancel-in-progress: true
+  group: cyber-thread-hotfix-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   image:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       REGISTRY: ghcr.io
     steps:
@@ -39,17 +36,55 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push runtime image
+      - name: Prepare baseline-only backend patch build
+        shell: bash
+        run: |
+          sha256sum backend/crates/gateway-core/src/policy/cyber_session.rs backend/crates/gateway-api/src/openai/responses/request.rs
+          cat > /tmp/cpr-hotfix.Dockerfile <<'DOCKERFILE'
+          # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+          FROM rust:1.98-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS backend-builder
+          WORKDIR /app/backend
+          ARG CPR_GIT_SHA
+          ENV CPR_GIT_SHA=${CPR_GIT_SHA} CPR_BUILD_TYPE=release RUST_MIN_STACK=16777216 CARGO_TARGET_DIR=/app/backend/target/amd64
+          COPY backend/Cargo.toml backend/Cargo.lock ./
+          COPY backend/apps ./apps
+          COPY backend/crates ./crates
+          COPY backend/migrations ./migrations
+          COPY release/version.yaml /app/release/version.yaml
+          RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/usr/local/cargo/git --mount=type=cache,target=/app/backend/target \
+              rustc --version && cargo fmt --all -- --check \
+              && cargo test --locked -p gateway-core --test main policy::cyber_session \
+              && cargo test --locked -p gateway-core --test main engine::execution \
+              && cargo test --locked -p gateway-api --test main openai::responses::request \
+              && cargo test --locked -p gateway-store --test main --no-run \
+              && cargo build --release --locked --bin codex-proxy-rs \
+              && cp "${CARGO_TARGET_DIR}/release/codex-proxy-rs" /tmp/codex-proxy-rs \
+              && sha256sum /tmp/codex-proxy-rs
+          FROM ghcr.io/x-t-e-r/codex-proxy-rs@sha256:a6016c1846f9b45b4b2fe390114165cbae0975dc2302049b9ac12edb5b539c01 AS runtime
+          ARG CPR_GIT_SHA
+          LABEL org.opencontainers.image.revision=${CPR_GIT_SHA} cpr.hotfix.baseline=2653ae2779b962320376ae89312f37ad9403614f cpr.hotfix.scope=cyber-thread-isolation
+          COPY --from=backend-builder --chown=10001:10001 /tmp/codex-proxy-rs /app/bin/codex-proxy-rs
+          DOCKERFILE
+
+      - name: Test, build and push immutable hotfix image
+        id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          file: deploy/Dockerfile
+          file: /tmp/cpr-hotfix.Dockerfile
           target: runtime
           push: true
           cache-from: type=gha,scope=fork-runtime
-          cache-to: type=gha,mode=max,scope=fork-runtime
+          cache-to: type=gha,mode=max,scope=cyber-thread-2653
           build-args: |
             CPR_GIT_SHA=${{ github.sha }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+
+      - name: Record exact image identity
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          echo "${REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Source: $GITHUB_SHA; baseline: 2653ae2779b962320376ae89312f37ad9403614f" >> "$GITHUB_STEP_SUMMARY"

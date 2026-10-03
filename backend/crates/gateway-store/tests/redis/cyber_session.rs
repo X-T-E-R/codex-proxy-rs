@@ -75,7 +75,7 @@ fn explicit_key(client_key: &str, session: &str) -> gateway_core::policy::CyberS
     else {
         unreachable!()
     };
-    CyberSessionRequest::from_responses(&body, None, std::iter::empty())
+    CyberSessionRequest::from_responses(&body, None, std::iter::empty(), None)
         .refusal_key(&ClientApiKeyId::new(client_key).expect("client key"))
         .expect("explicit key")
 }
