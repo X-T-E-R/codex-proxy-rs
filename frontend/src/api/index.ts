@@ -22,6 +22,7 @@ export * from './modules/pricing'
 export * from './modules/proxies'
 
 // 设置管理
+export * from './modules/quota-policy'
 export * from './modules/settings'
 
 // 系统更新

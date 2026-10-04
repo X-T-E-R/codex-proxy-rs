@@ -8,7 +8,9 @@ import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import { groupedAccountQuotaWindows, orderedPanelQuotaWindows } from '../../constants'
 import AccountPlanBadge from '../AccountPlanBadge.vue'
 import AccountProfileModal from '../AccountProfileModal/index.vue'
+import AccountQuotaCredits from './Credits.vue'
 import AccountQuotaPanelEntry from './Entry.vue'
+import AccountQuotaPolicy from './Policy.vue'
 import AccountResetCredits from './ResetCredits.vue'
 
 const props = defineProps<{
@@ -92,6 +94,10 @@ const profileOpen = shallowRef(false)
       <p v-if="quotaEntries.length === 0" class="m-0 text-cp-sm font-emphasis text-cp-text-secondary">
         额度待观测
       </p>
+      <template v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'">
+        <AccountQuotaCredits :credits="account.quota.credits" />
+        <AccountQuotaPolicy :account-id="account.id" :refreshed-quota="account.quota" />
+      </template>
     </div>
   </section>
 

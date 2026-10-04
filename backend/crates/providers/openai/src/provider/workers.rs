@@ -293,7 +293,11 @@ impl ScheduledTask for OpenAiQuotaTask {
             if context.cancellation().is_cancelled() {
                 return Ok(());
             }
-            match self.quota.synchronize().await {
+            match self
+                .quota
+                .synchronize_with_cancellation(context.cancellation())
+                .await
+            {
                 Ok(summary) if summary.has_operational_failures() => {
                     tracing::warn!(
                         updated = summary.updated,

@@ -433,6 +433,7 @@ const {
       :groups-loading="groupsLoading"
       :saving="savingAccountEdit"
       @save="saveAccountEdit"
+      @quota-policy-saved="refreshAccountsSilently"
     />
 
     <AccountBatchEditModal

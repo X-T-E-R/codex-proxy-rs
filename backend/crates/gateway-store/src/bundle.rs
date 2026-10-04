@@ -129,7 +129,8 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         }),
         backup_ports(pool.clone(), &config)?,
     )
-    .with_turn_state(turn_state.clone());
+    .with_turn_state(turn_state.clone())
+    .with_quota_policy(Arc::new(postgres::PgQuotaPolicyStore::new(pool.clone())));
 
     let execution_repository = Arc::new(postgres::PgExecutionStore::new(pool.clone()));
     let (execution, execution_writer) =
@@ -197,7 +198,8 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         runtime_policy,
         oauth_pending,
     )
-    .with_turn_state(turn_state);
+    .with_turn_state(turn_state)
+    .with_quota_policy(Arc::new(postgres::PgQuotaPolicyStore::new(pool.clone())));
     let worker_leader_lease = Arc::new(redis::worker_lease::RedisWorkerLeaderLeasePort::new(
         credential_leases,
     ));

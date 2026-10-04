@@ -85,6 +85,36 @@ fn map_turn_state_policy_error(error: TurnStateStoreError) -> AdminError {
 /// 统一账号页消费的服务。
 #[async_trait]
 pub trait AccountsService: Send + Sync {
+    async fn global_quota_policy(
+        &self,
+    ) -> Result<gateway_core::provider_ports::quota_policy::GlobalQuotaPolicy, AdminError> {
+        Err(AdminError::unavailable("额度策略服务暂不可用"))
+    }
+    async fn update_global_quota_policy(
+        &self,
+        _expected: u64,
+        _policy: gateway_core::provider_ports::quota_policy::QuotaPolicy,
+        _context: &MutationContext,
+    ) -> Result<gateway_core::provider_ports::quota_policy::GlobalQuotaPolicy, AdminError> {
+        Err(AdminError::unavailable("额度策略服务暂不可用"))
+    }
+    async fn account_quota_policy(
+        &self,
+        _id: &ProviderAccountId,
+    ) -> Result<gateway_core::provider_ports::quota_policy::AccountQuotaPolicy, AdminError> {
+        Err(AdminError::unavailable("额度策略服务暂不可用"))
+    }
+    async fn update_account_quota_policy(
+        &self,
+        _id: &ProviderAccountId,
+        _expected: u64,
+        _mode: gateway_core::provider_ports::quota_policy::QuotaPolicyMode,
+        _policy: Option<gateway_core::provider_ports::quota_policy::QuotaPolicy>,
+        _context: &MutationContext,
+    ) -> Result<gateway_core::provider_ports::quota_policy::AccountQuotaPolicy, AdminError> {
+        Err(AdminError::unavailable("额度策略服务暂不可用"))
+    }
+
     async fn turn_state(
         &self,
         _account_id: &ProviderAccountId,
@@ -277,6 +307,7 @@ pub(crate) struct DefaultAccountsService {
     snapshot: Arc<dyn SnapshotControl>,
     probe: Arc<dyn AccountProbe>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
+    quota_policy: Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>>,
     turn_state_capture: Option<ModelTurnStateCaptureManager>,
     reset_credit_locks:
         Arc<futures::lock::Mutex<BTreeMap<ProviderAccountId, Arc<futures::lock::Mutex<()>>>>>,
@@ -298,9 +329,18 @@ impl DefaultAccountsService {
             snapshot,
             probe,
             turn_state: None,
+            quota_policy: None,
             turn_state_capture: None,
             reset_credit_locks: Arc::new(futures::lock::Mutex::new(BTreeMap::new())),
         }
+    }
+
+    pub(crate) fn with_quota_policy(
+        mut self,
+        store: Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>>,
+    ) -> Self {
+        self.quota_policy = store;
+        self
     }
 
     pub(crate) fn with_turn_state(mut self, store: Option<Arc<dyn TurnStateStore>>) -> Self {
@@ -497,6 +537,69 @@ impl DefaultAccountsService {
 
 #[async_trait]
 impl AccountsService for DefaultAccountsService {
+    async fn global_quota_policy(
+        &self,
+    ) -> Result<gateway_core::provider_ports::quota_policy::GlobalQuotaPolicy, AdminError> {
+        self.quota_policy
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("额度策略服务暂不可用"))?
+            .global()
+            .await
+            .map_err(map_quota_policy_error)
+    }
+
+    async fn update_global_quota_policy(
+        &self,
+        expected: u64,
+        policy: gateway_core::provider_ports::quota_policy::QuotaPolicy,
+        context: &MutationContext,
+    ) -> Result<gateway_core::provider_ports::quota_policy::GlobalQuotaPolicy, AdminError> {
+        self.quota_policy
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("额度策略服务暂不可用"))?
+            .update_global(
+                expected,
+                policy,
+                &format!("{:?}:{}", context.actor, context.request_id),
+            )
+            .await
+            .map_err(map_quota_policy_error)
+    }
+
+    async fn account_quota_policy(
+        &self,
+        id: &ProviderAccountId,
+    ) -> Result<gateway_core::provider_ports::quota_policy::AccountQuotaPolicy, AdminError> {
+        self.quota_policy
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("额度策略服务暂不可用"))?
+            .account(id.as_str())
+            .await
+            .map_err(map_quota_policy_error)
+    }
+
+    async fn update_account_quota_policy(
+        &self,
+        id: &ProviderAccountId,
+        expected: u64,
+        mode: gateway_core::provider_ports::quota_policy::QuotaPolicyMode,
+        policy: Option<gateway_core::provider_ports::quota_policy::QuotaPolicy>,
+        context: &MutationContext,
+    ) -> Result<gateway_core::provider_ports::quota_policy::AccountQuotaPolicy, AdminError> {
+        self.quota_policy
+            .as_ref()
+            .ok_or_else(|| AdminError::unavailable("额度策略服务暂不可用"))?
+            .update_account(
+                id.as_str(),
+                expected,
+                mode,
+                policy,
+                &format!("{:?}:{}", context.actor, context.request_id),
+            )
+            .await
+            .map_err(map_quota_policy_error)
+    }
+
     async fn turn_state(
         &self,
         account_id: &ProviderAccountId,
@@ -1313,6 +1416,7 @@ fn empty_quota() -> ProviderQuota {
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: Vec::new(),
         limit_reached: false,
         provider_data: None,
@@ -1336,4 +1440,16 @@ fn quota_usage_window(
         key: window.key.clone(),
         range,
     })
+}
+
+fn map_quota_policy_error(
+    error: gateway_core::provider_ports::quota_policy::QuotaPolicyError,
+) -> AdminError {
+    use gateway_core::provider_ports::quota_policy::QuotaPolicyError;
+    match error {
+        QuotaPolicyError::Invalid => AdminError::invalid("额度策略参数超出允许范围"),
+        QuotaPolicyError::NotFound => AdminError::invalid("额度策略仅支持 OpenAI Codex OAuth 账号"),
+        QuotaPolicyError::Unavailable => AdminError::unavailable("额度策略服务暂不可用"),
+        _ => AdminError::conflict("额度策略或重置操作已变化，请刷新后重试"),
+    }
 }

@@ -516,6 +516,7 @@ impl ProviderAdmin for FakeProviderAdmin {
             .push(command);
         self.require_available()?;
         Ok(ProviderResetCreditResult {
+            action_result: "confirmed".to_owned(),
             code: "reset".to_owned(),
             credit: None,
         })
@@ -1805,6 +1806,7 @@ async fn accounts_list_should_degrade_quota_failure_to_empty_window_without_drop
         plan_type: None,
         observed_at: Some(Utc::now()),
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![ProviderQuotaWindow {
             key: "primary".to_owned(),
             group: "shortTerm".to_owned(),
@@ -1937,6 +1939,7 @@ async fn accounts_list_should_not_derive_rate_limited_from_provider_quota_view()
         plan_type: None,
         observed_at: Some(Utc::now()),
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![ProviderQuotaWindow {
             key: "primary".to_owned(),
             group: "shortTerm".to_owned(),
@@ -1985,6 +1988,7 @@ async fn accounts_list_should_not_derive_exhaustion_from_provider_quota_view() {
         plan_type: None,
         observed_at: Some(Utc::now()),
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![ProviderQuotaWindow {
             key: "primary".to_owned(),
             group: "shortTerm".to_owned(),
@@ -2269,6 +2273,7 @@ async fn accounts_list_should_attach_local_usage_to_quota_windows() {
         plan_type: None,
         observed_at: Some(Utc::now()),
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![ProviderQuotaWindow {
             key: "primary".to_owned(),
             group: "shortTerm".to_owned(),
@@ -2426,6 +2431,7 @@ async fn accounts_list_should_not_attach_account_usage_to_model_specific_quota_w
         plan_type: None,
         observed_at: Some(Utc::now()),
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![
             ProviderQuotaWindow {
                 key: "core-primary".to_owned(),
@@ -2681,6 +2687,7 @@ fn empty_quota() -> ProviderQuota {
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: Vec::new(),
         limit_reached: false,
         provider_data: None,

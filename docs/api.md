@@ -135,6 +135,8 @@ Codex PAT 验证服务不可用和身份响应无效分别返回 `50301`、`5020
 管理写入不要求客户端提供全局配置版本。会改变路由快照或安全配置的写入由后端在事务内推进
 内部 `config_revision`，并用于快照发布与审计。账号更新和分组查询/写入的部分响应会返回
 `configRevision` 作为已提交事实，但它不是客户端 mutation 的前置条件。
+额度策略与 Turn State 使用各自独立的读取 revision 做 CAS，更新须提交对应的 `expectedRevision`；
+额度策略保存不推进全站路由 `config_revision`，新调度直接读取已提交策略。
 
 ## 2. 健康检查
 
@@ -394,6 +396,8 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游 |
 | `GET` | `/api/admin/accounts/quota-forecast` | `accountId` | 按需读取周/月容量预测、源窗口剩余估算与采样依据，不刷新上游额度 |
 | `POST` | `/api/admin/accounts/quota/refresh` | `{ accountId }` | 访问 Provider 并刷新额度，同时同步额度所属状态 |
+| `GET` | `/api/admin/accounts/quota-policy` | `accountId` | 读取账号额度策略、有效配置与后台策略状态 |
+| `POST` | `/api/admin/accounts/quota-policy/update` | `{ accountId, expectedRevision, mode, policy }` | 保存账号继承、关闭或独立额度策略 |
 | `GET` | `/api/admin/accounts/personal-info` | `accountId` | 按需汇聚 OpenAI/Codex 官方个人资料、累计活动与订阅信息，不更新额度或 credential |
 | `GET` | `/api/admin/accounts/reset-credits` | `accountId` | 查询 OpenAI 上游主动额度重置卡，不读取本地库存 |
 | `POST` | `/api/admin/accounts/reset-credits` | `{ accountId, creditId?, redeemRequestId }` | 使用 UUIDv4 幂等键消费一张 OpenAI 上游重置卡 |
@@ -792,6 +796,80 @@ OAuth start 使用：
   金额原值保持完整精度，USD 展示值
   小于 1 美元时最多保留四位小数，其余保留两位。
 
+### 额外 credits 与额度策略
+
+账号列表、详情及额度查询中的 `quota.credits` 为 `null` 或
+`{ "hasCredits": true, "unlimited": false, "balance": "12.75" }`。
+`balance` 是上游返回的十进制字符串或 `null`，零余额保留为 `"0"`；调用方不要转成浮点数。
+它不是 USD、Token 数或重置卡数量，只展示余额，不触发暂停或自动重置。
+`refreshedAtDisplay` 仍表示整体额度快照的刷新时间，不表示余额具有独立的新鲜时间。
+
+额度策略只适用于 OpenAI Codex OAuth 账号。全局配置是**每账号的默认策略**，不是所有账号合计的
+用量或耗卡预算；xAI 与 API Key 账号不应用该配置，其账号策略接口返回 `40001`。
+
+| 方法 | 路由 | 请求与返回 |
+| --- | --- | --- |
+| `GET` | `/api/admin/quota-policy` | 返回 `{ revision, policy }` |
+| `POST` | `/api/admin/quota-policy/update` | `{ expectedRevision, policy }`；返回保存后的完整全局视图 |
+| `GET` | `/api/admin/accounts/quota-policy` | `accountId`；返回下述账号视图 |
+| `POST` | `/api/admin/accounts/quota-policy/update` | `{ accountId, expectedRevision, mode, policy }`；返回保存后的完整账号视图 |
+
+`policy` 必须完整提交：
+
+```json
+{
+  "primary": { "action": "off", "thresholdPercent": 100 },
+  "secondary": { "action": "stop", "thresholdPercent": 99 },
+  "autoReset": { "maxAttemptsPer24h": 1, "cooldownSeconds": 86400 }
+}
+```
+
+`action` 为 `off`（关闭）、`stop`（达到阈值后停止新调度）或 `reset_then_stop`
+（停止新调度并由后台尝试一次安全重置，确认恢复后再调度）。`thresholdPercent` 为 1–100 的整数，
+比较使用原始已用比例 `>=`，包括等于阈值；`98.999` 不因显示舍入成 `99` 而触发。
+`primary` 只匹配通用 Codex 短期窗口，`secondary` 只匹配通用 Codex 周窗口；不把月窗口、
+`code_review`、模型专属桶或跨桶最小剩余比例当成周用量。
+
+新安装和迁移后的配置默认两项 `off`，阈值 100，自动预算 1 次、间隔 86400 秒。
+`maxAttemptsPer24h` 范围为 1–10，`cooldownSeconds` 范围为 3600–86400；只有启用
+`reset_then_stop` 才自动消费。预算按每账号滚动 24 小时计算，在发送前事务占用，已发送但结果未知
+也计入。凭据轮换、配置更新、自然窗口变化和服务重启均不清空预算或最小间隔。
+
+账号 `mode` 为 `inherit`（默认，跟随全局）、`disabled`（不应用本地策略）或 `custom`
+（完整独立配置，不逐字段合并）；仅 `custom` 提交对象 `policy`，其他模式提交 `null`。
+保存全局不会覆盖现有 `disabled` / `custom`。版本冲突返回 HTTP 409 / `40901`，需重新读取后确认保存。
+
+账号视图包含 `accountId`、`revision`、`mode`、`policy`、`effectivePolicy`、
+`source`（`global` / `disabled` / `account`）及 `status`：
+
+```json
+{
+  "paused": true,
+  "reason": "threshold_secondary",
+  "observedAt": "2026-10-05T00:00:00Z",
+  "lastAutoAttemptAt": null,
+  "autoAttemptsLast24h": 0,
+  "pendingOperationId": null
+}
+```
+
+`status` 是后台最近处理状态，可能滞后于刚保存的配置；新调度直接读取已提交策略，无需重启。
+`reason` 为 `off`、`ready`、`threshold_primary`、`threshold_secondary`、`quota_unconfirmed`、
+`reset_pending`、`reset_failed`、`reset_readback_unconfirmed`、`auto_budget_exhausted` 或 `auto_cooldown`。
+`pendingOperationId` 包括结果未知的操作和成功但尚未确认额度恢复的操作，不等同于正在发起 HTTP 请求。
+
+暂停独立于账号 `enabled` 和上游 `quotaState`：上游仍 `Allowed` 或有额外 credits 时，本地阈值仍可停止
+新调度，已开始的请求继续。没有该周期窗口时不套用该周期规则；已有适用窗口过期或读数未确认时先暂停，
+后台回读真实额度后恢复，不按时钟直接归零。HTTP 429、容量冻结、卡片不可用或过期不构成窗口用量 100% 的证据。
+自动消费结果未知时保留原账号、原卡片、原幂等键和预算记录，不创建新的重置操作。后台只有在原触发规则
+仍为 `reset_then_stop`、原窗口仍有效且用量仍达到当前阈值时，才允许同键确认。用量已降低或自然换窗后，
+服务无法安全区分已发送但结果未知与发送前中断的操作，因此不重发，也不自动解除未决屏障；策略启用时
+该账号仍因未决操作暂停新调度。当前手动消费接口不能确认自动操作，刷新额度或卡片列表也不代表消费结果已确认。
+将该账号设为 `mode: "disabled"`，或将其有效策略的两项 `action` 都设为 `off`，可以绕过本地策略暂停，
+但仍须满足账号的其他调度条件；这不会清除未决操作、原键或预算记录，也不允许开始新的重置操作，不能当作消费结果确认。
+已确认成功的自动操作仍须回读原触发窗口低于原阈值，并且所有当前生效窗口允许调度，才能清除屏障。
+成功后额度仍高或回读失败不会继续消耗下一张卡。
+
 ### 周/月额度预测
 
 `GET /api/admin/accounts/quota-forecast?accountId=...` 使用管理员鉴权，每次查询返回独立的预测结果。
@@ -918,11 +996,12 @@ PostgreSQL 或 Redis。
 
 消费请求的 `redeemRequestId` 必须是小写、带连字符的 canonical UUIDv4；`creditId` 可省略，由上游选择
 可用卡。一次请求发出后若传输结果不明确，重试必须复用完全相同的 `redeemRequestId`、`creditId` 和
-账号。服务在单副本进程内按账号串行消费，并在 credential 需要刷新时以同一命令重试一次；它不会对不明
-结果自动创建新消费。
+账号。手动和自动消费共用持久化操作记录与 PostgreSQL 账号锁，跨重启与多实例保持未决屏障。
+首次手动请求明确要求刷新 credential 时，服务以同一命令重试一次；未知结果不能借凭据轮换换新键。
 
 若服务无法确认不可逆消费是否完成，返回 HTTP `502` / 业务码 `50202`；客户端应先刷新卡片与额度状态，
-并在确需重试时复用原 `redeemRequestId`。明确的上游 HTTP 拒绝仍使用 `50201`，不会误标为结果未知。
+并在确需重试时复用原 `redeemRequestId`。首次明确的上游 HTTP 拒绝使用 `50201`；对未知操作的
+确认请求再次被拒绝，并不能证明先前未消费，仍保留 `50202` 和原键。
 
 ```json
 {
@@ -932,8 +1011,11 @@ PostgreSQL 或 Redis。
 }
 ```
 
-消费响应只返回上游结果 `code` 和可选 `credit`。消费端确认成功后应重新 GET 卡片列表，并显式调用
+消费响应返回上游 `code`、可选 `credit` 及服务端判定的 `actionResult`：
+`confirmed`、`rejected` 或 `unknown`。未知业务码保持原码，并以 `unknown` 保留原键；不要根据
+`code` 猜测失败后创建新键。确认成功后应重新 GET 卡片列表，并显式调用
 `POST /api/admin/accounts/quota/refresh` 回读官方额度；不得直接改写本地 `resetAt`。xAI 不支持该能力。
+`availableCount > 0` 但 `credits` 为空是合法的只计数库存，自动消费可以由上游选卡。
 
 ## 6. 账号分组
 

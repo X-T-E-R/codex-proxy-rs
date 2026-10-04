@@ -376,6 +376,7 @@ pub async fn initialize(
             probe.clone(),
         )
         .with_turn_state(store.turn_state())
+        .with_quota_policy(store.quota_policy())
         .with_turn_state_capture(turn_state_capture.clone()),
     );
     let backup_ports = store.backup();

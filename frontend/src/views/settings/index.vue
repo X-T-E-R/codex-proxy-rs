@@ -14,6 +14,7 @@ import SettingsBackupSection from './components/backup/SettingsBackupSection.vue
 import ClientProfileCard from './components/ClientProfileCard.vue'
 import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
+import QuotaPolicyCard from './components/QuotaPolicyCard.vue'
 import RequestLocationCard from './components/RequestLocationCard.vue'
 import RequestQueueCard from './components/RequestQueueCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
@@ -140,6 +141,8 @@ watch(section, (value) => {
           重新加载
         </BaseButton>
       </div>
+
+      <QuotaPolicyCard v-if="visited.has('runtime')" v-show="section === 'runtime'" />
 
       <SettingsAccessSection
         v-if="visited.has('access')"

@@ -2,12 +2,14 @@
 import type { AccountRow } from '../constants'
 import type { ApiKeyAccountForm } from '../utils/upstreamApiKey'
 import type { AccountGroup, AccountModelAccess } from '@/api'
+import { shallowRef } from 'vue'
 
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
+import QuotaPolicyEditor from '@/components/quota-policy/QuotaPolicyEditor.vue'
 import AccountApiKeyFields from './AccountApiKeyFields.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
 import AccountPlanBadge from './AccountPlanBadge.vue'
@@ -24,6 +26,7 @@ defineProps<{
 
 const emit = defineEmits<{
   save: []
+  quotaPolicySaved: []
 }>()
 
 const open = defineModel<boolean>({ required: true })
@@ -36,6 +39,7 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const policySaving = shallowRef(false)
 </script>
 
 <template>
@@ -43,7 +47,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
     v-model="open"
     title="编辑账号"
     size="md-wide"
-    :dismissible="!saving"
+    :dismissible="!saving && !policySaving"
   >
     <div v-if="account" class="grid gap-5">
       <div
@@ -73,7 +77,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         <p v-else-if="!configurationReady" role="alert" class="m-0 text-cp-sm text-cp-error">
           上游设置读取失败，请关闭后重试
         </p>
-        <AccountApiKeyFields v-else v-model="apiKey" editing :disabled="saving" />
+        <AccountApiKeyFields v-else v-model="apiKey" editing :disabled="saving || policySaving" />
       </section>
 
       <AccountSettingsFields
@@ -86,10 +90,27 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         v-model:proxy-id="proxyId"
         :groups="groups"
         :groups-loading="groupsLoading"
-        :disabled="saving"
+        :disabled="saving || policySaving"
         :endpoint="account.outboundProxyEndpoint"
         :account-id="account.id"
       />
+
+      <section class="grid gap-3">
+        <h3 class="m-0 text-cp font-heavy text-cp-text">
+          Codex 额度策略
+        </h3>
+        <QuotaPolicyEditor
+          v-if="open && account.provider === 'openai' && account.authenticationKind === 'oauth'"
+          :key="account.id"
+          :account-id="account.id"
+          :disabled="saving"
+          @saving="policySaving = $event"
+          @saved="emit('quotaPolicySaved')"
+        />
+        <p v-else class="m-0 text-cp-sm text-cp-text-secondary">
+          此账号暂不支持 Codex 窗口策略，不执行全局额度策略
+        </p>
+      </section>
 
       <BaseFormItem label="备注">
         <BaseTextarea
@@ -97,19 +118,19 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
           :rows="3"
           :maxlength="500"
           placeholder="最多 500 字，留空可清除备注"
-          :disabled="saving"
+          :disabled="saving || policySaving"
         />
       </BaseFormItem>
     </div>
 
     <template #footer>
-      <BaseButton variant="secondary" :disabled="saving" @click="open = false">
+      <BaseButton variant="secondary" :disabled="saving || policySaving" @click="open = false">
         取消
       </BaseButton>
       <BaseButton
         variant="primary"
         :loading="saving"
-        :disabled="!account || groupsLoading || (account.authenticationKind === 'api_key' && !configurationReady)"
+        :disabled="policySaving || !account || groupsLoading || (account.authenticationKind === 'api_key' && !configurationReady)"
         @click="emit('save')"
       >
         保存更改

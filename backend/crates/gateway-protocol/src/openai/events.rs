@@ -766,7 +766,7 @@ fn parse_credits_from_lookup(headers: &BTreeMap<String, &str>) -> Option<Credits
     })
 }
 
-fn parse_credits_from_object(value: &Value) -> Option<CreditsSnapshot> {
+pub fn parse_credits_from_object(value: &Value) -> Option<CreditsSnapshot> {
     Some(CreditsSnapshot {
         has_credits: value.get("has_credits")?.as_bool()?,
         unlimited: value.get("unlimited")?.as_bool()?,

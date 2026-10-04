@@ -403,6 +403,9 @@ impl CodexCredentialSelector {
                         continue;
                     }
                 }
+                if !diagnostic && self.quota.policy_blocks(&account).await {
+                    continue;
+                }
                 eligible.push(account);
             }
             let accounts = eligible;

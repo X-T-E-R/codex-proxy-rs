@@ -11,6 +11,7 @@ where
 {
     Router::new()
         .merge(super::import_tasks::router::<S>())
+        .merge(super::quota_policy::router::<S>())
         .route("/api/admin/accounts", get(list_accounts::<S>))
         .route("/api/admin/accounts/detail", get(account_detail::<S>))
         .route(

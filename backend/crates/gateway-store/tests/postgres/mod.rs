@@ -25,6 +25,7 @@ mod pricing;
 mod provider_accounts;
 mod proxies;
 mod query_budget;
+mod quota_policy;
 mod retention;
 mod runtime_settings;
 mod schema_integrity;

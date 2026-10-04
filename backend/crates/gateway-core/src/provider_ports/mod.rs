@@ -17,6 +17,7 @@ use crate::policy::ClientApiKeyId;
 use crate::routing::UpstreamModelId;
 use crate::validation::{IdentifierError, validate_text};
 
+pub mod quota_policy;
 pub mod turn_state;
 use turn_state::TurnStateStore;
 
@@ -1325,6 +1326,7 @@ pub struct ProviderStorePorts {
     ws_pool_policy: Arc<dyn ProviderWebSocketPoolPolicyPort>,
     oauth_pending: Arc<dyn OAuthPendingFlowPort>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
+    quota_policy: Option<Arc<dyn quota_policy::QuotaPolicyStore>>,
 }
 
 impl ProviderStorePorts {
@@ -1358,7 +1360,18 @@ impl ProviderStorePorts {
             ws_pool_policy,
             oauth_pending,
             turn_state: None,
+            quota_policy: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_quota_policy(mut self, store: Arc<dyn quota_policy::QuotaPolicyStore>) -> Self {
+        self.quota_policy = Some(store);
+        self
+    }
+
+    pub fn quota_policy(&self) -> Option<Arc<dyn quota_policy::QuotaPolicyStore>> {
+        self.quota_policy.clone()
     }
 
     #[must_use]

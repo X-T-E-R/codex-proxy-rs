@@ -216,6 +216,11 @@ pub(super) fn account_quota_view(
             rate_limited_until,
             rate_limit_reason,
             recovery_probe_required,
+            credits: quota.credits.map(|credits| AccountQuotaCreditsView {
+                has_credits: credits.has_credits,
+                unlimited: credits.unlimited,
+                balance: credits.balance,
+            }),
             windows,
         },
         refresh_token_expires_at,

@@ -836,6 +836,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
             )
             .await
             .map(|result| ProviderResetCreditResult {
+                action_result: result.action_result.as_str().to_owned(),
                 code: result.code,
                 credit: result.credit.map(project_reset_credit),
             })
@@ -1108,6 +1109,7 @@ fn empty_quota() -> ProviderQuota {
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: Vec::new(),
         limit_reached: false,
         provider_data: None,
@@ -1169,6 +1171,13 @@ fn project_quota_snapshot(snapshot: CodexAccountQuotaSnapshot) -> ProviderQuota 
         plan_type: snapshot.plan_type().map(str::to_owned),
         observed_at: Some(DateTime::<Utc>::from(snapshot.observed_at())),
         refresh_token_expires_at: None,
+        credits: snapshot.credits().map(|credits| {
+            gateway_admin::model::provider_credentials::ProviderQuotaCredits {
+                has_credits: credits.has_credits,
+                unlimited: credits.unlimited,
+                balance: credits.balance.clone(),
+            }
+        }),
         windows,
         limit_reached,
         provider_data: Some(ProviderDocument::new(OpaqueProviderData::new(
@@ -1861,6 +1870,8 @@ fn map_reset_credits_error(error: CodexResetCreditsError) -> ProviderAdminError 
     use CodexResetCreditsError as Error;
 
     match error {
+        Error::Policy(gateway_core::provider_ports::quota_policy::QuotaPolicyError::Unavailable) => provider_admin_error(ProviderAdminErrorKind::Unavailable),
+        Error::Policy(_) => provider_admin_error(ProviderAdminErrorKind::Conflict).with_public_message("该账号已有未决重置，或额度策略已变化；请刷新后确认原操作"),
         Error::InvalidCredentialData => provider_admin_error(ProviderAdminErrorKind::Invalid),
         Error::NotFound => provider_admin_error(ProviderAdminErrorKind::NotFound),
         Error::Store { .. } | Error::TransportUnavailable => {

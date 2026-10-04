@@ -114,6 +114,7 @@ pub struct CodexAccountQuotaSnapshot {
     credential_revision: CredentialRevision,
     observed_at: SystemTime,
     plan_type: Option<String>,
+    credits: Option<gateway_protocol::openai::events::CreditsSnapshot>,
     fact: CodexQuotaFact,
     quota: QuotaState,
     windows: Vec<CodexQuotaWindow>,
@@ -140,6 +141,12 @@ impl CodexAccountQuotaSnapshot {
     #[must_use]
     pub fn plan_type(&self) -> Option<&str> {
         self.plan_type.as_deref()
+    }
+
+    /// 点数只用于展示，不改变额度访问事实。
+    #[must_use]
+    pub fn credits(&self) -> Option<&gateway_protocol::openai::events::CreditsSnapshot> {
+        self.credits.as_ref()
     }
 
     #[must_use]
@@ -206,7 +213,8 @@ fn parse_codex_quota_object(
         aggregate.observe_metadata_object(spend_control, "reached")?;
     }
     if let Some(credits) = object.get("credits") {
-        aggregate.observe_metadata_object(credits, "overage_limit_reached")?;
+        // 展示元数据形状错误不应丢弃有效窗口，也不能改变访问资格。
+        aggregate.recognized |= credits.is_object();
     }
     if !aggregate.recognized {
         return Err(CodexCredentialQuotaError::InvalidCredentialData);
@@ -350,6 +358,9 @@ pub(crate) fn parse_account_quota_snapshot(
             .get("plan_type")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        credits: object
+            .get("credits")
+            .and_then(gateway_protocol::openai::events::parse_credits_from_object),
         fact,
         quota,
         windows,

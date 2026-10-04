@@ -132,6 +132,7 @@ fn representative_quota_should_prefer_short_window_and_highest_usage() {
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![
             quota_window("monthly", Some(2_592_000), Some(99.0)),
             quota_window("shortTerm", Some(604_800), Some(80.0)),
@@ -153,6 +154,7 @@ fn representative_quota_should_prefer_account_wide_window_over_model_specific_wi
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![
             model_specific,
             quota_window("shortTerm", Some(604_800), Some(5.0)),
@@ -190,6 +192,7 @@ fn usage_window_should_not_use_daily_rolling_usage_for_weekly_statistics() {
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![ProviderQuotaWindow {
             key: "free-rolling-24h".to_owned(),
             group: "shortTerm".to_owned(),
@@ -218,6 +221,7 @@ fn exhausted_quota_should_project_full_usage_to_only_the_representative_window()
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![
             quota_window("monthly", Some(2_592_000), Some(99.0)),
             quota_window("shortTerm", Some(604_800), Some(80.0)),
@@ -246,6 +250,7 @@ fn exhausted_quota_should_preserve_the_provider_identified_reached_window() {
         plan_type: None,
         observed_at: None,
         refresh_token_expires_at: None,
+        credits: None,
         windows: vec![reached, quota_window("shortTerm", Some(18_000), Some(95.0))],
         limit_reached: true,
         provider_data: None,

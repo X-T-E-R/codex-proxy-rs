@@ -28,7 +28,14 @@ export interface AccountQuotaWindow {
   resetAtDisplay: string
 }
 
+export interface AccountQuotaCredits {
+  hasCredits: boolean
+  unlimited: boolean
+  balance: string | null
+}
+
 export interface AccountQuota {
+  credits: AccountQuotaCredits | null
   refreshedAtDisplay: string
   limitReached: boolean
   // 429 临时限流（Redis 冷却）到期时间；非限流中为 null。
@@ -289,9 +296,13 @@ export interface AccountResetCreditsResponse {
   credits: AccountResetCredit[]
 }
 
+// 服务持有幂等上下文，`actionResult` 是权威动作结果；`code` 只保留兼容文案。
+export type AccountResetActionResult = 'confirmed' | 'rejected' | 'unknown'
+
 export interface AccountResetCreditResultResponse {
   code: string
   credit: AccountResetCredit | null
+  actionResult: AccountResetActionResult
 }
 
 export interface AccountModelsResponse {

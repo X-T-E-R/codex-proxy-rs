@@ -85,6 +85,7 @@ mod client_keys;
 mod errors;
 mod observability;
 mod proxies;
+mod quota_policy;
 mod settings;
 mod system;
 mod wire;
@@ -162,7 +163,8 @@ impl AdminTestFixture {
             unused,
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
-        );
+        )
+        .with_quota_policy(Arc::new(quota_policy::MemoryPolicy::default()));
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new("openai", Arc::clone(&provider_error))),
             Arc::new(UnusedProvider::new("xai", Arc::clone(&provider_error))),

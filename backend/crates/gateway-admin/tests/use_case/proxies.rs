@@ -183,6 +183,7 @@ async fn linked_accounts_share_plan_resolution_and_only_read_cached_quota() {
             plan_type: cached.map(str::to_owned),
             observed_at: None,
             refresh_token_expires_at: None,
+            credits: None,
             windows: vec![],
             limit_reached: false,
             provider_data: None,

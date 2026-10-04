@@ -39,11 +39,30 @@ pub struct CodexRateLimitResetCredits {
     pub credits: Vec<CodexRateLimitResetCredit>,
 }
 
-/// 上游消费结果。`code` 的业务含义由调用方按官方状态机解释。
+/// Provider 根据幂等操作上下文确认的动作结果，未知不能转成新键消费。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexResetActionResult {
+    Confirmed,
+    Rejected,
+    Unknown,
+}
+
+impl CodexResetActionResult {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// 原始业务码保持兼容，权威结果由持有幂等上下文的服务填写。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexRateLimitResetCreditsConsumeResult {
     pub code: String,
     pub credit: Option<CodexRateLimitResetCredit>,
+    pub action_result: CodexResetActionResult,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +163,7 @@ impl CodexBackendClient {
         Ok(CodexRateLimitResetCreditsConsumeResult {
             code: required_text(wire.code, MAX_IDENTIFIER_BYTES, "reset-credit result code")?,
             credit: wire.credit.map(parse_credit).transpose()?,
+            action_result: CodexResetActionResult::Unknown,
         })
     }
 }

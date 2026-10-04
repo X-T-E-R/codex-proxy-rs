@@ -490,6 +490,7 @@ pub struct AdminStorePorts {
     settings: Arc<dyn SettingsStore>,
     backup: BackupStorePorts,
     turn_state: Option<Arc<dyn TurnStateStore>>,
+    quota_policy: Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>>,
 }
 
 impl AdminStorePorts {
@@ -510,7 +511,23 @@ impl AdminStorePorts {
             settings,
             backup,
             turn_state: None,
+            quota_policy: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_quota_policy(
+        mut self,
+        store: Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>,
+    ) -> Self {
+        self.quota_policy = Some(store);
+        self
+    }
+
+    pub fn quota_policy(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>> {
+        self.quota_policy.clone()
     }
 
     #[must_use]

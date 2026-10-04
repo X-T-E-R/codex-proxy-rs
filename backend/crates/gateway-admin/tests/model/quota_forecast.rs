@@ -59,6 +59,7 @@ fn quota(windows: Vec<ProviderQuotaWindow>) -> ProviderQuota {
         plan_type: None,
         observed_at: Some(now()),
         refresh_token_expires_at: None,
+        credits: None,
         windows,
         limit_reached: false,
         provider_data: None,

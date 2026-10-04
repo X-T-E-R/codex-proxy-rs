@@ -742,6 +742,14 @@ pub struct ProviderQuotaRequest {
     pub rolling_usage: Option<AccountUsage>,
 }
 
+/// 上游额外点数，仅供展示；余额保持十进制文本精度。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderQuotaCredits {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
+}
+
 /// Provider 已解析的 quota 结果及其不透明差异字段。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderQuota {
@@ -749,6 +757,7 @@ pub struct ProviderQuota {
     pub plan_type: Option<String>,
     pub observed_at: Option<DateTime<Utc>>,
     pub refresh_token_expires_at: Option<DateTime<Utc>>,
+    pub credits: Option<ProviderQuotaCredits>,
     pub windows: Vec<ProviderQuotaWindow>,
     /// 展示用快照级触顶事实（顶层或任一窗口触顶）；不参与账号五态派生。
     pub limit_reached: bool,
@@ -892,6 +901,7 @@ pub struct ConsumeProviderResetCredit {
 pub struct ProviderResetCreditResult {
     pub code: String,
     pub credit: Option<ProviderResetCredit>,
+    pub action_result: String,
 }
 
 impl ProviderQuota {

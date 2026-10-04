@@ -1,90 +1,254 @@
-name: Fork Image
+name: Quota Candidate Verification
 
-# 仅用于线上 2653 基线的线程隔离热修复；不覆盖 latest，不重建前端与运行时基础。
+# 专用分支覆盖既有 workflow id，便于 dispatch；不修改 main，也不覆盖 latest。
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-  packages: write
-
 concurrency:
-  group: cyber-thread-hotfix-${{ github.ref }}
+  group: quota-candidate-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  image:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RUST_MIN_STACK: 16777216
+      CARGO_BUILD_JOBS: 2
+      CARGO_TERM_COLOR: always
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
+        env:
+          POSTGRES_DB: codex_proxy
+          POSTGRES_USER: codex_proxy
+          POSTGRES_PASSWORD: codex_proxy
+          POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U codex_proxy -d codex_proxy"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+        ports: [6379:6379]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Record immutable input and verify frozen migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          git diff --name-only 99e0447d74dcc4ba4fdbe2b92a6ee708bcc8dea2 HEAD
+          git ls-files -z | xargs -0 sha256sum > source-manifest.sha256
+          sha256sum source-manifest.sha256
+          git diff --exit-code 99e0447d74dcc4ba4fdbe2b92a6ee708bcc8dea2 HEAD -- backend/Cargo.toml backend/Cargo.lock
+          python3 - <<'PY'
+          import pathlib, subprocess
+          base='99e0447d74dcc4ba4fdbe2b92a6ee708bcc8dea2'
+          old=subprocess.check_output(['git','ls-tree','-r','--name-only',base,'backend/migrations'],text=True).splitlines()
+          for p in old:
+              if p.endswith('.sql'):
+                  assert pathlib.Path(p).read_bytes()==subprocess.check_output(['git','show',f'{base}:{p}']),p
+          frozen=subprocess.check_output(['git','show',f'{base}:backend/migrations/.frozen-sha256']).splitlines()
+          current=pathlib.Path('backend/migrations/.frozen-sha256').read_bytes().splitlines()
+          assert current[:len(frozen)]==frozen,'old frozen entries changed'
+          additions=sorted(p.as_posix() for p in pathlib.Path('backend/migrations').glob('*.sql') if p.as_posix() not in old)
+          assert len(additions)==1 and pathlib.Path(additions[0]).name.startswith('0032_'),additions
+          PY
+          (cd backend/migrations && sha256sum --check --strict .frozen-sha256)
+      - name: Setup standard Rust
+        uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20
+        with:
+          toolchain: 1.97.1
+          components: rustfmt,clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: backend -> target
+          shared-key: quota-candidate-linux-1.97.1
+      - name: Configure isolated authenticated test services
+        shell: bash
+        run: |
+          set -euo pipefail
+          postgres_password="$(openssl rand -hex 24)"
+          redis_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$postgres_password"
+          echo "::add-mask::$redis_password"
+          docker exec --env PGPASSWORD=codex_proxy "${{ job.services.postgres.id }}" psql --username=codex_proxy --dbname=codex_proxy --set=ON_ERROR_STOP=1 --command="ALTER USER codex_proxy WITH PASSWORD '${postgres_password}'" >/dev/null
+          docker exec --env PGPASSWORD="$postgres_password" "${{ job.services.postgres.id }}" psql --username=codex_proxy --dbname=codex_proxy --set=ON_ERROR_STOP=1 --command='SELECT 1' >/dev/null
+          docker exec "${{ job.services.redis.id }}" redis-cli CONFIG SET requirepass "$redis_password" >/dev/null
+          docker exec --env REDISCLI_AUTH="$redis_password" "${{ job.services.redis.id }}" redis-cli ping >/dev/null
+          {
+            echo "CPR_TEST_DATABASE_URL=postgres://codex_proxy:${postgres_password}@127.0.0.1:5432/codex_proxy"
+            echo "CPR_TEST_REDIS_URL=redis://:${redis_password}@127.0.0.1:6379"
+          } >> "$GITHUB_ENV"
+      - name: Format and workspace library check
+        working-directory: backend
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked --workspace --lib
+      - name: Real PostgreSQL quota policy tests
+        working-directory: backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CPR_DATABASE_URL CPR_REDIS_URL CPR_DATABASE_PASSWORD CPR_REDIS_PASSWORD
+          test -n "$CPR_TEST_DATABASE_URL" && test -n "$CPR_TEST_REDIS_URL"
+          cargo test --locked -p gateway-store --test main postgres::quota_policy -- --nocapture 2>&1 | tee ../pg-quota-tests.log
+          grep -Eq 'test result: ok\. 7 passed; 0 failed; 0 ignored' ../pg-quota-tests.log
+      - name: Complete OpenAI provider tests including transport cases
+        working-directory: backend
+        run: cargo test --locked -p provider-openai --test main
+      - name: Workspace integration and architecture tests
+        working-directory: backend
+        run: cargo test --locked --workspace --test main
+      - name: Strict affected-crate Clippy
+        working-directory: backend
+        run: cargo clippy --locked -p gateway-core -p gateway-admin -p gateway-api -p gateway-store -p provider-openai --all-targets --all-features -- -D warnings
+      - name: Build production binary with pinned Bookworm toolchain
+        working-directory: backend
+        shell: bash
+        env:
+          CPR_GIT_SHA: ${{ github.sha }}
+          CPR_BUILD_TYPE: release
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cargo" ../quota-binary
+          docker run --rm --init --platform linux/amd64 \
+            --user "$(id -u):$(id -g)" \
+            -e CARGO_HOME=/cargo -e HOME=/tmp \
+            -e CARGO_TARGET_DIR=/workspace/backend/target-bookworm \
+            -e CARGO_BUILD_JOBS=2 -e RUST_MIN_STACK=16777216 \
+            -e CPR_GIT_SHA -e CPR_BUILD_TYPE \
+            -v "$HOME/.cargo:/cargo" -v "$PWD/..:/workspace" \
+            -w /workspace/backend \
+            rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa \
+            sh -eu -c 'rustc --version; cargo --version; cargo build --release --locked --target x86_64-unknown-linux-gnu --bin codex-proxy-rs'
+          cp target-bookworm/x86_64-unknown-linux-gnu/release/codex-proxy-rs ../quota-binary/
+          sha256sum ../quota-binary/codex-proxy-rs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: quota-linux-binary
+          path: quota-binary/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: quota-validation-input
+          path: |
+            source-manifest.sha256
+            pg-quota-tests.log
+
+  frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      REGISTRY: ghcr.io
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Derive lowercase image name
-        shell: bash
-        run: echo "IMAGE_NAME=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
-
-      - name: Login to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:
-          registry: ${{ env.REGISTRY }}
+          version: 11.7.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 26
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm --dir frontend install --frozen-lockfile
+      - run: pnpm --dir frontend format:check
+      - run: pnpm --dir frontend build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: quota-frontend-dist
+          path: frontend/dist/
+          if-no-files-found: error
+
+  image:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: quota-linux-binary
+          path: quota-image/bin
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: quota-frontend-dist
+          path: quota-image/web/dist
+      - name: Prepare exact-baseline runtime image
+        shell: bash
+        run: |
+          printf 'IMAGE_NAME=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          git ls-files -z | xargs -0 sha256sum > quota-image/source-manifest.sha256
+          # Artifact download does not preserve the executable mode.
+          chmod 0755 quota-image/bin/codex-proxy-rs
+          cat > quota-image/Dockerfile <<'DOCKERFILE'
+          FROM ghcr.io/x-t-e-r/codex-proxy-rs@sha256:16d8a694328e2322f3538acb6fc237e38bf23569b31dbc9ca89f6171cf42e6e5
+          ARG CPR_GIT_SHA
+          LABEL org.opencontainers.image.revision=${CPR_GIT_SHA} cpr.candidate.baseline=99e0447d74dcc4ba4fdbe2b92a6ee708bcc8dea2 cpr.candidate.scope=credits-quota-window-policy
+          USER root
+          RUN rm -rf /app/web/dist && install -d -o 10001 -g 10001 /app/web/dist
+          COPY --chown=10001:10001 bin/codex-proxy-rs /app/bin/codex-proxy-rs
+          COPY --chown=10001:10001 web/dist /app/web/dist
+          COPY --chown=10001:10001 source-manifest.sha256 /app/bin/quota-source-manifest.sha256
+          USER 10001:10001
+          DOCKERFILE
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Prepare baseline-only backend patch build
-        shell: bash
-        run: |
-          sha256sum backend/crates/gateway-core/src/policy/cyber_session.rs backend/crates/gateway-api/src/openai/responses/request.rs
-          cat > /tmp/cpr-hotfix.Dockerfile <<'DOCKERFILE'
-          # syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
-          FROM rust:1.98-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS backend-builder
-          WORKDIR /app/backend
-          ARG CPR_GIT_SHA
-          ENV CPR_GIT_SHA=${CPR_GIT_SHA} CPR_BUILD_TYPE=release RUST_MIN_STACK=16777216 CARGO_TARGET_DIR=/app/backend/target/amd64
-          COPY backend/Cargo.toml backend/Cargo.lock ./
-          COPY backend/apps ./apps
-          COPY backend/crates ./crates
-          COPY backend/migrations ./migrations
-          COPY release/version.yaml /app/release/version.yaml
-          RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/usr/local/cargo/git --mount=type=cache,target=/app/backend/target \
-              rustc --version && rustup component add rustfmt && cargo fmt --all -- --check \
-              && cargo test --locked -p gateway-core --test main policy::cyber_session \
-              && cargo test --locked -p gateway-core --test main engine::execution \
-              && cargo test --locked -p gateway-api --test main openai::responses::request \
-              && cargo test --locked -p gateway-store --test main --no-run \
-              && cargo build --release --locked --bin codex-proxy-rs \
-              && cp "${CARGO_TARGET_DIR}/release/codex-proxy-rs" /tmp/codex-proxy-rs \
-              && sha256sum /tmp/codex-proxy-rs
-          FROM ghcr.io/x-t-e-r/codex-proxy-rs@sha256:a6016c1846f9b45b4b2fe390114165cbae0975dc2302049b9ac12edb5b539c01 AS runtime
-          ARG CPR_GIT_SHA
-          LABEL org.opencontainers.image.revision=${CPR_GIT_SHA} cpr.hotfix.baseline=2653ae2779b962320376ae89312f37ad9403614f cpr.hotfix.scope=cyber-thread-isolation
-          COPY --from=backend-builder --chown=10001:10001 /tmp/codex-proxy-rs /app/bin/codex-proxy-rs
-          DOCKERFILE
-
-      - name: Test, build and push immutable hotfix image
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      - name: Load candidate without publishing
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
         with:
-          context: .
-          file: /tmp/cpr-hotfix.Dockerfile
-          target: runtime
-          push: true
-          cache-from: type=gha,scope=fork-runtime
-          cache-to: type=gha,mode=max,scope=cyber-thread-2653
-          build-args: |
-            CPR_GIT_SHA=${{ github.sha }}
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-
-      - name: Record exact image identity
-        env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          context: quota-image
+          file: quota-image/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          build-args: CPR_GIT_SHA=${{ github.sha }}
+          tags: ghcr.io/${{ env.IMAGE_NAME }}:quota-sha-${{ github.sha }}
+      - name: Gate new binary in exact production runtime
         shell: bash
         run: |
-          echo "${REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "Source: $GITHUB_SHA; baseline: 2653ae2779b962320376ae89312f37ad9403614f" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          image="ghcr.io/${IMAGE_NAME}:quota-sha-${GITHUB_SHA}"
+          expected="$(sha256sum quota-image/bin/codex-proxy-rs | cut -d ' ' -f 1)"
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --entrypoint /bin/sh \
+            -e EXPECTED_BINARY_SHA="$expected" "$image" -eu -c '
+              actual="$(sha256sum /app/bin/codex-proxy-rs | cut -d " " -f 1)"
+              test "$actual" = "$EXPECTED_BINARY_SHA"
+              deps="$(ldd /app/bin/codex-proxy-rs 2>&1)"
+              printf "%s\n" "$deps"
+              if printf "%s\n" "$deps" | grep -q "not found"; then exit 1; fi
+              set +e
+              output="$(/app/bin/codex-proxy-rs --help 2>&1)"
+              status=$?
+              set -e
+              printf "%s\n" "$output"
+              # Current CLI has only serve. Exit 1 is expected, after ELF/CLI loading,
+              # before config, migration, database or upstream access.
+              test "$status" -eq 1
+              printf "%s\n" "$output" | grep -F "unknown command" >/dev/null
+              printf "%s\n" "$output" | grep -F "expected serve" >/dev/null
+            '
+          printf 'Runtime gate passed; binary SHA256 %s; source %s\n' "$expected" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish tested immutable candidate only
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${IMAGE_NAME}:quota-sha-${GITHUB_SHA}"
+          docker push "$image"
+          digest="$(docker buildx imagetools inspect "$image" --format '{{ .Manifest.Digest }}')"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf '%s@%s; source %s\n' "ghcr.io/${IMAGE_NAME}" "$digest" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"

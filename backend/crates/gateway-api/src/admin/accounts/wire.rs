@@ -908,7 +908,17 @@ pub struct AccountQuotaView {
     pub rate_limited_until: Option<String>,
     pub rate_limit_reason: Option<String>,
     pub recovery_probe_required: bool,
+    pub credits: Option<AccountQuotaCreditsView>,
     pub windows: Vec<AccountQuotaWindowView>,
+}
+
+/// 额外点数不等于主动重置卡数量，也不代表美元余额。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountQuotaCreditsView {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
 }
 
 /// 一个 quota 时间窗口。
@@ -1429,6 +1439,7 @@ pub struct AccountResetCreditView {
 pub struct AccountResetCreditResultData {
     pub code: String,
     pub credit: Option<AccountResetCreditView>,
+    pub action_result: String,
 }
 
 impl From<ProviderResetCredit> for AccountResetCreditView {
@@ -1461,6 +1472,7 @@ impl From<ProviderResetCreditResult> for AccountResetCreditResultData {
         Self {
             code: result.code,
             credit: result.credit.map(AccountResetCreditView::from),
+            action_result: result.action_result,
         }
     }
 }

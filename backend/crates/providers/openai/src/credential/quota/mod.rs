@@ -7,6 +7,7 @@
 
 mod document;
 pub(crate) mod evidence;
+mod policy;
 mod recovery;
 pub(crate) mod snapshot;
 
@@ -145,6 +146,8 @@ pub enum CodexResetCreditsError {
     TransportUnavailable,
     #[error("Codex reset-credit consume result is unknown")]
     ConsumeResultUnknown,
+    #[error(transparent)]
+    Policy(gateway_core::provider_ports::quota_policy::QuotaPolicyError),
 }
 
 impl std::fmt::Debug for CodexResetCreditsError {
@@ -168,6 +171,7 @@ impl std::fmt::Debug for CodexResetCreditsError {
                 .finish(),
             Self::TransportUnavailable => formatter.write_str("TransportUnavailable"),
             Self::ConsumeResultUnknown => formatter.write_str("ConsumeResultUnknown"),
+            Self::Policy(error) => formatter.debug_tuple("Policy").field(error).finish(),
         }
     }
 }
@@ -193,6 +197,8 @@ pub struct CodexCredentialQuotaService {
     freeze_policy_cache: Mutex<Option<(ProviderFreezePolicy, Instant)>>,
     scheduling: CodexQuotaSchedulingProjection,
     reset_consume_locks: Mutex<HashMap<ProviderAccountId, Arc<Mutex<()>>>>,
+    quota_policy: Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>>,
+    policy_refreshes: Mutex<HashMap<ProviderAccountId, Instant>>,
 }
 
 /// 冻结策略缓存活跃期；过期后下一次容量错误重新读取运行时设置。
@@ -530,6 +536,8 @@ impl CodexCredentialQuotaService {
             freeze_policy_cache: Mutex::new(None),
             scheduling: CodexQuotaSchedulingProjection::default(),
             reset_consume_locks: Mutex::new(HashMap::new()),
+            quota_policy: None,
+            policy_refreshes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -650,7 +658,31 @@ impl CodexCredentialQuotaService {
             )
         };
         let _guard = lock.lock().await;
+        if let Some(result) = self
+            .terminal_manual_reset(account_id, credit_id, redeem_request_id)
+            .await?
+        {
+            return Ok(result);
+        }
         let account = self.reset_credit_account(account_id).await?;
+        if self.quota_policy.is_some() {
+            return self
+                .perform_reset(
+                    gateway_core::provider_ports::quota_policy::ResetOperation {
+                        id: redeem_request_id.to_string(),
+                        account_id: account_id.as_str().to_owned(),
+                        credential_revision: account.revision().get(),
+                        credit_id: credit_id.map(str::to_owned),
+                        automatic: false,
+                        episode: None,
+                        trigger_percent: None,
+                        state: "pending".to_owned(),
+                        result_code: None,
+                    },
+                    &gateway_core::lifecycle::CancellationToken::new(),
+                )
+                .await;
+        }
         let client = CodexBackendClient::new(
             self.http.clone(),
             self.base_url.clone(),
@@ -674,6 +706,14 @@ impl CodexCredentialQuotaService {
             redeem_request_id,
         )
         .await
+        .map(|mut result| {
+            result.action_result = if result.code == "reset" {
+                crate::transport::reset_credits::CodexResetActionResult::Confirmed
+            } else {
+                crate::transport::reset_credits::CodexResetActionResult::Unknown
+            };
+            result
+        })
         .map_err(|error| map_reset_credit_attempt_error(error, true))
     }
 
@@ -799,6 +839,16 @@ impl CodexCredentialQuotaService {
     }
 
     pub async fn synchronize(&self) -> Result<CodexQuotaSyncSummary, CodexCredentialQuotaError> {
+        self.synchronize_with_cancellation(&gateway_core::lifecycle::CancellationToken::new())
+            .await
+    }
+
+    /// Host lease 丢失通过 cancellation 阻止新的不可逆发送。
+    pub async fn synchronize_with_cancellation(
+        &self,
+        cancellation: &gateway_core::lifecycle::CancellationToken,
+    ) -> Result<CodexQuotaSyncSummary, CodexCredentialQuotaError> {
+        self.synchronize_policy(cancellation).await;
         let mut accounts = self.repository.list_for_provider().await?;
         accounts.retain(|account| {
             account.authentication_kind() == crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH

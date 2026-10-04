@@ -188,10 +188,14 @@ export function useAccountResetCredits(options: {
         creditId: operation.creditId,
         redeemRequestId: operation.redeemRequestId,
       }, { silent: true })
-      const confirmed = result.code === 'reset'
-        || (result.code === 'already_redeemed' && operation.hasTransportFailure)
+      // 结果未知时保留同一幂等键继续确认，不新建消费操作。
+      if (result.actionResult === 'unknown') {
+        target.pendingOperation = { ...operation, hasTransportFailure: true }
+        toast.warning('消费结果暂不确定，重试会复用同一个请求标识', { duration: 5000 })
+        return false
+      }
       target.pendingOperation = null
-      if (!confirmed) {
+      if (result.actionResult === 'rejected') {
         toast.error(resetResultMessage(result.code))
         await loadSessionCredits(target, true)
         return false
