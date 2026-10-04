@@ -354,13 +354,14 @@ async fn concurrency_queue_settings_round_trip_into_the_runtime_snapshot() {
     };
     let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
     let before = repository.load_runtime_settings().await.unwrap();
+    // 完整迁移包含 0031：保留旧 fork 的排队行为，上限 1000，沿用 0019 的 60 秒超时。
     assert_eq!(
         (
             before.max_waiting_per_key,
             before.max_waiting_per_account,
             before.concurrency_wait_timeout_seconds
         ),
-        (0, 0, 30)
+        (1000, 1000, 60)
     );
     let mut update = settings_with_margin(3600);
     update.max_waiting_per_key = 5;

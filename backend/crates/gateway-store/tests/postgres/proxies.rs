@@ -894,9 +894,11 @@ async fn migration_backfills_shared_proxies_without_changing_credentials() {
             .await
             .unwrap();
     }
+    // 重播 0025 前同时撤销代理与全局位置字段，恢复该迁移的输入 schema。
     sqlx::raw_sql("drop table openai_account_turn_state_policies;
         drop table openai_model_turn_states;
         alter table provider_accounts drop column outbound_proxy_id; drop table outbound_proxies;
+        alter table runtime_settings drop column request_location_enabled, drop column request_location_json;
         update provider_accounts set outbound_proxy_url = 'http://user:secret@127.0.0.1:8080/' where id <> 'acct_direct';")
         .execute(&database.pool).await.unwrap();
     sqlx::raw_sql(include_str!(

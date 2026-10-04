@@ -1,10 +1,11 @@
-name: Quota Candidate Verification
+name: Quota Candidate Delta Verification
 
-# 专用分支覆盖既有 workflow id，便于 dispatch；不修改 main，也不覆盖 latest。
+# 独立验证分支。复用已绑定源码的绿灯，不覆盖 main/latest。
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: quota-candidate-${{ github.ref }}
   cancel-in-progress: false
@@ -39,29 +40,42 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - name: Record immutable input and verify frozen migrations
+      - name: Download immutable previous validation manifest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: quota-validation-input
+          path: previous-validation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 37239982515
+      - name: Bind reusable evidence to unchanged production inputs
         shell: bash
         run: |
           set -euo pipefail
           git rev-parse HEAD
-          git diff --name-only 99e0447d74dcc4ba4fdbe2b92a6ee708bcc8dea2 HEAD
           git ls-files -z | xargs -0 sha256sum > source-manifest.sha256
-          sha256sum source-manifest.sha256
-          git diff --exit-code 99e0447d74dcc4ba4fdbe2b92a6ee708bcc8dea2 HEAD -- backend/Cargo.toml backend/Cargo.lock
           python3 - <<'PY'
-          import pathlib, subprocess
+          import hashlib, pathlib, subprocess
+          prior=pathlib.Path('previous-validation/source-manifest.sha256').read_bytes()
+          assert hashlib.sha256(prior).hexdigest()=='bb9edb67980a17e55d3425dc26043e34fb43c30973681d903fe4947dbcb17389'
+          def records(raw):
+              return dict((path, digest) for digest,path in (line.split('  ',1) for line in raw.decode().splitlines()))
+          old=records(prior)
+          current=records(pathlib.Path('source-manifest.sha256').read_bytes())
+          allowed={'.github/workflows/fork-image.yml', 'backend/crates/gateway-store/tests/postgres/mod.rs', 'backend/crates/gateway-store/tests/postgres/proxies.rs', 'backend/crates/gateway-store/tests/postgres/runtime_settings.rs'}
+          assert old.keys()==current.keys(),'new/deleted tracked input invalidates reuse'
+          changed={path for path in old if old[path]!=current[path]}
+          assert changed==allowed,changed
+          assert subprocess.check_output(['git','rev-parse','HEAD^'],text=True).strip()=='259a2f8bc61d2e6b8d1a55a791991f5bb78634b2'
           base='99e0447d74dcc4ba4fdbe2b92a6ee708bcc8dea2'
-          old=subprocess.check_output(['git','ls-tree','-r','--name-only',base,'backend/migrations'],text=True).splitlines()
-          for p in old:
-              if p.endswith('.sql'):
-                  assert pathlib.Path(p).read_bytes()==subprocess.check_output(['git','show',f'{base}:{p}']),p
-          frozen=subprocess.check_output(['git','show',f'{base}:backend/migrations/.frozen-sha256']).splitlines()
-          current=pathlib.Path('backend/migrations/.frozen-sha256').read_bytes().splitlines()
-          assert current[:len(frozen)]==frozen,'old frozen entries changed'
-          additions=sorted(p.as_posix() for p in pathlib.Path('backend/migrations').glob('*.sql') if p.as_posix() not in old)
-          assert len(additions)==1 and pathlib.Path(additions[0]).name.startswith('0032_'),additions
+          paths=subprocess.check_output(['git','ls-tree','-r','--name-only',base,'backend/migrations'],text=True).splitlines()
+          for path in paths:
+              if path.endswith('.sql'):
+                  assert pathlib.Path(path).read_bytes()==subprocess.check_output(['git','show',f'{base}:{path}']),path
+          assert hashlib.sha256(pathlib.Path('backend/migrations/0032_quota_policy.sql').read_bytes()).hexdigest()=='497f22c4af0586aca9f8dc4eb5d6a6d667ae8fcfa0063cbba102458c89d87fb4'
           PY
           (cd backend/migrations && sha256sum --check --strict .frozen-sha256)
+          printf 'Reuse run37239982515/source259a2f8: PG7, Provider789 including4 transport cases, App42/Admin192/API421/Core394/Host97/Protocol64 and frontend lint/build. Only3 Store test files plus workflow differ; no production source or frontend changes. This run verifies the delta, not repeats those results.\n' >> "$GITHUB_STEP_SUMMARY"
       - name: Setup standard Rust
         uses: dtolnay/rust-toolchain@1a3a6d54512beeaffd394f8d516ca16f2c506a20
         with:
@@ -87,26 +101,16 @@ jobs:
             echo "CPR_TEST_DATABASE_URL=postgres://codex_proxy:${postgres_password}@127.0.0.1:5432/codex_proxy"
             echo "CPR_TEST_REDIS_URL=redis://:${redis_password}@127.0.0.1:6379"
           } >> "$GITHUB_ENV"
-      - name: Format and workspace library check
-        working-directory: backend
-        run: |
-          cargo fmt --all -- --check
-          cargo check --locked --workspace --lib
-      - name: Real PostgreSQL quota policy tests
+      - name: Format and complete affected Store tests
         working-directory: backend
         shell: bash
         run: |
           set -euo pipefail
           unset CPR_DATABASE_URL CPR_REDIS_URL CPR_DATABASE_PASSWORD CPR_REDIS_PASSWORD
           test -n "$CPR_TEST_DATABASE_URL" && test -n "$CPR_TEST_REDIS_URL"
-          cargo test --locked -p gateway-store --test main postgres::quota_policy -- --nocapture 2>&1 | tee ../pg-quota-tests.log
-          grep -Eq 'test result: ok\. 7 passed; 0 failed; 0 ignored' ../pg-quota-tests.log
-      - name: Complete OpenAI provider tests including transport cases
-        working-directory: backend
-        run: cargo test --locked -p provider-openai --test main
-      - name: Workspace integration and architecture tests
-        working-directory: backend
-        run: cargo test --locked --workspace --test main
+          cargo fmt --all -- --check
+          cargo test --locked -p gateway-store --test main 2>&1 | tee ../store-tests.log
+          grep -Eq 'test result: ok\. 278 passed; 0 failed; 0 ignored' ../store-tests.log
       - name: Strict affected-crate Clippy
         working-directory: backend
         run: cargo clippy --locked -p gateway-core -p gateway-admin -p gateway-api -p gateway-store -p provider-openai --all-targets --all-features -- -D warnings
@@ -142,28 +146,35 @@ jobs:
           name: quota-validation-input
           path: |
             source-manifest.sha256
-            pg-quota-tests.log
+            store-tests.log
 
   frontend:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - name: Reuse verified frontend artifact without rebuilding
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          version: 11.7.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: 26
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-      - run: pnpm --dir frontend install --frozen-lockfile
-      - run: pnpm --dir frontend format:check
-      - run: pnpm --dir frontend build
+          name: quota-frontend-dist
+          path: frontend-dist
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 37239982515
+      - name: Verify exact frontend bytes and record reuse
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          root=pathlib.Path('frontend-dist')
+          rows=sorted([{'path':p.relative_to(root).as_posix(),'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'bytes':p.stat().st_size} for p in root.rglob('*') if p.is_file()],key=lambda row:row['path'])
+          assert len(rows)==109
+          assert hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest()=='1b19d6776dd7a0942d4520ced0e9176cdf060b1ec7b8586dd8a0718a002e4d8a'
+          PY
+          printf 'Frontend109files reused from successful lint/build in run37239982515; POSIX-lexical manifest SHA1b19d6776dd7a0942d4520ced0e9176cdf060b1ec7b8586dd8a0718a002e4d8a. Backend guard verifies no frontend source change.\n' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: quota-frontend-dist
-          path: frontend/dist/
+          path: frontend-dist/
           if-no-files-found: error
 
   image:
@@ -188,7 +199,6 @@ jobs:
         run: |
           printf 'IMAGE_NAME=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
           git ls-files -z | xargs -0 sha256sum > quota-image/source-manifest.sha256
-          # Artifact download does not preserve the executable mode.
           chmod 0755 quota-image/bin/codex-proxy-rs
           cat > quota-image/Dockerfile <<'DOCKERFILE'
           FROM ghcr.io/x-t-e-r/codex-proxy-rs@sha256:16d8a694328e2322f3538acb6fc237e38bf23569b31dbc9ca89f6171cf42e6e5
@@ -236,13 +246,12 @@ jobs:
               status=$?
               set -e
               printf "%s\n" "$output"
-              # Current CLI has only serve. Exit 1 is expected, after ELF/CLI loading,
-              # before config, migration, database or upstream access.
+              # CLI supports serve only. This proves ELF/CLI loading, not TLS or serving.
               test "$status" -eq 1
               printf "%s\n" "$output" | grep -F "unknown command" >/dev/null
               printf "%s\n" "$output" | grep -F "expected serve" >/dev/null
             '
-          printf 'Runtime gate passed; binary SHA256 %s; source %s\n' "$expected" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Runtime loading gate passed; binary SHA256%s; source%s\n' "$expected" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
       - name: Publish tested immutable candidate only
         shell: bash
         run: |
@@ -251,4 +260,4 @@ jobs:
           docker push "$image"
           digest="$(docker buildx imagetools inspect "$image" --format '{{ .Manifest.Digest }}')"
           [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          printf '%s@%s; source %s\n' "ghcr.io/${IMAGE_NAME}" "$digest" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s@%s; source%s\n' "ghcr.io/${IMAGE_NAME}" "$digest" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
