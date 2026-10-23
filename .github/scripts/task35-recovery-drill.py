@@ -35,12 +35,20 @@ def query(text, schema=source, database="codex_proxy"):
     return json.loads(sql("select coalesce(jsonb_agg(to_jsonb(q)),'[]'::jsonb) from (" + text + ") q;", schema, database).splitlines()[-1])
 
 
+migration_receipts = []
+phases = {}
+
+
 def apply(schema, files):
     for path in files:
         version = int(path.name[:4])
         checksum = hashlib.sha384(path.read_bytes()).hexdigest()  # sqlx migration identity is SHA-384
-        sql("begin;\n" + path.read_text(encoding="utf-8") +
-            f"\ninsert into _sqlx_migrations(version,description,checksum,execution_time) values({version},'{path.stem}',decode('{checksum}','hex'),0);\ncommit;", schema)
+        began = time.monotonic()
+        output = sql("begin; set local lock_timeout='1500ms'; set local statement_timeout='180s';\n" + path.read_text(encoding="utf-8") +
+            f"\ninsert into _sqlx_migrations(version,description,checksum,execution_time) values({version},'{path.stem}',decode('{checksum}','hex'),0);\n" +
+            "select 'TASK35_LOCKS '||coalesce(jsonb_agg(to_jsonb(q)),'[]'::jsonb)::text from (select c.relname relation,l.mode from pg_locks l join pg_class c on c.oid=l.relation join pg_namespace n on n.oid=c.relnamespace where l.pid=pg_backend_pid() and n.nspname=current_schema() and l.granted group by c.relname,l.mode)q;\ncommit;", schema)
+        locks = json.loads(next(line.removeprefix('TASK35_LOCKS ') for line in output.splitlines() if line.startswith('TASK35_LOCKS ')))
+        migration_receipts.append({"schema":schema,"version":version,"file":path.name,"transaction_seconds":round(time.monotonic()-began,3),"lock_wait_limit_ms":1500,"locks_held_before_commit":locks})
 
 
 for schema in [source, target, archive]:
@@ -66,13 +74,42 @@ values('req_before','key_bridge',1,'openai','responses','/v1/responses','http_ss
 insert into ops_events(id,model_request_id,attempt_index,level,component,operation,failure_kind,message,created_at)
 values('event_before','req_before',1,'error','synthetic','responses','provider_infrastructure_unavailable','synthetic',now()-interval '40 days');
 """, source)
+# 只使用合成宽值模拟父提供的行数与物理量级，不携带真实请求或凭据
+phases["old_schema_and_seed_seconds"] = round(time.monotonic()-started,3)
+began = time.monotonic()
+sql("""
+alter table model_requests alter column provider_observation_json set storage external;
+with padding as materialized (select jsonb_build_object('syntheticPadding',string_agg(md5(n::text),'')) payload from generate_series(1,576)n)
+insert into model_requests select cloned.* from model_requests original cross join generate_series(1,57744)n cross join padding
+cross join lateral jsonb_populate_record(null::model_requests,to_jsonb(original)||jsonb_build_object(
+'id','req_scale_'||lpad(n::text,6,'0'),'provider_observation_json',payload,
+'started_at',now()-interval '1 day'+n*interval '1 second','deadline_at',now()+interval '1 hour',
+'completed_at',now()-interval '1 day'+n*interval '1 second'+interval '1 minute',
+'outcome',case when n%100=0 then 'failed' else 'succeeded' end,
+'client_status_code',case when n%100=0 then 503 else 200 end,
+'error_kind',case when n%100=0 then 'provider_infrastructure_unavailable' else null end,
+'provider_error_code',case when n%100=0 then 'infrastructure_unavailable' else null end,
+'error_message',case when n%100=0 then 'synthetic old failure' else null end)) cloned where original.id='req_before';
+with padding as materialized (select string_agg(md5(n::text),'') value from generate_series(1,40)n)
+insert into request_turn_state_observations(request_id,attempt_index,observation_id,value,observed_at,source)
+select 'req_scale_'||lpad(((n-1)%57744+1)::text,6,'0'),((n-1)/57744+1)::integer,'obs_'||n,p.value,now(),'http'
+from generate_series(1,605149)n cross join padding p;
+with padding as materialized (select string_agg(md5(n::text),'') value from generate_series(1,37)n)
+insert into client_key_charge_events(request_id,client_api_key_id,completed_at,amount_usd)
+select 'ledger_'||n||'_'||p.value,'key_bridge',now(),0 from generate_series(1,54894)n cross join padding p;
+analyze model_requests; analyze request_turn_state_observations; analyze client_key_charge_events;
+""", source)
+phases["scale_seed_seconds"] = round(time.monotonic()-began,3)
+shape = query("select c.relname table_name,c.reltuples::bigint estimated_rows,pg_total_relation_size(c.oid) physical_bytes from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname=current_schema() and c.relname in ('model_requests','request_turn_state_observations','client_key_charge_events')")
 old_tables = query("select tablename from pg_tables where schemaname=current_schema() and tablename<>'_sqlx_migrations'")
 sql(f'create table "{archive}".before_runtime_settings as table "{source}".runtime_settings;')
+began = time.monotonic()
 apply(source, [p for p in migrations if int(p.name[:4]) > 32])
-upgrade_seconds = time.monotonic() - started
+upgrade_seconds = time.monotonic()-began
+phases["upgrade_32_to_52_seconds"] = round(upgrade_seconds,3)
 assert query("select credential_revision from provider_accounts where id='acct_bridge'")[0]["credential_revision"] == 1
 assert query("select provider_error_code from model_request_observations where id='req_before'")[0]["provider_error_code"] == "infrastructure_unavailable"
-assert query("select request_id from upgrade_retention_protected_requests")[0]["request_id"] == "req_before"
+assert query("select request_id from upgrade_retention_protected_requests where request_id='req_before'")[0]["request_id"] == "req_before"
 sql("""
 update provider_accounts set credential_revision=2,updated_at=now() where id='acct_bridge';
 update codex_quota_policy_accounts set revision=4 where account_id='acct_bridge';
@@ -86,12 +123,15 @@ values('req_after','key_bridge','responses','http_sse','openai','acct_bridge','h
 """, source)
 # The same predicate as the real retention adapter protects the old failed request and its event
 sql("delete from model_requests where outcome<>'running' and not exists(select 1 from upgrade_retention_protected_requests p where p.request_id=model_requests.id) and completed_at<now()-interval '31 days';", source)
-assert query("select id from model_requests order by id") == [{"id":"req_after"},{"id":"req_before"}]
+assert query("select count(*) n from model_requests")[0]["n"] == 57746
 assert query("select id from ops_events")[0]["id"] == "event_before"
-# Archive every new-version table before projecting the compatible fields into a fresh old schema
+# 源库无其他 writer；正式恢复必须在停写边界执行，不能逐表复制并发变化的账本
+began = time.monotonic()
 for row in query("select tablename from pg_tables where schemaname=current_schema()"):
     table = row["tablename"]
     sql(f'create table "{archive}"."{table}" as table "{source}"."{table}";')
+phases["archive_seconds"] = round(time.monotonic()-began,3)
+began = time.monotonic()
 apply(target, [p for p in migrations if int(p.name[:4]) <= 32])
 tables = [row["tablename"] for row in old_tables]
 sql("truncate " + ",".join('"'+t+'"' for t in tables) + " cascade;", target)
@@ -135,26 +175,52 @@ assert query("select count(*) n from _sqlx_migrations", target)[0]["n"] == 32
 assert query("select credential_revision from provider_accounts where id='acct_bridge'", target)[0]["credential_revision"] == 2
 assert query("select revision from codex_quota_policy_accounts where account_id='acct_bridge'", target)[0]["revision"] == 4
 assert query("select sum(amount_usd)::text amount from client_key_charge_events", target)[0]["amount"] == "0.3000000000"
-assert query("select id,protocol,endpoint from model_requests order by id", target) == [{"id":"req_after","protocol":"openai","endpoint":"/v1/responses"},{"id":"req_before","protocol":"openai","endpoint":"/v1/responses"}]
+phases["reverse_bridge_and_comparison_seconds"] = round(time.monotonic()-began,3)
+assert query("select id,protocol,endpoint from model_requests where id in ('req_after','req_before') order by id", target) == [{"id":"req_after","protocol":"openai","endpoint":"/v1/responses"},{"id":"req_before","protocol":"openai","endpoint":"/v1/responses"}]
+assert counts["model_requests"] == 57746
+assert counts["request_turn_state_observations"] == 605149
+assert counts["client_key_charge_events"] == 54896
 assert query("select count(*) n from codex_reset_operations", target)[0]["n"] == 1
 assert query("select mode from codex_priority_accounts", archive)[0]["mode"] == "disabled"
 # 保存实际可独立还原的归档，再向另一数据库还原，不能把同库投影当作备份恢复
 recovery_database = prefix + "_restored"
 docker = ["docker", "exec", "-i", "--env", "PGPASSWORD=codex_proxy", args.container]
+began = time.monotonic()
 dump = subprocess.run(docker + ["pg_dump", "-U", "codex_proxy", "-d", "codex_proxy", "-Fc", "--no-owner", "--schema", target, "--schema", archive], capture_output=True, check=True).stdout
 dump_path = args.artifacts / "synthetic-recovery.dump"
 dump_path.write_bytes(dump)
+phases["dump_seconds"] = round(time.monotonic()-began,3)
 sql(f'create database "{recovery_database}";')
+began = time.monotonic()
 subprocess.run(docker + ["pg_restore", "-U", "codex_proxy", "-d", recovery_database, "--exit-on-error", "--no-owner"], input=dump, capture_output=True, check=True)
+phases["independent_restore_seconds"] = round(time.monotonic()-began,3)
+# 按原主键排序流式比较全部值，不把 GiB 级表聚合进单个 JSON 或重复计算摘要
+began = time.monotonic()
 restored_tables = {}
 for schema in [target, archive]:
     rows = query("select tablename from pg_tables where schemaname=current_schema()", schema)
     for row in rows:
         table = row["tablename"]
-        expected = query(f'select * from "{table}"', schema)
-        restored = query(f'select * from "{table}"', schema, recovery_database)
-        assert sorted(expected, key=lambda v: json.dumps(v, sort_keys=True)) == sorted(restored, key=lambda v: json.dumps(v, sort_keys=True)), (schema, table)
-        restored_tables[schema + "." + table] = len(restored)
+        key_schema = source if schema == archive else target
+        keys = [] if table == 'before_runtime_settings' else query(f"select a.attname from pg_index i cross join lateral unnest(i.indkey) with ordinality k(num,position) join pg_attribute a on a.attrelid=i.indrelid and a.attnum=k.num where i.indrelid='\"{key_schema}\".\"{table}\"'::regclass and i.indisprimary order by k.position", key_schema)
+        order = ','.join('t.\"'+key['attname']+'\"' for key in keys) if keys else 'to_jsonb(t)::text'
+        copy = f'copy (select row_to_json(t)::text from "{schema}"."{table}" t order by {order}) to stdout'
+        streams = []
+        for database in ['codex_proxy', recovery_database]:
+            selected = command.copy()
+            selected[selected.index('-d')+1] = database
+            streams.append(subprocess.Popen(selected+['-c',copy],stdout=subprocess.PIPE,stderr=subprocess.PIPE))
+        while True:
+            left, right = (stream.stdout.read(262144) for stream in streams)
+            assert left == right, (schema,table,'restored values differ')
+            if not left:
+                break
+        for stream in streams:
+            error = stream.stderr.read()
+            assert stream.wait() == 0, (schema,table,error.decode())
+        restored_tables[schema+'.'+table] = query(f'select count(*) n from "{table}"',schema)[0]['n']
+phases['restored_value_comparison_seconds'] = round(time.monotonic()-began,3)
 receipt = {"source_commit":os.environ.get("GITHUB_SHA"),"source_schema":source,"recovery_schema":target,"archive_schema":archive,"restored_database":recovery_database,"dump_file":dump_path.name,"dump_bytes":len(dump),"restored_tables":restored_tables,"migration_versions":[1,len(migrations)],"old_migration_versions":[1,32],"upgrade_seconds":round(upgrade_seconds,3),"recovery_table_counts":counts,"checks":["old failures protected","new request retained","credential revision 2 retained","quota policy revision 4 retained","ledger 0.30 retained","reset operation retained","old migration identity retained","all compatible fields equal via bidirectional EXCEPT ALL","new-only facts archived","pg_dump custom archive restored into independent database","all restored old-compatible and new-only table values equal"]}
+receipt.update({"synthetic_old_shape":shape,"phase_seconds":phases,"migration_transactions":migration_receipts,"lock_contract":"isolated no-writer rehearsal; locks held before each commit recorded; transaction duration is an upper bound on lock hold, not production wait; lock_timeout=1500ms, statement_timeout=180s"})
 (args.artifacts / "task35-recovery.json").write_text(json.dumps(receipt,indent=2),encoding="utf-8")
 print(json.dumps(receipt,indent=2))

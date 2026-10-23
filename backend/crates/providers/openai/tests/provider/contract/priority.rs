@@ -38,7 +38,7 @@ impl PriorityPolicyStore for AccountPolicy {
         Err(PriorityPolicyError::Unavailable)
     }
     async fn resolve(&self, id: &str, group: FastMode) -> Result<FastMode, PriorityPolicyError> {
-        assert_eq!(id, "acct_priority_wire");
+        assert_eq!(id, "acct_provider_contract");
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.mode.lock().unwrap().resolve(FastMode::Enabled, group))
     }
@@ -128,7 +128,7 @@ async fn account_override_reaches_http_and_websocket_with_group_cap_and_explicit
             ),
         ] {
             let store = Arc::new(MemoryAccountStore::default());
-            create_account(&store, "acct_priority_wire").await;
+            create_account(&store, "acct_provider_contract").await;
             let policy = Arc::new(AccountPolicy {
                 mode: Mutex::new(account),
                 calls: AtomicUsize::new(0),
@@ -188,7 +188,7 @@ async fn account_override_reaches_http_and_websocket_with_group_cap_and_explicit
 #[tokio::test]
 async fn same_request_reuses_account_tier_after_auto_off_but_next_request_observes_disable() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_priority_wire").await;
+    create_account(&store, "acct_provider_contract").await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/codex/responses"))
@@ -252,7 +252,7 @@ async fn api_key_account_keeps_native_group_tier_without_querying_oauth_priority
     let server = MockServer::start().await;
     store
         .seed_api_key(
-            "acct_priority_wire",
+            "acct_provider_contract",
             server.uri(),
             provider_openai::credential::ResponsesTransport::Http,
         )

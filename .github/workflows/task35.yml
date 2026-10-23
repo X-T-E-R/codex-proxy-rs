@@ -17,7 +17,10 @@ jobs:
       run_frontend: false
   recovery-drill:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
     services:
       postgres:
         image: postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
@@ -30,6 +33,13 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,9 +48,31 @@ jobs:
         env:
           CPR_DRILL_CONTAINER: ${{ job.services.postgres.id }}
         run: python .github/scripts/task35-recovery-drill.py --repo . --container "$CPR_DRILL_CONTAINER" --artifacts "$RUNNER_TEMP/task35-recovery"
+      - name: Download pinned old production binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: quota-linux-binary
+          run-id: 37242026140
+          repository: X-T-E-R/codex-proxy-rs
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/task35-old45
+      - name: Start old writer on recovered DB without external egress
+        shell: bash
+        env:
+          CPR_DRILL_POSTGRES: ${{ job.services.postgres.id }}
+          CPR_DRILL_REDIS: ${{ job.services.redis.id }}
+        run: >-
+          python .github/scripts/task35-old-binary-smoke.py
+          --artifacts "$RUNNER_TEMP/task35-recovery"
+          --binary-directory "$RUNNER_TEMP/task35-old45"
+          --postgres "$CPR_DRILL_POSTGRES" --redis "$CPR_DRILL_REDIS"
       - name: Preserve synthetic recovery receipt
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task35-recovery-${{ github.sha }}
-          path: ${{ runner.temp }}/task35-recovery/
+          path: |
+            ${{ runner.temp }}/task35-recovery/task35-recovery.json
+            ${{ runner.temp }}/task35-recovery/synthetic-recovery.dump
+            ${{ runner.temp }}/task35-recovery/old45-startup.log
           if-no-files-found: error

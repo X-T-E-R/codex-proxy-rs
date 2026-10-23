@@ -537,7 +537,7 @@ async fn no_inventory_expired_card_cancelled_worker_and_lost_guard_never_send() 
 }
 
 #[tokio::test]
-async fn malformed_credits_do_not_discard_valid_quota_or_forge_zero() {
+async fn credits_metadata_rejects_scalar_but_preserves_valid_quota_and_numeric_balances() {
     for credits in [
         json!(null),
         json!(false),
@@ -556,10 +556,18 @@ async fn malformed_credits_do_not_discard_valid_quota_or_forge_zero() {
             .mount(&server)
             .await;
         let quota = service(&accounts, PolicyStore::new(QuotaAction::Stop), server.uri());
-        let snapshot = quota
+        let result = quota
             .refresh_account(&ProviderAccountId::new("acct_policy").unwrap())
-            .await
-            .unwrap();
+            .await;
+        // 原生 quota 文档只接受对象或 null 元数据，不为旧夹具放宽主干解析边界
+        if credits == json!(false) {
+            assert!(matches!(
+                result,
+                Err(CodexCredentialQuotaError::InvalidCredentialData)
+            ));
+            continue;
+        }
+        let snapshot = result.unwrap();
         assert_eq!(snapshot.windows().len(), 2);
         assert_eq!(snapshot.quota().access(), QuotaAccessState::Allowed);
         let expected = credits
