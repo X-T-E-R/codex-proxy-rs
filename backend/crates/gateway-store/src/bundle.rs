@@ -265,6 +265,10 @@ async fn connect(
     .with_budget(Arc::new(
         postgres::PgClientBudgetStore::new(pool.clone()).with_timezone(config.timezone),
     ))
+    .with_cyber_sessions(Arc::new(redis::RedisCyberSessionRepository::new(
+        redis_connection.clone(),
+        REDIS_NAMESPACE,
+    )?))
     .with_session_affinity(Arc::clone(&provider_session_affinity))
     .with_client_retry_store(Arc::new(redis::RedisClientRetryRepository::new(
         redis_connection.clone(),

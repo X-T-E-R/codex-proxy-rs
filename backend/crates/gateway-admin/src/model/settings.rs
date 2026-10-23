@@ -77,6 +77,8 @@ pub struct RuntimeSettingsValues {
     pub account_warmup_model: Option<String>,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
+    #[serde(flatten)]
+    pub protection: gateway_core::settings::RuntimeProtectionSettings,
 }
 
 /// 完整运行设置事实
@@ -191,6 +193,7 @@ impl From<RuntimeSettings> for ReplaceRuntimeSettings {
 impl RuntimeSettingsValues {
     /// 校验共同事实，返回字段名供边界转换错误；SQL 类型转换仍由 Store 处理
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.protection.validate()?;
         if !(1..=1440).contains(&self.reset_credit_lead_minutes) {
             return Err("reset_credit_lead_minutes");
         }

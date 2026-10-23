@@ -97,6 +97,7 @@ async fn count_tokens(
             upstream_model: Some(model),
             operation: Operation::CountTokens(TokenCountRequest::from_raw_json(payload)),
             metadata: ExecutionRequestMetadata {
+                cyber_session: Default::default(),
                 protocol: TOKEN_COUNT_PROTOCOL.to_owned(),
                 endpoint: uri.path().to_owned(),
                 transport: ClientTransport::HttpJson,
@@ -181,6 +182,7 @@ async fn provider_http(
             upstream_model: None,
             operation,
             metadata: ExecutionRequestMetadata {
+                cyber_session: Default::default(),
                 protocol: PROVIDER_HTTP_PROTOCOL.to_owned(),
                 endpoint: uri.path().to_owned(),
                 transport: ClientTransport::HttpJson,

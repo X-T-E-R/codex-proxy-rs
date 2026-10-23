@@ -91,8 +91,8 @@ use wiremock::matchers::{body_bytes, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::support::{
-    MemoryAccountStore, MemoryCooldownPort, MemorySessionAffinity, MemorySessionExclusions,
-    TestLeaseCoordinator, account_policy, catalog_cache, profile, secret,
+    MemoryAccountStore, MemoryCooldownPort, MemorySessionAffinity, TestLeaseCoordinator,
+    account_policy, catalog_cache, profile, secret,
 };
 use crate::transport::accept_codex_test_websocket;
 
@@ -1276,7 +1276,6 @@ fn provider_and_quota_with_runtime_ports(
         store.repository(),
         leases,
         session_affinity,
-        Arc::new(MemorySessionExclusions::default()),
         Arc::clone(&quota),
         Arc::clone(&account_feedback),
         CodexCookiePolicy::official().expect("cookie policy"),

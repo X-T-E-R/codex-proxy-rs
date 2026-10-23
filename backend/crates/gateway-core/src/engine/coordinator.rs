@@ -387,6 +387,7 @@ where
             pending_terminal_failure: None,
             pending_stream_failure: None,
             client_retry: None,
+            cyber_refusal_observed: false,
         };
 
         if session.cancellation.is_cancelled() {
@@ -559,6 +560,7 @@ pub struct ResponseExecutionSession<S: ?Sized> {
     /// 已消费的流错误及其异步决策由会话持有，取消读取只暂停处理
     pending_stream_failure: Option<PendingStreamFailure>,
     client_retry: Option<ClientRetryGuard>,
+    cyber_refusal_observed: bool,
 }
 
 struct PendingTerminalFailure {
@@ -617,6 +619,10 @@ where
 
     pub(super) fn request_id(&self) -> &ModelRequestId {
         &self.request_id
+    }
+
+    pub(super) const fn cyber_refusal_observed(&self) -> bool {
+        self.cyber_refusal_observed
     }
 
     /// 读取下一条 canonical event；首条未提交事件会携带 commit 要求
@@ -1224,7 +1230,17 @@ where
             }
             ProviderBoundary::Result(result) => match *result {
                 Ok(stream) => stream,
-                Err(error) => {
+                Err(mut error) => {
+                    self.cyber_refusal_observed |= error.is_cyber_policy_refusal();
+                    if self
+                        .plan
+                        .account_selection_policy()
+                        .protection()
+                        .cyber_session_block_enabled
+                        && error.is_cyber_policy_refusal()
+                    {
+                        error = error.with_retry_prohibited();
+                    }
                     attempt_trace.record_provider_failure(&error);
                     let connection_fallback = self.connection_rotation.is_some()
                         && !self.connection_budget.exhausted()
@@ -1598,6 +1614,16 @@ where
 
     /// 失败可重试时要求丢弃本 attempt；预算耗尽时可返回最后一批原始失败事件
     fn begin_stream_failure(&mut self, mut error: ProviderError) -> Result<(), EngineError> {
+        self.cyber_refusal_observed |= error.is_cyber_policy_refusal();
+        if self
+            .plan
+            .account_selection_policy()
+            .protection()
+            .cyber_session_block_enabled
+            && error.is_cyber_policy_refusal()
+        {
+            error = error.with_retry_prohibited();
+        }
         // 原始 wire 只活在 request-local 决策状态；clone、attempt 记录与持久化终态
         // 均只接触已剥离的稳定错误字段
         self.trace

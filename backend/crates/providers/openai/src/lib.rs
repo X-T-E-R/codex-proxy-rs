@@ -68,7 +68,6 @@ pub async fn initialize(
     let accounts: Arc<dyn ProviderAccountStore> = ports.accounts();
     let leases = ports.leases();
     let session_affinity = ports.session_affinity();
-    let session_exclusions = ports.session_exclusions();
     let account_feedback = ports.account_feedback();
     let runtime_policy = ports.runtime_policy();
     let initial_profile = transport::profile::selection::ClientProfileSelection::default()
@@ -173,7 +172,6 @@ pub async fn initialize(
         repository.clone(),
         Arc::clone(&leases),
         session_affinity,
-        session_exclusions,
         Arc::clone(&quota),
         Arc::clone(&account_feedback),
         CodexCookiePolicy::official().map_err(|_| OpenAiInitializeError::CookiePolicy)?,

@@ -42,8 +42,8 @@ use serde_json::json;
 use url::Url;
 
 use crate::support::{
-    MemoryAccountStore, MemoryCooldownPort, MemorySessionAffinity, MemorySessionExclusions,
-    TestLeaseCoordinator, account_policy, profile, secret,
+    MemoryAccountStore, MemoryCooldownPort, MemorySessionAffinity, TestLeaseCoordinator,
+    account_policy, profile, secret,
 };
 
 fn create_account(store: &Arc<MemoryAccountStore>, id: &str, token: &str) {
@@ -245,7 +245,6 @@ fn selector_with_runtime(
         store.repository(),
         leases,
         session_affinity,
-        Arc::new(MemorySessionExclusions::default()),
         quota,
         account_feedback,
         CodexCookiePolicy::official().expect("official cookie policy"),

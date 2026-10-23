@@ -232,6 +232,7 @@ struct SnapshotSettingsRow {
         sqlx::types::Json<gateway_core::settings::privacy::CodexPrivacyPolicy>,
     request_location_enabled: bool,
     responses_max_decompressed_body_bytes: i64,
+    protection_json: sqlx::types::Json<gateway_core::settings::RuntimeProtectionSettings>,
     provider_request_profiles_json:
         sqlx::types::Json<BTreeMap<String, serde_json::Map<String, serde_json::Value>>>,
 }
@@ -240,7 +241,11 @@ async fn load_settings(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<(Revision, SettingsValues)> {
     let row = sqlx::query_as::<_, SnapshotSettingsRow>(
-        "select config_revision, max_concurrent_per_account, rotation_strategy, smart_scheduling_json, model_mappings_json, min_codex_desktop_version, min_codex_cli_version, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds, openai_guardian_reserved_concurrency, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours, request_location_json, request_location_enabled, codex_privacy_policy_json, responses_max_decompressed_body_bytes, provider_request_profiles_json, pricing_overrides_json, pricing_synced_json from runtime_settings where id = 1",
+        "select config_revision, max_concurrent_per_account, rotation_strategy, smart_scheduling_json, model_mappings_json, min_codex_desktop_version, min_codex_cli_version, max_waiting_per_key, max_waiting_per_account, concurrency_wait_timeout_seconds, openai_guardian_reserved_concurrency, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours, request_location_json, request_location_enabled, codex_privacy_policy_json, responses_max_decompressed_body_bytes, provider_request_profiles_json, pricing_overrides_json, pricing_synced_json,
+        jsonb_build_object('cyberSessionBlockEnabled', cyber_session_block_enabled, 'cyberSessionBlockTtlSeconds', cyber_session_block_ttl_seconds,
+            'wsPoolEnabled', ws_pool_enabled, 'wsPoolMaxAgeMs', ws_pool_max_age_ms, 'wsPoolMaxConnecting', ws_pool_max_connecting,
+            'wsPoolStreamIdleTimeoutMs', ws_pool_stream_idle_timeout_ms, 'wsPoolFastPathBudgetMs', ws_pool_fast_path_budget_ms) as protection_json
+        from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
     .await
@@ -259,6 +264,7 @@ async fn load_settings(
             row.min_codex_desktop_version,
             row.min_codex_cli_version,
         )
+        .with_protection(row.protection_json.0)
         .with_responses_max_decompressed_body_bytes(to_u64(
             row.responses_max_decompressed_body_bytes,
         )?)

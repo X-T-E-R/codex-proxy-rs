@@ -616,7 +616,6 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             selector: &request.selector,
             quota: &request.quota,
             response_origin: &request.response_origin,
-            cyber_policy_scope: None,
             allows_account_state_mutation,
             allows_capacity_feedback: !request.context.is_diagnostic_required_account(),
         };
@@ -777,14 +776,12 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
         mut session_capture,
     } = response;
     Box::pin(async_stream::try_stream! {
-        let cyber_policy_scope = lease.cyber_policy_scope().cloned();
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let failure_context = OpenAiFailureContext {
             client: &client,
             selector: &selector,
             quota: &quota,
             response_origin: &response_origin,
-            cyber_policy_scope: cyber_policy_scope.as_ref(),
             allows_account_state_mutation,
             allows_capacity_feedback: !context.is_diagnostic_required_account(),
         };
@@ -1169,9 +1166,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 selector
                     .record_success(&active_account)
                     .await;
-                selector
-                    .observe_cyber_policy_success(cyber_policy_scope.as_ref())
-                    .await;
             }
             if (rate_limits_changed
                 || response_model_changed
@@ -1301,9 +1295,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             // 尾部 finish() 也可能产出 completed，账号健康更新先于下游 yield
             selector
                 .record_success(&active_account)
-                .await;
-            selector
-                .observe_cyber_policy_success(cyber_policy_scope.as_ref())
                 .await;
         }
         if (response_model_changed

@@ -63,6 +63,7 @@ pub struct ExecutionRequestMetadata {
     pub client_ip: Option<IpAddr>,
     pub user_agent: Option<String>,
     pub previous_response_id: Option<PreviousResponseId>,
+    pub cyber_session: crate::provider_ports::CyberSessionRequest,
 }
 
 impl ExecutionRequestMetadata {

@@ -2,6 +2,8 @@
 
 pub(crate) mod compiled;
 pub mod privacy;
+mod protection;
+pub use protection::RuntimeProtectionSettings;
 mod values;
 pub use values::{
     SettingsValues, client_min_versions, response_body_limit, validate_request_limits,

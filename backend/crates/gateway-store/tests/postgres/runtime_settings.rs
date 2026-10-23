@@ -18,6 +18,7 @@ pub(super) fn settings_with_margin(refresh_margin_seconds: u64) -> RuntimeSettin
             ("grok-latest".to_owned(), "grok-4.5".to_owned()),
         ]),
         values: gateway_admin::model::settings::RuntimeSettingsValues {
+            protection: Default::default(),
             codex_privacy_policy: Default::default(),
             request_location_enabled: false,
             request_location: Default::default(),
@@ -162,6 +163,7 @@ fn runtime_settings_require_model_when_warmup_is_enabled() {
         let runtime_settings_base = settings_with_margin(3_600);
         RuntimeSettingsUpdate {
             values: gateway_admin::model::settings::RuntimeSettingsValues {
+                protection: Default::default(),
                 account_warmup_enabled: true,
                 ..runtime_settings_base.values
             },
@@ -297,6 +299,7 @@ fn runtime_settings_reject_out_of_range_auto_freeze() {
             let runtime_settings_base = settings_with_margin(3_600);
             RuntimeSettingsUpdate {
                 values: gateway_admin::model::settings::RuntimeSettingsValues {
+                    protection: Default::default(),
                     account_auto_freeze_threshold: 1,
                     ..runtime_settings_base.values
                 },
@@ -307,6 +310,7 @@ fn runtime_settings_reject_out_of_range_auto_freeze() {
             let runtime_settings_base = settings_with_margin(3_600);
             RuntimeSettingsUpdate {
                 values: gateway_admin::model::settings::RuntimeSettingsValues {
+                    protection: Default::default(),
                     account_auto_freeze_window_seconds: 59,
                     ..runtime_settings_base.values
                 },
@@ -317,6 +321,7 @@ fn runtime_settings_reject_out_of_range_auto_freeze() {
             let runtime_settings_base = settings_with_margin(3_600);
             RuntimeSettingsUpdate {
                 values: gateway_admin::model::settings::RuntimeSettingsValues {
+                    protection: Default::default(),
                     account_auto_freeze_duration_seconds: 299,
                     ..runtime_settings_base.values
                 },
@@ -327,6 +332,7 @@ fn runtime_settings_reject_out_of_range_auto_freeze() {
             let runtime_settings_base = settings_with_margin(3_600);
             RuntimeSettingsUpdate {
                 values: gateway_admin::model::settings::RuntimeSettingsValues {
+                    protection: Default::default(),
                     account_auto_freeze_probe_model: Some(" pad ".to_owned()),
                     ..runtime_settings_base.values
                 },
@@ -344,6 +350,7 @@ fn runtime_settings_reject_non_semver_client_min() {
         let runtime_settings_base = settings_with_margin(3_600);
         RuntimeSettingsUpdate {
             values: gateway_admin::model::settings::RuntimeSettingsValues {
+                protection: Default::default(),
                 min_codex_cli_version: Some("v0.40.0".to_owned()),
                 ..runtime_settings_base.values
             },

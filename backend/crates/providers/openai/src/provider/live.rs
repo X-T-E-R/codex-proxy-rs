@@ -422,7 +422,6 @@ fn cold_live_call_stream(request: ColdLiveCall) -> EventStream {
             selector: &request.selector,
             quota: &request.quota,
             response_origin: &request.response_origin,
-            cyber_policy_scope: None,
             allows_account_state_mutation,
             allows_capacity_feedback: !request.context.is_diagnostic_required_account(),
         };

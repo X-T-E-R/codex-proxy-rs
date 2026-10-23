@@ -95,6 +95,7 @@ pub struct DefaultExecutionService {
     client_retry: Option<Arc<dyn crate::engine::client_retry::ClientRetryStore>>,
     snapshot_refresh: Option<Arc<RuntimeSnapshotPublisher>>,
     active_requests: ActiveRequestRegistry,
+    cyber_sessions: Option<Arc<dyn crate::provider_ports::CyberSessionPort>>,
 }
 
 impl DefaultExecutionService {
@@ -126,7 +127,17 @@ impl DefaultExecutionService {
             client_retry: None,
             snapshot_refresh: None,
             active_requests: Arc::default(),
+            cyber_sessions: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_cyber_sessions(
+        mut self,
+        port: Arc<dyn crate::provider_ports::CyberSessionPort>,
+    ) -> Self {
+        self.cyber_sessions = Some(port);
+        self
     }
 
     #[must_use]
@@ -850,6 +861,46 @@ impl DefaultExecutionService {
             started_at,
             deadline_at: authorization.deadline_at,
         };
+        let cyber_ttl = plan.account_selection_policy().protection().cyber_ttl();
+        if cyber_ttl.is_some()
+            && super::cyber::is_blocked(
+                self.cyber_sessions.as_deref(),
+                &metadata.cyber_session.lookup_keys(client.policy.key_id()),
+            )
+            .await
+        {
+            let error = super::cyber::blocked_error();
+            super::cyber::persist_local_block(
+                self.observations.as_ref(),
+                new_request,
+                error.clone(),
+            )
+            .await;
+            if let Some(budget) = &self.budget {
+                settle_budget(
+                    budget.as_ref(),
+                    ClientBudgetCharge {
+                        key_id: client.policy.key_id().clone(),
+                        request_id: request_id.clone(),
+                        amount_usd: crate::metering::Decimal::ZERO,
+                        completed_at: SystemTime::now(),
+                    },
+                    self.diagnostics.as_ref(),
+                )
+                .await;
+            }
+            if let Some(active_request) = active_request {
+                active_request.release();
+            }
+            admission.release().await;
+            return Err(error);
+        }
+        let cyber_record = self
+            .cyber_sessions
+            .clone()
+            .zip(cyber_ttl)
+            .zip(metadata.cyber_session.refusal_key(client.policy.key_id()))
+            .map(|((port, ttl), key)| super::cyber::CyberRefusalRecord { port, key, ttl });
         let mut engine = GatewayEngine::new(self.observations.clone(), providers);
         // 插件内部调用不共享外部客户端的失败轮次，探测另走 transient engine
         if authorization.nested.is_none()
@@ -903,6 +954,7 @@ impl DefaultExecutionService {
                 Arc::clone(&self.continuation),
                 self.budget.clone(),
                 self.diagnostics.clone(),
+                cyber_record,
             )),
         })
     }

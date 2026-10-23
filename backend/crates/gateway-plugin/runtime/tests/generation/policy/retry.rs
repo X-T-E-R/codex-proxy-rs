@@ -169,6 +169,7 @@ async fn retry_callback_effects_survive_success_failure_and_cancellation() {
                 public_model: PublicModelId::new("retry-fixture").unwrap(),
                 operation: operation(),
                 metadata: ExecutionRequestMetadata {
+                    cyber_session: Default::default(),
                     protocol: "openai".into(),
                     endpoint: "/v1/responses".into(),
                     transport: ClientTransport::HttpJson,

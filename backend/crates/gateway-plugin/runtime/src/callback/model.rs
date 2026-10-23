@@ -356,6 +356,7 @@ impl PluginModels {
             public_model: PublicModelId::new(request.model).map_err(|_| invalid())?,
             operation,
             metadata: ExecutionRequestMetadata {
+                cyber_session: Default::default(),
                 protocol: request.protocol,
                 endpoint: "host.model".to_owned(),
                 transport: ClientTransport::InternalPlugin,

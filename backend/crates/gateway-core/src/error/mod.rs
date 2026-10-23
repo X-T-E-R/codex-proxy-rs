@@ -802,6 +802,18 @@ impl ProviderError {
             .and_then(|values| values.code.as_ref())
     }
 
+    /// 只以结构化上游 code 判定真实 Cyber 拒绝，不匹配普通消息文本
+    #[must_use]
+    pub fn is_cyber_policy_refusal(&self) -> bool {
+        self.upstream_code()
+            .map(OpaqueUpstreamValue::as_str)
+            .or_else(|| {
+                self.client_visible_upstream_error()
+                    .and_then(ClientVisibleUpstreamError::code)
+            })
+            .is_some_and(|code| code.trim().eq_ignore_ascii_case("cyber_policy"))
+    }
+
     /// 返回安全分类的上游 request ID
     #[must_use]
     pub fn upstream_request_id(&self) -> Option<&OpaqueUpstreamValue> {

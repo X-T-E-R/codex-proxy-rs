@@ -57,12 +57,11 @@ use crate::credential::{
     CodexAccountFailure, CodexCredentialCatalogError, CodexCredentialCatalogService,
     CodexCredentialLease, CodexCredentialQuotaService, CodexCredentialRefreshOutcome,
     CodexCredentialRefreshService, CodexCredentialRepository, CodexCredentialSelector,
-    CodexCyberPolicyScope, CodexQuotaRefreshPolicy, CodexSessionAffinity, CredentialSelectionError,
-    RuntimeCodexCookie, SelectCodexCredential, SelectCodexProviderEndpointCredential,
-    derive_codex_cyber_policy_session_key, derive_codex_endpoint_session_affinity,
-    derive_codex_session_affinity, derive_codex_transport_key,
-    derive_endpoint_affinity_with_headers, derive_live_session_affinity,
-    derive_previous_response_id_hash, derive_turn_alias,
+    CodexQuotaRefreshPolicy, CodexSessionAffinity, CredentialSelectionError, RuntimeCodexCookie,
+    SelectCodexCredential, SelectCodexProviderEndpointCredential,
+    derive_codex_endpoint_session_affinity, derive_codex_session_affinity,
+    derive_codex_transport_key, derive_endpoint_affinity_with_headers,
+    derive_live_session_affinity, derive_previous_response_id_hash, derive_turn_alias,
 };
 use crate::request_identity::{account_session_with_headers, turn_id_with_headers};
 use crate::session_transport::CodexSessionTransportRecovery;
@@ -166,7 +165,6 @@ struct PreparedGenerateRequest {
     previous_session: Option<OpenAiSessionState>,
     continuation_requested: bool,
     session_affinity: Option<CodexSessionAffinity>,
-    cyber_policy_session_key: Option<ProviderSessionAffinityKey>,
 }
 
 impl PreparedGenerateRequest {
@@ -256,14 +254,11 @@ impl CodexProvider {
         }
         let session_affinity =
             derive_codex_session_affinity(&upstream, context.client_api_key_ref());
-        let cyber_policy_session_key =
-            derive_codex_cyber_policy_session_key(&upstream, context.client_api_key_ref());
         PreparedGenerateRequest {
             upstream,
             previous_session,
             continuation_requested,
             session_affinity,
-            cyber_policy_session_key,
         }
     }
 
@@ -604,8 +599,8 @@ impl Provider for CodexProvider {
         if let Some(prepared) = preselection.as_ref() {
             prepared.checked_native_continuation_scope(&context)?;
         }
-        let (selection_session_affinity, selection_cyber_policy_key, requires_websocket) =
-            preselection.map_or((None, None, false), |prepared| {
+        let (selection_session_affinity, requires_websocket) =
+            preselection.map_or((None, false), |prepared| {
                 let requires_websocket =
                     transport_requirement(&prepared.upstream).requires_websocket()
                         || (context.continuation_attempt() == ContinuationAttempt::Native
@@ -614,16 +609,12 @@ impl Provider for CodexProvider {
                                     == OpenAiContinuationScope::ConnectionLocal
                             }) || matches!(context.continuation(), Some(ContinuationBinding::Pinned(binding))
                                     if binding.scope() == NativeContinuationScope::ConnectionLocal)));
-                (
-                    prepared.session_affinity,
-                    prepared.cyber_policy_session_key,
-                    requires_websocket,
-                )
+                (prepared.session_affinity, requires_websocket)
             });
         let selection_started_at = Instant::now();
         let selection = async {
             self.selector
-                .select_with_cyber_policy(
+                .select_with_context(
                     &SelectCodexCredential {
                         upstream_model: upstream_model.as_str(),
                         request_url: &self.responses_url,
@@ -632,7 +623,6 @@ impl Provider for CodexProvider {
                             .as_ref()
                             .map(|affinity| affinity.key()),
                     },
-                    selection_cyber_policy_key.as_ref(),
                     selection_session_affinity.as_ref(),
                     requires_websocket,
                     guardian,
@@ -793,13 +783,11 @@ impl CodexProvider {
         let previous_session = processed.previous_session;
         let continuation_requested = processed.continuation_requested;
         let session_affinity = processed.session_affinity;
-        let cyber_policy_session_key = processed.cyber_policy_session_key;
         if !context.is_diagnostic_required_account() {
             self.selector
                 .validate_translated_selection(
                     &mut lease,
                     session_affinity.as_ref(),
-                    cyber_policy_session_key.as_ref(),
                     context.account_selection_policy(),
                 )
                 .await

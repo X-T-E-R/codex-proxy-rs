@@ -52,6 +52,7 @@ pub struct OpenAiRequestHeaders {
     memgen_request: Option<String>,
     subagent: Option<String>,
     passthrough_headers: Vec<Value>,
+    cyber_semantic_headers: Vec<String>,
 }
 
 impl OpenAiRequestHeaders {
@@ -78,6 +79,18 @@ impl OpenAiRequestHeaders {
             memgen_request: header_string(headers, X_OPENAI_MEMGEN_REQUEST_HEADER),
             subagent: header_string(headers, OPENAI_SUBAGENT_KEY),
             passthrough_headers: passthrough_headers(headers),
+            cyber_semantic_headers: [
+                "session-id",
+                "session_id",
+                "conversation_id",
+                "x-session-id",
+                "x-opencode-session",
+                "x-conversation-id",
+                "x-claude-code-session-id",
+            ]
+            .into_iter()
+            .filter_map(|name| header_string(headers, name))
+            .collect(),
         }
     }
 
@@ -215,6 +228,7 @@ pub struct ResponsesRequestMetadata {
     stream: bool,
     store: bool,
     continuation: ContinuationIntent,
+    cyber_session: gateway_core::provider_ports::CyberSessionRequest,
     client_ip: Option<IpAddr>,
     user_agent: Option<String>,
 }
@@ -242,6 +256,11 @@ impl ResponsesRequestMetadata {
     #[must_use]
     pub const fn continuation(&self) -> &ContinuationIntent {
         &self.continuation
+    }
+
+    #[must_use]
+    pub const fn cyber_session(&self) -> &gateway_core::provider_ports::CyberSessionRequest {
+        &self.cyber_session
     }
 
     /// 返回从 HTTP 连接边界解析出的客户端地址
@@ -492,6 +511,15 @@ pub(super) fn decode_request_object(
         .map(|response_id| ContinuationIntent::PreviousResponseId(response_id.to_owned()))
         .unwrap_or(ContinuationIntent::None);
 
+    let cyber_session = gateway_core::provider_ports::CyberSessionRequest::from_responses(
+        &object,
+        request_headers.turn_metadata.as_deref(),
+        request_headers
+            .cyber_semantic_headers
+            .iter()
+            .map(String::as_str),
+        request_headers.thread_id.as_deref(),
+    );
     request_headers.apply_subagent(&mut object);
     let frame_turn_metadata = match source {
         RequestDecodeSource::Http => None,
@@ -530,6 +558,7 @@ pub(super) fn decode_request_object(
             stream,
             store,
             continuation,
+            cyber_session,
             client_ip: None,
             user_agent: None,
         },

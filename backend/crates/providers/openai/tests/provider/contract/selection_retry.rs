@@ -113,30 +113,8 @@ async fn cyber_policy_rotation_preserves_upstream_response_and_next_request_stay
         body
     );
     assert_eq!(response.status(), 400);
-    // 同一会话的新请求没有可恢复的上游失败，只返回本地策略提示
-    let mut next = coordinator
-        .start(
-            request("req_policy_next"),
-            operation.clone(),
-            plan,
-            None,
-            None,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    let EngineError::Provider(error) = next.collect_uncommitted().await.unwrap_err() else {
-        panic!("expected local selection failure");
-    };
-    assert_eq!(error.kind(), ProviderErrorKind::SessionPolicyRestricted);
+    assert!(error.is_cyber_policy_refusal());
     assert!(error.retry_is_prohibited());
-    assert_eq!(error.upstream_status(), None);
-    assert!(error.client_visible_upstream_response().is_none());
-    assert_eq!(
-        error.client_visible_upstream_error().unwrap().code(),
-        Some("cyber_policy")
-    );
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -390,6 +368,10 @@ fn execution_plan(operation: &Operation) -> gateway_core::routing::RoutingPlan {
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).unwrap(),
         SettingsValues::new(3, "smart", Default::default(), None, None)
+            .with_protection(gateway_core::settings::RuntimeProtectionSettings {
+                cyber_session_block_enabled: true,
+                ..Default::default()
+            })
             .with_request_location(global_request_location(), true),
         vec![kind.clone()],
         vec![ProviderModel::new(

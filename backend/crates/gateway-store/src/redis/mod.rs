@@ -8,6 +8,8 @@ mod auth;
 mod client_admission;
 mod client_retry;
 mod coordination_buffer;
+mod cyber_session;
+pub use cyber_session::*;
 mod credential_cooldown;
 mod credential_leases;
 mod credential_state;

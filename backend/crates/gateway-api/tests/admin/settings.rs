@@ -380,6 +380,7 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
             .single()
             .expect("timestamp"),
         values: gateway_admin::model::settings::RuntimeSettingsValues {
+            protection: Default::default(),
             codex_privacy_policy: Default::default(),
             request_location_enabled: false,
             request_location: Default::default(),

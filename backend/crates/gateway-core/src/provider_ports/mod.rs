@@ -1,5 +1,10 @@
 //! Provider 运行时所需的存储合同，按能力组织端口与共享策略
 
+mod cyber_session;
+pub use cyber_session::{
+    CyberSessionKey, CyberSessionPort, CyberSessionRequest, CyberSessionStoreError,
+    MAX_TRANSCRIPT_LOOKUPS,
+};
 mod error;
 pub mod priority_policy;
 pub mod quota_policy;

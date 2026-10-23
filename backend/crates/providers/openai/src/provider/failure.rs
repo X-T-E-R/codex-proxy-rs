@@ -45,7 +45,6 @@ pub(super) struct MappedProviderFailure {
     pub(super) account_failure: Option<CodexAccountFailure>,
     /// 原始上游错误描述，仅在凭据错误状态下持久化
     pub(super) error_message: Option<String>,
-    pub(super) cyber_policy_failure: bool,
     pub(super) upstream_capacity_failure: bool,
     pub(super) set_cookie_headers: Vec<String>,
     pub(super) rate_limit_headers: Vec<(String, String)>,
@@ -60,7 +59,6 @@ impl MappedProviderFailure {
             websocket_transport_retryable: false,
             account_failure: None,
             error_message: None,
-            cyber_policy_failure: false,
             upstream_capacity_failure: false,
             set_cookie_headers: Vec::new(),
             rate_limit_headers: Vec::new(),
@@ -157,7 +155,6 @@ pub(super) struct OpenAiFailureContext<'a> {
     pub(super) selector: &'a CodexCredentialSelector,
     pub(super) quota: &'a Arc<CodexCredentialQuotaService>,
     pub(super) response_origin: &'a Url,
-    pub(super) cyber_policy_scope: Option<&'a CodexCyberPolicyScope>,
     pub(super) allows_account_state_mutation: bool,
     pub(super) allows_capacity_feedback: bool,
 }
@@ -313,12 +310,6 @@ pub(super) async fn apply_failure(
         failure.account_failure,
         Some(CodexAccountFailure::QuotaExhausted | CodexAccountFailure::UsageLimitExhausted { .. })
     );
-    if failure.cyber_policy_failure {
-        context
-            .selector
-            .record_cyber_policy_failure(context.cyber_policy_scope, account)
-            .await;
-    }
     if let Some(account_failure) = failure.account_failure {
         context
             .client
@@ -1464,7 +1455,6 @@ pub(super) fn map_upstream_failure(
             failure.usage_limit_resets_at,
         ),
         error_message: failure.client_message,
-        cyber_policy_failure,
         // 普通 5xx 与未知流内错误不足以证明容量拒绝，不能用于冻结账号
         upstream_capacity_failure: capacity_unavailable,
         set_cookie_headers: failure.set_cookie_headers,

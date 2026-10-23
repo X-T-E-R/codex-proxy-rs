@@ -74,6 +74,13 @@ impl CompiledSettings {
             strategy,
             AccountConcurrency::new(settings.max_concurrent_per_account),
         )
+        .with_protection({
+            settings
+                .protection
+                .validate()
+                .map_err(|_| InvalidSettings)?;
+            settings.protection
+        })
         .with_openai_guardian_reserved_concurrency(settings.openai_guardian_reserved_concurrency)
         .with_openai_account_affinity(settings.openai_account_affinity)
         .with_max_account_rotations(settings.max_account_rotations)

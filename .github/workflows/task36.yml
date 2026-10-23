@@ -1,0 +1,17 @@
+name: Task36 regression verification
+
+on:
+  push:
+    branches: [task36/cyber-regression-20261023]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      ref: ${{ github.sha }}
+      run_backend: true
+      run_frontend: false

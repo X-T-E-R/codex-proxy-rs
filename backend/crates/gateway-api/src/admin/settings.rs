@@ -68,6 +68,20 @@ pub struct RuntimeSettingsFields {
     pub account_warmup_model: Option<String>,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
+    #[serde(default)]
+    pub cyber_session_block_enabled: Option<bool>,
+    #[serde(default)]
+    pub cyber_session_block_ttl_seconds: Option<u32>,
+    #[serde(default)]
+    pub ws_pool_enabled: Option<bool>,
+    #[serde(default)]
+    pub ws_pool_max_age_ms: Option<u64>,
+    #[serde(default)]
+    pub ws_pool_max_connecting: Option<u32>,
+    #[serde(default)]
+    pub ws_pool_stream_idle_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub ws_pool_fast_path_budget_ms: Option<u64>,
 }
 
 /// 运行配置投影与设置页字段的聚合响应
@@ -481,6 +495,16 @@ where
     S: SessionState + Send + Sync,
 {
     let time = crate::time::TimePresenter::new(state.admin_services().timezone());
+    let current = state
+        .admin_services()
+        .settings()
+        .load()
+        .await
+        .map_err(map_service_error)?;
+    let mut request = request;
+    request
+        .values
+        .preserve_protection(current.values.protection);
     let command = request.into_command().map_err(map_wire_error)?;
     let result = state
         .admin_services()
@@ -744,10 +768,50 @@ fn client_profile_preview_view(
 }
 
 impl RuntimeSettingsFields {
+    fn preserve_protection(&mut self, current: gateway_core::settings::RuntimeProtectionSettings) {
+        self.cyber_session_block_enabled
+            .get_or_insert(current.cyber_session_block_enabled);
+        self.cyber_session_block_ttl_seconds
+            .get_or_insert(current.cyber_session_block_ttl_seconds);
+        self.ws_pool_enabled.get_or_insert(current.ws_pool_enabled);
+        self.ws_pool_max_age_ms
+            .get_or_insert(current.ws_pool_max_age_ms);
+        self.ws_pool_max_connecting
+            .get_or_insert(current.ws_pool_max_connecting);
+        self.ws_pool_stream_idle_timeout_ms
+            .get_or_insert(current.ws_pool_stream_idle_timeout_ms);
+        self.ws_pool_fast_path_budget_ms
+            .get_or_insert(current.ws_pool_fast_path_budget_ms);
+    }
+
     fn into_values(
         self,
     ) -> Result<gateway_admin::model::settings::RuntimeSettingsValues, WireValidationError> {
+        // wire 单独校验时，省略值不构成错误；实际更新入口先以持久值补齐并仍走 CAS
+        let defaults = gateway_core::settings::RuntimeProtectionSettings::default();
+        let protection = gateway_core::settings::RuntimeProtectionSettings {
+            cyber_session_block_enabled: self
+                .cyber_session_block_enabled
+                .unwrap_or(defaults.cyber_session_block_enabled),
+            cyber_session_block_ttl_seconds: self
+                .cyber_session_block_ttl_seconds
+                .unwrap_or(defaults.cyber_session_block_ttl_seconds),
+            ws_pool_enabled: self.ws_pool_enabled.unwrap_or(defaults.ws_pool_enabled),
+            ws_pool_max_age_ms: self
+                .ws_pool_max_age_ms
+                .unwrap_or(defaults.ws_pool_max_age_ms),
+            ws_pool_max_connecting: self
+                .ws_pool_max_connecting
+                .unwrap_or(defaults.ws_pool_max_connecting),
+            ws_pool_stream_idle_timeout_ms: self
+                .ws_pool_stream_idle_timeout_ms
+                .unwrap_or(defaults.ws_pool_stream_idle_timeout_ms),
+            ws_pool_fast_path_budget_ms: self
+                .ws_pool_fast_path_budget_ms
+                .unwrap_or(defaults.ws_pool_fast_path_budget_ms),
+        };
         let values = gateway_admin::model::settings::RuntimeSettingsValues {
+            protection,
             codex_privacy_policy: self.codex_privacy_policy,
             request_location_enabled: self.request_location_enabled,
             request_location: self
@@ -799,6 +863,17 @@ impl RuntimeSettingsFields {
 impl From<gateway_admin::model::settings::RuntimeSettingsValues> for RuntimeSettingsFields {
     fn from(settings: gateway_admin::model::settings::RuntimeSettingsValues) -> Self {
         crate::admin::settings::RuntimeSettingsFields {
+            cyber_session_block_enabled: Some(settings.protection.cyber_session_block_enabled),
+            cyber_session_block_ttl_seconds: Some(
+                settings.protection.cyber_session_block_ttl_seconds,
+            ),
+            ws_pool_enabled: Some(settings.protection.ws_pool_enabled),
+            ws_pool_max_age_ms: Some(settings.protection.ws_pool_max_age_ms),
+            ws_pool_max_connecting: Some(settings.protection.ws_pool_max_connecting),
+            ws_pool_stream_idle_timeout_ms: Some(
+                settings.protection.ws_pool_stream_idle_timeout_ms,
+            ),
+            ws_pool_fast_path_budget_ms: Some(settings.protection.ws_pool_fast_path_budget_ms),
             codex_privacy_policy: settings.codex_privacy_policy,
             request_location_enabled: settings.request_location_enabled,
             request_location: settings.request_location,
@@ -839,6 +914,11 @@ impl From<gateway_admin::model::settings::RuntimeSettingsValues> for RuntimeSett
 
 fn settings_validation_error(field: &'static str) -> WireValidationError {
     WireValidationError::new(match field {
+        "cyber_session_block_ttl_seconds" => "cyberSessionBlockTtlSeconds",
+        "ws_pool_max_age_ms" => "wsPoolMaxAgeMs",
+        "ws_pool_max_connecting" => "wsPoolMaxConnecting",
+        "ws_pool_stream_idle_timeout_ms" => "wsPoolStreamIdleTimeoutMs",
+        "ws_pool_fast_path_budget_ms" => "wsPoolFastPathBudgetMs",
         "account_auto_freeze_adaptive_concurrency" => "accountAutoFreezeAdaptiveConcurrency",
         "account_auto_freeze_duration_seconds" => "accountAutoFreezeDurationSeconds",
         "account_auto_freeze_enabled" => "accountAutoFreezeEnabled",

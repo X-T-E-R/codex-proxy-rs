@@ -159,7 +159,10 @@ pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResul
                     account_auto_freeze_window_seconds, account_auto_freeze_duration_seconds,
                     account_auto_freeze_probe_enabled, account_auto_freeze_probe_model,
                     account_auto_freeze_adaptive_concurrency,
-                    account_warmup_enabled, account_warmup_schedule_time, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent
+                    account_warmup_enabled, account_warmup_schedule_time, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent,
+                    jsonb_build_object('cyberSessionBlockEnabled', cyber_session_block_enabled, 'cyberSessionBlockTtlSeconds', cyber_session_block_ttl_seconds,
+                        'wsPoolEnabled', ws_pool_enabled, 'wsPoolMaxAgeMs', ws_pool_max_age_ms, 'wsPoolMaxConnecting', ws_pool_max_connecting,
+                        'wsPoolStreamIdleTimeoutMs', ws_pool_stream_idle_timeout_ms, 'wsPoolFastPathBudgetMs', ws_pool_fast_path_budget_ms) as protection_json
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -420,6 +423,13 @@ pub(crate) async fn update_runtime_settings_in_transaction(
                      codex_privacy_policy_json = $34,
                      reset_credit_lead_minutes = $35,
                      reset_credit_max_weekly_remaining_percent = $36,
+                         cyber_session_block_enabled = $37,
+                         cyber_session_block_ttl_seconds = $38,
+                         ws_pool_enabled = $39,
+                         ws_pool_max_age_ms = $40,
+                         ws_pool_max_connecting = $41,
+                         ws_pool_stream_idle_timeout_ms = $42,
+                         ws_pool_fast_path_budget_ms = $43,
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -471,6 +481,13 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(sqlx::types::Json(&update.values.codex_privacy_policy))
     .bind(i64::from(update.values.reset_credit_lead_minutes))
     .bind(update.values.reset_credit_max_weekly_remaining_percent.map(i64::from))
+    .bind(update.values.protection.cyber_session_block_enabled)
+    .bind(i64::from(update.values.protection.cyber_session_block_ttl_seconds))
+    .bind(update.values.protection.ws_pool_enabled)
+    .bind(i64::try_from(update.values.protection.ws_pool_max_age_ms).map_err(|_| invalid_numeric())?)
+    .bind(i64::from(update.values.protection.ws_pool_max_connecting))
+    .bind(i64::try_from(update.values.protection.ws_pool_stream_idle_timeout_ms).map_err(|_| invalid_numeric())?)
+    .bind(i64::try_from(update.values.protection.ws_pool_fast_path_budget_ms).map_err(|_| invalid_numeric())?)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|source| postgres_unavailable("update runtime settings in transaction", source))?
@@ -575,6 +592,7 @@ struct RuntimeSettingsRow {
     account_warmup_model: Option<String>,
     reset_credit_lead_minutes: i32,
     reset_credit_max_weekly_remaining_percent: Option<i32>,
+    protection_json: sqlx::types::Json<gateway_core::settings::RuntimeProtectionSettings>,
 }
 
 fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSettings> {
@@ -599,6 +617,7 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
         model_mappings: row.model_mappings_json.0,
         updated_at: row.updated_at,
         values: gateway_admin::model::settings::RuntimeSettingsValues {
+            protection: row.protection_json.0,
             refresh_margin_seconds: to_u64(row.refresh_margin_seconds)?,
             refresh_concurrency: to_u32(row.refresh_concurrency)?,
             max_concurrent_per_account: to_u32(row.max_concurrent_per_account)?,

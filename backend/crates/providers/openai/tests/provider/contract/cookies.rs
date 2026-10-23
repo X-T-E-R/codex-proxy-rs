@@ -28,7 +28,6 @@ fn cookie_provider(store: &Arc<MemoryAccountStore>, base_url: String) -> Arc<Cod
         store.repository(),
         leases,
         Arc::new(MemorySessionAffinity::default()),
-        Arc::new(MemorySessionExclusions::default()),
         Arc::clone(&quota),
         Arc::clone(&feedback),
         // 测试仅允许本机模拟上游，生产 Cookie 白名单不放宽

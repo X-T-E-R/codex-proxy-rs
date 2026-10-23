@@ -17,8 +17,7 @@ pub mod token_client;
 mod types;
 
 pub(crate) use affinity::{
-    CodexSessionAffinity, derive_codex_cyber_policy_session_key,
-    derive_codex_endpoint_session_affinity, derive_codex_session_affinity,
+    CodexSessionAffinity, derive_codex_endpoint_session_affinity, derive_codex_session_affinity,
     derive_codex_transport_key, derive_endpoint_affinity_with_headers,
     derive_live_session_affinity, derive_previous_response_id_hash, derive_turn_alias,
 };
@@ -68,9 +67,7 @@ pub use selector::{
     CodexAccountFailure, CodexCredentialLease, CodexCredentialSelector, CredentialSelectionError,
     SelectCodexCredential,
 };
-pub(crate) use selector::{
-    CodexCyberPolicyScope, CodexSelectionModel, SelectCodexProviderEndpointCredential,
-};
+pub(crate) use selector::{CodexSelectionModel, SelectCodexProviderEndpointCredential};
 pub use types::{
     CODEX_AUTHENTICATION_KIND_OAUTH, CodexAccountProfile, CodexCookie, CodexCookieCaptureOutcome,
     CodexCredentialData, CodexCredentialPrincipal, CodexOAuthCredentialData, CodexOAuthSecret,

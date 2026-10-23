@@ -20,8 +20,7 @@ use gateway_core::engine::{AttemptContext, ContinuationAttempt, policy::AccountP
 use gateway_core::provider_ports::{
     ProviderConcurrencyPool, ProviderLeaseAcquisition, ProviderLeaseGuard, ProviderLeasePort,
     ProviderLeaseRequest, ProviderSchedulingLeaseRequest, ProviderSessionAffinityKey,
-    ProviderSessionAffinityPort, ProviderSessionBinding, ProviderSessionExclusionPort,
-    ProviderSessionExclusions, ProviderStoreError,
+    ProviderSessionAffinityPort, ProviderSessionBinding, ProviderStoreError,
 };
 use gateway_core::routing::ProviderKind;
 use secrecy::ExposeSecret;
@@ -47,7 +46,6 @@ const CLOUDFLARE_CHALLENGE_BACKOFF: [Duration; 4] = [
 ];
 const CLOUDFLARE_PATH_BLOCK_THRESHOLD: u32 = 3;
 const SESSION_AFFINITY_TIMEOUT: Duration = Duration::from_millis(100);
-const CYBER_POLICY_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
 const MAX_ACCOUNT_SNAPSHOT_RETRIES: u32 = 3;
 const COOLDOWN_READ_CONCURRENCY: usize = 128;
 
@@ -175,12 +173,6 @@ struct CredentialSelectionInput<'a> {
     guardian: bool,
 }
 
-#[derive(Clone)]
-pub(crate) struct CodexCyberPolicyScope {
-    key: ProviderSessionAffinityKey,
-    state: Option<ProviderSessionExclusions>,
-}
-
 pub struct CodexCredentialSelector {
     waiting: ConcurrencyWaitQueue<ProviderAccountId>,
     reserved_waiting: ConcurrencyWaitQueue<ProviderAccountId>,
@@ -188,7 +180,6 @@ pub struct CodexCredentialSelector {
     repository: CodexCredentialRepository,
     leases: Arc<dyn ProviderLeasePort>,
     session_affinity: Arc<dyn ProviderSessionAffinityPort>,
-    session_exclusions: Arc<dyn ProviderSessionExclusionPort>,
     quota: Arc<CodexCredentialQuotaService>,
     cookie_policy: CodexCookiePolicy,
     risk_recovery: Mutex<HashMap<String, RiskRecoveryState>>,
@@ -325,7 +316,6 @@ impl CodexCredentialSelector {
         repository: CodexCredentialRepository,
         leases: Arc<dyn ProviderLeasePort>,
         session_affinity: Arc<dyn ProviderSessionAffinityPort>,
-        session_exclusions: Arc<dyn ProviderSessionExclusionPort>,
         quota: Arc<CodexCredentialQuotaService>,
         account_feedback: Arc<AccountFeedbackStats>,
         cookie_policy: CodexCookiePolicy,
@@ -335,7 +325,6 @@ impl CodexCredentialSelector {
             repository,
             leases,
             session_affinity,
-            session_exclusions,
             quota,
             cookie_policy,
             risk_recovery: Mutex::new(HashMap::new()),
@@ -360,16 +349,14 @@ impl CodexCredentialSelector {
         };
         self.select_inner(
             &input,
-            None,
             CodexSelectionModel::Requested(request.upstream_model),
         )
         .await
     }
 
-    pub(crate) async fn select_with_cyber_policy(
+    pub(crate) async fn select_with_context(
         &self,
         request: &SelectCodexCredential<'_>,
-        cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         session_affinity_observation: Option<&CodexSessionAffinity>,
         requires_websocket: bool,
         guardian: bool,
@@ -385,7 +372,6 @@ impl CodexCredentialSelector {
         };
         self.select_inner(
             &input,
-            cyber_policy_session_key,
             CodexSelectionModel::Requested(request.upstream_model),
         )
         .await
@@ -393,13 +379,12 @@ impl CodexCredentialSelector {
 
     /// 中间件完成请求改写后，用真实 OpenAI 会话事实复验已持有的租约
     ///
-    /// 此处只复用既有亲和与 cyber-policy 端口，不再次选号；冲突必须在发送前失败，
+    /// 此处只复用既有亲和端口，不再次选号；冲突必须在发送前失败，
     /// 避免同一 attempt 持有旧租约时重入账号选择
     pub(crate) async fn validate_translated_selection(
         &self,
         lease: &mut CodexCredentialLease,
         session_affinity: Option<&CodexSessionAffinity>,
-        cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         policy: AccountSelectionPolicy,
     ) -> Result<(), CredentialSelectionError> {
         let selected_account = lease.account.id().clone();
@@ -426,17 +411,6 @@ impl CodexCredentialSelector {
             lease.admitted_session = Some(affinity.key().clone());
         }
 
-        let cyber_policy_scope = self
-            .prepare_cyber_policy_scope(cyber_policy_session_key)
-            .await;
-        if cyber_policy_scope
-            .as_ref()
-            .and_then(|scope| scope.state.as_ref())
-            .is_some_and(|state| state.excluded_accounts().contains(&selected_account))
-        {
-            return Err(CredentialSelectionError::SessionPolicyRestricted);
-        }
-        lease.cyber_policy_scope = cyber_policy_scope;
         Ok(())
     }
 
@@ -458,13 +432,12 @@ impl CodexCredentialSelector {
             session_affinity_observation: request.session_affinity,
             guardian: false,
         };
-        self.select_inner(&input, None, request.model).await
+        self.select_inner(&input, request.model).await
     }
 
     async fn select_inner(
         &self,
         request: &CredentialSelectionInput<'_>,
-        cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         model: CodexSelectionModel<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let follow_only = !request.attempt.is_diagnostic_required_account()
@@ -479,7 +452,7 @@ impl CodexCredentialSelector {
         let result = tokio::select! {
             biased;
             () = request.attempt.cancellation().cancelled() => Err(CredentialSelectionError::Cancelled),
-            result = self.select_inner_loop(request, cyber_policy_session_key, model, follow_only) => result,
+            result = self.select_inner_loop(request, model, follow_only) => result,
         };
         result.map_err(|error| {
             if follow_only
@@ -502,7 +475,6 @@ impl CodexCredentialSelector {
     async fn select_inner_loop(
         &self,
         request: &CredentialSelectionInput<'_>,
-        cyber_policy_session_key: Option<&ProviderSessionAffinityKey>,
         model: CodexSelectionModel<'_>,
         follow_only: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
@@ -741,16 +713,7 @@ impl CodexCredentialSelector {
                         SystemTime::now(),
                     )
                 });
-            let cyber_policy_scope = self
-                .prepare_cyber_policy_scope(cyber_policy_session_key)
-                .await;
             let mut excluded = request.attempt.excluded_accounts().clone();
-            if let Some(state) = cyber_policy_scope
-                .as_ref()
-                .and_then(|scope| scope.state.as_ref())
-            {
-                excluded.extend(state.excluded_accounts().iter().cloned());
-            }
             // 原生续写归属和显式固定账号优先于会话偏好，不能把增量状态发送给其他账号
             if let Some(required) = pinned_account.as_ref() {
                 excluded.extend(
@@ -933,25 +896,6 @@ impl CodexCredentialSelector {
                         })
                     } else if quota_exhausted {
                         Err(CredentialSelectionError::QuotaExhausted)
-                    } else if cyber_policy_scope
-                        .as_ref()
-                        .and_then(|scope| scope.state.as_ref())
-                        .is_some_and(|state| {
-                            let mut effective = candidates.iter().filter(|candidate| {
-                                pinned_account
-                                    .as_ref()
-                                    .is_none_or(|id| candidate.account.id() == id)
-                            });
-                            effective.next().is_some_and(|first| {
-                                state.excluded_accounts().contains(first.account.id())
-                                    && effective.all(|candidate| {
-                                        state.excluded_accounts().contains(candidate.account.id())
-                                    })
-                            })
-                        })
-                    {
-                        // 仅明确的会话策略排除使用此分类，空池、传输和容量失败保持原分类
-                        Err(CredentialSelectionError::SessionPolicyRestricted)
                     } else {
                         Err(CredentialSelectionError::NoEligibleCredential)
                     };
@@ -1081,7 +1025,6 @@ impl CodexCredentialSelector {
                             account,
                             authentication: runtime.authentication,
                             cookies,
-                            cyber_policy_scope,
                             allows_account_state_mutation,
                             affinity_telemetry,
                             admitted_session: binding_key.cloned(),
@@ -1176,97 +1119,6 @@ impl CodexCredentialSelector {
         .map_err(binding_store_error)?
         .map(|binding| binding.is_some())
         .map_err(binding_store_error)
-    }
-
-    async fn prepare_cyber_policy_scope(
-        &self,
-        key: Option<&ProviderSessionAffinityKey>,
-    ) -> Option<CodexCyberPolicyScope> {
-        let key = key?.clone();
-        let state = match tokio::time::timeout(
-            SESSION_AFFINITY_TIMEOUT,
-            self.session_exclusions.load(&self.provider_kind, &key),
-        )
-        .await
-        {
-            Ok(Ok(state)) => state,
-            Ok(Err(error)) => {
-                tracing::warn!(error = %error, "OpenAI cyber policy state read failed open");
-                None
-            }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_ms = SESSION_AFFINITY_TIMEOUT.as_millis(),
-                    "OpenAI cyber policy state read timed out"
-                );
-                None
-            }
-        };
-        Some(CodexCyberPolicyScope { key, state })
-    }
-
-    pub(crate) async fn record_cyber_policy_failure(
-        &self,
-        scope: Option<&CodexCyberPolicyScope>,
-        account: &ProviderAccount,
-    ) {
-        let Some(scope) = scope else {
-            return;
-        };
-        match tokio::time::timeout(
-            SESSION_AFFINITY_TIMEOUT,
-            self.session_exclusions.record_failure(
-                &self.provider_kind,
-                &scope.key,
-                account.id(),
-                CYBER_POLICY_SESSION_TTL,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    account_id = %account.id(),
-                    error = %error,
-                    "OpenAI cyber policy exclusion write failed open"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    account_id = %account.id(),
-                    timeout_ms = SESSION_AFFINITY_TIMEOUT.as_millis(),
-                    "OpenAI cyber policy exclusion write timed out"
-                );
-            }
-        }
-    }
-
-    pub(crate) async fn observe_cyber_policy_success(&self, scope: Option<&CodexCyberPolicyScope>) {
-        let Some(scope) = scope.filter(|scope| scope.state.is_some()) else {
-            return;
-        };
-        let Some(state) = scope.state.as_ref() else {
-            return;
-        };
-        match tokio::time::timeout(
-            SESSION_AFFINITY_TIMEOUT,
-            self.session_exclusions
-                .clear(&self.provider_kind, &scope.key, state.revision()),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(error = %error, "OpenAI cyber policy exclusion clear failed open");
-            }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_ms = SESSION_AFFINITY_TIMEOUT.as_millis(),
-                    "OpenAI cyber policy exclusion clear timed out"
-                );
-            }
-        }
     }
 
     pub async fn record_failure(
@@ -1674,7 +1526,6 @@ pub struct CodexCredentialLease {
     authentication: CodexRuntimeAuthentication,
     cookies: Vec<RuntimeCodexCookie>,
     installation_id: String,
-    cyber_policy_scope: Option<CodexCyberPolicyScope>,
     allows_account_state_mutation: bool,
     affinity_telemetry: AffinityTelemetry,
     // 已准入请求允许完成；只有中间件改变会话身份时才需要再次认领
@@ -1711,11 +1562,6 @@ impl CodexCredentialLease {
     #[must_use]
     pub fn installation_id(&self) -> &str {
         &self.installation_id
-    }
-
-    #[must_use]
-    pub(crate) const fn cyber_policy_scope(&self) -> Option<&CodexCyberPolicyScope> {
-        self.cyber_policy_scope.as_ref()
     }
 
     /// 禁用账号的管理端诊断必须只返回真实上游结果，不能回写账号侧状态

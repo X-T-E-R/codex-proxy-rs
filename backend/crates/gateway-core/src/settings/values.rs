@@ -27,6 +27,7 @@ pub struct SettingsValues {
     pub(crate) model_mappings: Arc<BTreeMap<String, String>>,
     pub(crate) min_codex_desktop_version: Option<String>,
     pub(crate) min_codex_cli_version: Option<String>,
+    pub(crate) protection: super::RuntimeProtectionSettings,
 }
 
 impl SettingsValues {
@@ -153,7 +154,19 @@ impl SettingsValues {
             model_mappings: Arc::new(model_mappings),
             min_codex_desktop_version,
             min_codex_cli_version,
+            protection: super::RuntimeProtectionSettings::default(),
         }
+    }
+
+    #[must_use]
+    pub const fn with_protection(mut self, protection: super::RuntimeProtectionSettings) -> Self {
+        self.protection = protection;
+        self
+    }
+
+    #[must_use]
+    pub const fn protection(&self) -> super::RuntimeProtectionSettings {
+        self.protection
     }
 
     #[must_use]

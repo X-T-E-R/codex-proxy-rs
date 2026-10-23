@@ -129,6 +129,7 @@ fn request(service: &DefaultExecutionService, transport: ClientTransport) -> Sta
         public_model: PublicModelId::new("gpt-start").unwrap(),
         operation: start_operation(),
         metadata: ExecutionRequestMetadata {
+            cyber_session: Default::default(),
             protocol: "openai".to_owned(),
             endpoint: "/v1/responses".to_owned(),
             transport,
@@ -266,6 +267,7 @@ fn provider_http_endpoint_uses_the_same_admission_and_budget_gate() {
         upstream_model: None,
         operation,
         metadata: ExecutionRequestMetadata {
+            cyber_session: Default::default(),
             protocol: "provider-http".to_owned(),
             endpoint: "/v1/providers/openai/http/models".to_owned(),
             transport: ClientTransport::HttpJson,
@@ -302,6 +304,7 @@ fn bound_token_count_reports_an_explicit_unsupported_capability() {
         upstream_model: Some(UpstreamModelId::new("gpt-start").expect("model")),
         operation,
         metadata: ExecutionRequestMetadata {
+            cyber_session: Default::default(),
             protocol: "token-count".to_owned(),
             endpoint: "/v1/providers/openai/models/gpt-start/count_tokens".to_owned(),
             transport: ClientTransport::HttpJson,
@@ -1345,6 +1348,7 @@ fn completed_parent_rejects_new_nested_execution_and_cancels_an_active_child() {
             public_model: PublicModelId::new("gpt-start").unwrap(),
             operation: start_operation(),
             metadata: ExecutionRequestMetadata {
+                cyber_session: Default::default(),
                 protocol: "openai".to_owned(),
                 endpoint: "host.model".to_owned(),
                 transport: ClientTransport::InternalPlugin,
@@ -3657,6 +3661,7 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
         upstream_model: None,
         operation,
         metadata: ExecutionRequestMetadata {
+            cyber_session: Default::default(),
             protocol: "openai".to_owned(),
             endpoint: "/v1/images/generations".to_owned(),
             transport: ClientTransport::HttpJson,
@@ -3703,6 +3708,7 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
         public_model: PublicModelId::from_client_wire(model).expect("client model"),
         operation: start_operation_for_model(model),
         metadata: ExecutionRequestMetadata {
+            cyber_session: Default::default(),
             protocol: "openai".to_owned(),
             endpoint: "/v1/responses".to_owned(),
             transport: ClientTransport::HttpJson,
@@ -3787,6 +3793,7 @@ fn invalid_continuation_record_should_not_be_forwarded_as_an_external_handle() {
 
 fn execution_metadata_with_continuation() -> ExecutionRequestMetadata {
     ExecutionRequestMetadata {
+        cyber_session: Default::default(),
         protocol: "openai".to_owned(),
         endpoint: "/v1/responses".to_owned(),
         transport: ClientTransport::HttpJson,
@@ -4732,6 +4739,7 @@ fn repeated_connection_failures_never_block_later_requests_for_the_provider() {
             upstream_model: None,
             operation,
             metadata: ExecutionRequestMetadata {
+                cyber_session: Default::default(),
                 protocol: "openai".to_owned(),
                 endpoint: "/v1/images/generations".to_owned(),
                 transport: ClientTransport::HttpJson,

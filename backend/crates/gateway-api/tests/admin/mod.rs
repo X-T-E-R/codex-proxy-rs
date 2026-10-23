@@ -616,6 +616,7 @@ impl SettingsStore for MemorySettingsStore {
             rotation_strategy: command.rotation_strategy,
             updated_at: Utc::now(),
             values: gateway_admin::model::settings::RuntimeSettingsValues {
+                protection: command.values.protection,
                 codex_privacy_policy: command.values.codex_privacy_policy,
                 request_location_enabled: command.values.request_location_enabled,
                 request_location: command.values.request_location,
@@ -1805,6 +1806,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         rotation_strategy: RotationStrategy::Smart,
         updated_at: Utc::now(),
         values: gateway_admin::model::settings::RuntimeSettingsValues {
+            protection: Default::default(),
             codex_privacy_policy: Default::default(),
             request_location_enabled: false,
             request_location: Default::default(),

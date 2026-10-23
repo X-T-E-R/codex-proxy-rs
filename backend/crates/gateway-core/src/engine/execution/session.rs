@@ -27,6 +27,8 @@ pub(super) struct DefaultExecutionSession {
     pub(super) continuation_recorded: bool,
     pub(super) budget: Option<Arc<dyn ClientBudgetPort>>,
     pub(super) diagnostics: Arc<dyn crate::diagnostics::OperationalDiagnostics>,
+    cyber_record: Option<super::cyber::CyberRefusalRecord>,
+    cyber_write: Option<BoxFuture<'static, ()>>,
 }
 
 impl DefaultExecutionSession {
@@ -37,6 +39,7 @@ impl DefaultExecutionSession {
         continuation: Arc<dyn NativeContinuationPort>,
         budget: Option<Arc<dyn ClientBudgetPort>>,
         diagnostics: Arc<dyn crate::diagnostics::OperationalDiagnostics>,
+        cyber_record: Option<super::cyber::CyberRefusalRecord>,
     ) -> Self {
         Self {
             core,
@@ -47,10 +50,22 @@ impl DefaultExecutionSession {
             continuation_recorded: false,
             budget,
             diagnostics,
+            cyber_record,
+            cyber_write: None,
         }
     }
 
     pub(super) async fn settle_if_finalized(&mut self) {
+        if self.core.cyber_refusal_observed()
+            && let Some(record) = self.cyber_record.take()
+        {
+            // 先存入会话再 await；读取被取消时 detach 继续同一份写入责任
+            self.cyber_write = Some(record.into_future());
+        }
+        if let Some(write) = self.cyber_write.as_mut() {
+            write.await;
+            self.cyber_write = None;
+        }
         if self.core.is_finalized()
             && let Some(admission) = self.admission.take()
         {
@@ -175,6 +190,7 @@ impl ExecutionSession for DefaultExecutionSession {
             && self.admission.is_none()
             && self.active_request.is_none()
             && self.cleanup.is_none()
+            && self.cyber_write.is_none()
     }
 
     fn cancel(&self) {

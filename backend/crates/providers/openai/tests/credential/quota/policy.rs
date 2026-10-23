@@ -288,7 +288,6 @@ async fn selected(
         accounts.repository(),
         leases,
         Arc::new(crate::support::MemorySessionAffinity::default()),
-        Arc::new(crate::support::MemorySessionExclusions::default()),
         quota,
         Arc::new(AccountFeedbackStats::default()),
         CodexCookiePolicy::official().unwrap(),
