@@ -234,12 +234,13 @@ fn cyber_refusal_blocks_new_attempts_across_transports_and_provider_routes() {
                     1,
                     "blocked before selecting another account"
                 );
-                let finalizations = store.finalizations.lock().unwrap();
-                let blocked = finalizations.last().unwrap();
-                assert_eq!(blocked.attempt_count, 0);
-                assert_eq!(blocked.send_state, UpstreamSendState::NotSent);
-                assert_eq!(blocked.client_status_code, Some(403));
-                drop(finalizations);
+                {
+                    let finalizations = store.finalizations.lock().unwrap();
+                    let blocked = finalizations.last().unwrap();
+                    assert_eq!(blocked.attempt_count, 0);
+                    assert_eq!(blocked.send_state, UpstreamSendState::NotSent);
+                    assert_eq!(blocked.client_status_code, Some(403));
+                }
                 provider.mode.store(1, Ordering::SeqCst);
                 for (thread, key) in [
                     ("parent", "sk_start_test"),
