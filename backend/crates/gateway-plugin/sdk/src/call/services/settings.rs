@@ -126,7 +126,6 @@ pub struct RuntimeSettings {
     pub account_warmup_model: Option<String>,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
-    #[serde(flatten)]
     pub protection: RuntimeProtectionSettings,
     pub request_profiles: ProviderRequestProfiles,
     pub config_revision: Revision,
@@ -169,7 +168,6 @@ pub struct ReplaceRuntimeSettings {
     pub account_warmup_model: Option<String>,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
-    #[serde(flatten)]
     pub protection: RuntimeProtectionSettings,
     /// 读取设置时的版本；与写入在同一事务内比较，防止覆盖并发更新
     pub expected_revision: Revision,
@@ -212,7 +210,7 @@ pub struct RequestLocation {
     pub timezone: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeProtectionSettings {
     pub cyber_session_block_enabled: bool,
     pub cyber_session_block_ttl_seconds: u32,

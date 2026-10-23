@@ -77,7 +77,6 @@ pub struct RuntimeSettingsValues {
     pub account_warmup_model: Option<String>,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
-    #[serde(flatten)]
     pub protection: gateway_core::settings::RuntimeProtectionSettings,
 }
 
