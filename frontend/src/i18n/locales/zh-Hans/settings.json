@@ -218,6 +218,36 @@
         "description": "修改账号并发上限，恢复后不自动调高"
       }
     },
+    "wsPool": {
+      "title": "WebSocket 连接池",
+      "description": "OpenAI 上游长连接复用；保存后由后端热更新，无需重启",
+      "enable": "启用连接池",
+      "enableHelp": "关闭后自动传输请求改用 HTTP SSE；已开始的生成继续完成，依赖原连接的续接可能失败",
+      "maxAge": "单连接最大存活",
+      "maxAgeHelp": "连接达到此年龄后不再复用",
+      "maxConnecting": "最大并发建连",
+      "maxConnectingHelp": "所有账号合计的并发建连上限，不是请求并发数",
+      "streamIdleTimeout": "流空闲超时",
+      "streamIdleTimeoutHelp": "新请求等待下一条上游业务消息的最长时间",
+      "fastPathBudget": "快路径预算",
+      "fastPathBudgetHelp": "自动传输请求等待连接就绪的预算，超时后回退 HTTP SSE",
+      "milliseconds": "毫秒",
+      "connections": "个"
+    },
+    "cyber": {
+      "title": "cyber 会话自动屏蔽",
+      "description": "上游返回 cyber_policy 后，同一会话在屏蔽时长内由本地直接拒绝，不再发往上游",
+      "enable": "启用 cyber 会话自动屏蔽",
+      "ttl": "屏蔽时长",
+      "ttlHelp": "默认 3600 秒；已有记录保持首次到期时间，重试不会延长",
+      "seconds": "秒",
+      "help": {
+        "label": "屏蔽范围说明",
+        "scope": "按 Client Key 与会话隔离，不屏蔽整个账号，也不影响同 Key 的其他会话；没有会话 ID 时只匹配被拒绝的完整历史及其精确续接。",
+        "boundary": "这是本地按会话键的拦截，不等同于上游账号级的会话排除能力。",
+        "off": "关闭后新请求不再使用屏蔽记录，已存在的记录保留到期，不会被立即清除。"
+      }
+    },
     "warmup": {
       "title": "账号预热",
       "description": "尝试启动空闲 Codex OAuth 账号的额度窗口",
@@ -648,6 +678,8 @@
       "invalidWarmupTimes": "预激活时间格式无效，请输入 HH:MM 格式（如 08:00 或 08:00,13:00）",
       "warmupModelRequired": "启用预激活时请选择模型",
       "invalidWarmupModel": "预激活模型名称不能超过 128 个字符",
+      "invalidCyberTtl": "屏蔽时长应为 1～4294967295 之间的整数秒",
+      "invalidWebSocketPool": "连接池参数需为正整数：存活、空闲超时与快路径预算为毫秒，建连上限为连接个数",
       "settingsSaved": "设置已保存"
     },
     "page": {

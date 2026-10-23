@@ -13,6 +13,7 @@ import AccountWarmupCard from './components/AccountWarmupCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
 import ClientProfileCard from './components/ClientProfileCard.vue'
 import ConcurrencyPolicyCard from './components/ConcurrencyPolicyCard.vue'
+import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import PriorityPolicyCard from './components/PriorityPolicyCard.vue'
 import PrivacyPolicyCard from './components/privacy/PrivacyPolicyCard.vue'
@@ -22,6 +23,7 @@ import ResetCreditCard from './components/ResetCreditCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import SettingsAccessSection from './components/SettingsAccessSection.vue'
 import TokenRefreshCard from './components/TokenRefreshCard.vue'
+import WebSocketPoolCard from './components/WebSocketPoolCard.vue'
 import { useSettingsForm } from './composables/useSettingsForm'
 import { rotationOptions } from './constants'
 import PricingSection from './pricing/index.vue'
@@ -84,6 +86,11 @@ const {
   accountAutoFreezeThresholdValue,
   accountAutoFreezeWindowSecondsValue,
   accountAutoFreezeDurationSecondsValue,
+  cyberSessionBlockTtlSecondsValue,
+  wsPoolMaxAgeMsValue,
+  wsPoolMaxConnectingValue,
+  wsPoolStreamIdleTimeoutMsValue,
+  wsPoolFastPathBudgetMsValue,
 
   minCodexDesktopVersionError,
   minCodexCliVersionError,
@@ -186,6 +193,13 @@ watch(section, (value) => {
             v-model:concurrency-wait-timeout-seconds="concurrencyWaitTimeoutSecondsValue"
             v-model:openai-guardian-reserved-concurrency="openaiGuardianReservedConcurrencyValue"
           />
+          <WebSocketPoolCard
+            v-model:enabled="form.wsPoolEnabled"
+            v-model:max-age-ms="wsPoolMaxAgeMsValue"
+            v-model:max-connecting="wsPoolMaxConnectingValue"
+            v-model:stream-idle-timeout-ms="wsPoolStreamIdleTimeoutMsValue"
+            v-model:fast-path-budget-ms="wsPoolFastPathBudgetMsValue"
+          />
           <AccountAutoFreezeCard
             v-model:enabled="form.accountAutoFreezeEnabled"
             v-model:threshold="accountAutoFreezeThresholdValue"
@@ -194,6 +208,10 @@ watch(section, (value) => {
             v-model:probe-enabled="form.accountAutoFreezeProbeEnabled"
             v-model:probe-model="form.accountAutoFreezeProbeModel"
             v-model:adaptive-concurrency="form.accountAutoFreezeAdaptiveConcurrency"
+          />
+          <CyberSessionBlockCard
+            v-model:enabled="form.cyberSessionBlockEnabled"
+            v-model:seconds="cyberSessionBlockTtlSecondsValue"
           />
           <AccountWarmupCard
             v-model:enabled="form.accountWarmupEnabled"

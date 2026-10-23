@@ -76,6 +76,13 @@ export interface RuntimeSettings {
   accountWarmupEnabled: boolean
   accountWarmupScheduleTime: string
   accountWarmupModel: string | null
+  cyberSessionBlockEnabled: boolean
+  cyberSessionBlockTtlSeconds: number
+  wsPoolEnabled: boolean
+  wsPoolMaxAgeMs: number
+  wsPoolMaxConnecting: number
+  wsPoolStreamIdleTimeoutMs: number
+  wsPoolFastPathBudgetMs: number
   resetCreditLeadMinutes: number
   resetCreditMaxWeeklyRemainingPercent: number | null
   updatedAt: string

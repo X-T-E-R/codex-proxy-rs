@@ -218,6 +218,36 @@
         "description": "Lower the account's concurrency limit, recovery does not raise it automatically"
       }
     },
+    "wsPool": {
+      "title": "WebSocket pool",
+      "description": "Reuse long-lived OpenAI upstream connections; the backend hot-applies saved values without a restart",
+      "enable": "Enable connection pool",
+      "enableHelp": "When off, automatic transport requests fall back to HTTP SSE. Generations already running finish, but continuations that need the original connection may fail",
+      "maxAge": "Max connection age",
+      "maxAgeHelp": "Connections older than this are no longer reused",
+      "maxConnecting": "Max concurrent connects",
+      "maxConnectingHelp": "Total concurrent connection attempts across accounts, not request concurrency",
+      "streamIdleTimeout": "Stream idle timeout",
+      "streamIdleTimeoutHelp": "Longest wait for the next upstream business message on a stream",
+      "fastPathBudget": "Fast-path budget",
+      "fastPathBudgetHelp": "Budget for waiting until a pooled connection is ready before falling back to HTTP SSE",
+      "milliseconds": "ms",
+      "connections": "connections"
+    },
+    "cyber": {
+      "title": "Cyber session blocking",
+      "description": "After the upstream returns cyber_policy, the same session is rejected locally until the block expires instead of being sent upstream",
+      "enable": "Enable automatic cyber session blocking",
+      "ttl": "Block duration",
+      "ttlHelp": "Defaults to 3600 seconds; existing blocks keep their first expiry and retries do not extend it",
+      "seconds": "s",
+      "help": {
+        "label": "Blocking scope",
+        "scope": "Isolated per Client Key and session: never the whole account, and never other sessions on the same key. Without a session ID, only the rejected full history and its exact continuations match.",
+        "boundary": "This is a local block keyed by session, not equivalent to upstream account-level session exclusion.",
+        "off": "Turning it off stops using stored blocks for new requests; existing records stay until their expiry."
+      }
+    },
     "warmup": {
       "title": "Account warmup",
       "description": "Try to start quota windows for idle Codex OAuth accounts",
@@ -648,6 +678,8 @@
       "invalidWarmupTimes": "Use HH:MM for warmup times, for example 08:00 or 08:00,13:00",
       "warmupModelRequired": "Select a model to enable warmup",
       "invalidWarmupModel": "Warmup model name must not exceed 128 characters",
+      "invalidCyberTtl": "Block duration must be a whole number of seconds between 1 and 4294967295",
+      "invalidWebSocketPool": "WebSocket pool values must be positive whole numbers: lifetimes and timeouts in milliseconds, connect limit in connections",
       "settingsSaved": "Settings saved"
     },
     "page": {

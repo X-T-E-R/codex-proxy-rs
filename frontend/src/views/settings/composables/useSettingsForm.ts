@@ -61,6 +61,13 @@ export function useSettingsForm() {
     accountWarmupEnabled: false,
     accountWarmupScheduleTime: '08:00',
     accountWarmupModel: '',
+    cyberSessionBlockEnabled: false,
+    cyberSessionBlockTtlSeconds: 3600 as number | null,
+    wsPoolEnabled: true,
+    wsPoolMaxAgeMs: null as number | null,
+    wsPoolMaxConnecting: null as number | null,
+    wsPoolStreamIdleTimeoutMs: null as number | null,
+    wsPoolFastPathBudgetMs: null as number | null,
     resetCreditLeadMinutes: 10 as number | null,
     resetCreditMaxWeeklyRemainingPercent: null as number | null,
   })
@@ -81,7 +88,7 @@ export function useSettingsForm() {
     mappings.value = initial.mappings
   }
 
-  function numericModel(key: 'resetCreditMaxWeeklyRemainingPercent' | 'resetCreditLeadMinutes' | 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'openaiGuardianReservedConcurrency' | 'maxAccountRotations' | 'openaiSessionAffinityTtlHours' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'concurrencyWaitTimeoutSeconds' | 'responsesMaxDecompressedBodyMiB' | 'usageRetentionDays' | 'accountAutoFreezeThreshold' | 'accountAutoFreezeWindowSeconds' | 'accountAutoFreezeDurationSeconds') {
+  function numericModel(key: 'resetCreditMaxWeeklyRemainingPercent' | 'resetCreditLeadMinutes' | 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'openaiGuardianReservedConcurrency' | 'maxAccountRotations' | 'openaiSessionAffinityTtlHours' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'concurrencyWaitTimeoutSeconds' | 'responsesMaxDecompressedBodyMiB' | 'usageRetentionDays' | 'accountAutoFreezeThreshold' | 'accountAutoFreezeWindowSeconds' | 'accountAutoFreezeDurationSeconds' | 'cyberSessionBlockTtlSeconds' | 'wsPoolMaxAgeMs' | 'wsPoolMaxConnecting' | 'wsPoolStreamIdleTimeoutMs' | 'wsPoolFastPathBudgetMs') {
     return computed({
       get: () => (form[key] === null ? '' : String(form[key])),
       set: (value: string) => {
@@ -111,6 +118,11 @@ export function useSettingsForm() {
   const accountAutoFreezeThresholdValue = numericModel('accountAutoFreezeThreshold')
   const accountAutoFreezeWindowSecondsValue = numericModel('accountAutoFreezeWindowSeconds')
   const accountAutoFreezeDurationSecondsValue = numericModel('accountAutoFreezeDurationSeconds')
+  const cyberSessionBlockTtlSecondsValue = numericModel('cyberSessionBlockTtlSeconds')
+  const wsPoolMaxAgeMsValue = numericModel('wsPoolMaxAgeMs')
+  const wsPoolMaxConnectingValue = numericModel('wsPoolMaxConnecting')
+  const wsPoolStreamIdleTimeoutMsValue = numericModel('wsPoolStreamIdleTimeoutMs')
+  const wsPoolFastPathBudgetMsValue = numericModel('wsPoolFastPathBudgetMs')
 
   const minCodexDesktopVersionError = computed(() => versionError(form.minCodexDesktopVersion))
   const minCodexCliVersionError = computed(() => versionError(form.minCodexCliVersion))
@@ -156,6 +168,13 @@ export function useSettingsForm() {
     form.accountWarmupEnabled = data.accountWarmupEnabled
     form.accountWarmupScheduleTime = data.accountWarmupScheduleTime ?? '08:00'
     form.accountWarmupModel = data.accountWarmupModel ?? ''
+    form.cyberSessionBlockEnabled = data.cyberSessionBlockEnabled ?? false
+    form.cyberSessionBlockTtlSeconds = data.cyberSessionBlockTtlSeconds ?? 3600
+    form.wsPoolEnabled = data.wsPoolEnabled ?? true
+    form.wsPoolMaxAgeMs = data.wsPoolMaxAgeMs ?? null
+    form.wsPoolMaxConnecting = data.wsPoolMaxConnecting ?? null
+    form.wsPoolStreamIdleTimeoutMs = data.wsPoolStreamIdleTimeoutMs ?? null
+    form.wsPoolFastPathBudgetMs = data.wsPoolFastPathBudgetMs ?? null
     form.resetCreditLeadMinutes = data.resetCreditLeadMinutes
     form.resetCreditMaxWeeklyRemainingPercent = data.resetCreditMaxWeeklyRemainingPercent
     mappings.value = Object.entries(data.modelMappings).map(([requestedModel, upstreamModel]) => ({
@@ -328,6 +347,20 @@ export function useSettingsForm() {
       ZNotification.warning({ message: t('settings.form.invalidWarmupModel') })
       return
     }
+    // 关闭屏蔽也要保存当前时长，避免下次开启回落到默认值
+    const cyberSessionBlockTtlSeconds = form.cyberSessionBlockTtlSeconds
+    if (cyberSessionBlockTtlSeconds === null || !Number.isInteger(cyberSessionBlockTtlSeconds)
+      || cyberSessionBlockTtlSeconds < 1 || cyberSessionBlockTtlSeconds > 4_294_967_295) {
+      ZNotification.warning({ message: t('settings.form.invalidCyberTtl') })
+      return
+    }
+    const { wsPoolMaxAgeMs, wsPoolMaxConnecting, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs } = form
+    if (wsPoolMaxAgeMs === null || wsPoolStreamIdleTimeoutMs === null || wsPoolFastPathBudgetMs === null
+      || ![wsPoolMaxAgeMs, wsPoolStreamIdleTimeoutMs, wsPoolFastPathBudgetMs].every(value => Number.isSafeInteger(value) && value >= 1)
+      || wsPoolMaxConnecting === null || !Number.isInteger(wsPoolMaxConnecting) || wsPoolMaxConnecting < 1 || wsPoolMaxConnecting > 4_294_967_295) {
+      ZNotification.warning({ message: t('settings.form.invalidWebSocketPool') })
+      return
+    }
     await saveAction.run(async () => {
       const result = await updateSettings({
         configRevision: savedSettings.form.configRevision,
@@ -367,6 +400,13 @@ export function useSettingsForm() {
         accountWarmupEnabled: form.accountWarmupEnabled,
         accountWarmupScheduleTime: scheduleTime,
         accountWarmupModel: warmupModel || null,
+        cyberSessionBlockEnabled: form.cyberSessionBlockEnabled,
+        cyberSessionBlockTtlSeconds,
+        wsPoolEnabled: form.wsPoolEnabled,
+        wsPoolMaxAgeMs: wsPoolMaxAgeMs!,
+        wsPoolMaxConnecting: wsPoolMaxConnecting!,
+        wsPoolStreamIdleTimeoutMs: wsPoolStreamIdleTimeoutMs!,
+        wsPoolFastPathBudgetMs: wsPoolFastPathBudgetMs!,
         resetCreditLeadMinutes,
         resetCreditMaxWeeklyRemainingPercent,
       })
@@ -410,6 +450,11 @@ export function useSettingsForm() {
     accountAutoFreezeThresholdValue,
     accountAutoFreezeWindowSecondsValue,
     accountAutoFreezeDurationSecondsValue,
+    cyberSessionBlockTtlSecondsValue,
+    wsPoolMaxAgeMsValue,
+    wsPoolMaxConnectingValue,
+    wsPoolStreamIdleTimeoutMsValue,
+    wsPoolFastPathBudgetMsValue,
     minCodexDesktopVersionError,
     minCodexCliVersionError,
     saveSettings,
