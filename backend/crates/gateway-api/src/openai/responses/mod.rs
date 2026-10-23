@@ -1,5 +1,6 @@
 //! OpenAI Responses 的透明 wire adapter 与 Core canonical facts 投影
 
+mod cyber;
 mod error;
 mod http;
 mod keepalive;

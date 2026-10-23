@@ -6,7 +6,6 @@ use gateway_core::{
 };
 use gateway_store::redis::RedisCyberSessionRepository;
 use redis::aio::ConnectionManager;
-use serde_json::json;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -70,6 +69,13 @@ async fn cyber_marker_keeps_original_ttl_and_key_thread_isolation() {
 }
 
 fn key(client: &str, thread: &str) -> CyberSessionKey {
-    CyberSessionRequest::from_responses(json!({"client_metadata": {"session_id":"shared-parent", "x-codex-turn-metadata":{"thread_id":thread}}}).as_object().unwrap(), None, std::iter::empty(), None)
-        .refusal_key(&ClientApiKeyId::new(client).unwrap()).unwrap()
+    let digest = match thread {
+        "child-a" => [1; 32],
+        "child-b" => [2; 32],
+        "parent" => [3; 32],
+        _ => panic!("unknown synthetic thread"),
+    };
+    CyberSessionRequest::from_digests(Some(digest), Vec::new())
+        .refusal_key(&ClientApiKeyId::new(client).unwrap())
+        .unwrap()
 }

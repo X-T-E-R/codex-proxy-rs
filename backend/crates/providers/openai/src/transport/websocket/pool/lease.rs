@@ -62,7 +62,7 @@ impl WebSocketOpeningPermit {
     ) -> Option<Self> {
         use std::sync::atomic::Ordering;
         count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < limit).then_some(current + 1)
             })
             .ok()

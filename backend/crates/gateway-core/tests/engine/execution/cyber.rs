@@ -195,9 +195,13 @@ fn protected_request(
 ) -> StartExecution {
     let mut request = super::request(service, transport);
     request.client = service.authenticate(key).unwrap();
-    request.metadata.cyber_session = CyberSessionRequest::from_responses(json!({
-        "client_metadata": { "session_id": "shared-family", "x-codex-turn-metadata": {"thread_id": thread}}
-    }).as_object().unwrap(), None, ["shared-family"], None);
+    let digest = match thread {
+        "child-a" => [1; 32],
+        "child-b" => [2; 32],
+        "parent" => [3; 32],
+        _ => panic!("unknown synthetic thread"),
+    };
+    request.metadata.cyber_session = CyberSessionRequest::from_digests(Some(digest), Vec::new());
     request
 }
 

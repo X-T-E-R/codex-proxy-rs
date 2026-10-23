@@ -273,3 +273,82 @@ fn http_decode_should_apply_configured_limits_to_every_encoding_and_frame() {
         assert!(decode_request_with_headers(REQUEST, &request_headers, 1).is_ok());
     }
 }
+
+fn cyber_request(
+    mut body: serde_json::Value,
+    session: &str,
+) -> gateway_core::provider_ports::CyberSessionRequest {
+    body["model"] = json!("gpt-test");
+    let mut headers = HeaderMap::new();
+    if !session.is_empty() {
+        headers.insert("session_id", HeaderValue::from_str(session).unwrap());
+    }
+    decode_request_with_headers(body.to_string().as_bytes(), &headers, 65536)
+        .unwrap()
+        .metadata()
+        .cyber_session()
+        .clone()
+}
+
+#[test]
+fn cyber_thread_identity_is_key_scoped_and_never_uses_shared_parent_continuation() {
+    let key = gateway_core::policy::ClientApiKeyId::new("key-a").unwrap();
+    let other = gateway_core::policy::ClientApiKeyId::new("key-b").unwrap();
+    let identity = |thread: &str| {
+        cyber_request(
+            json!({
+                "input":"hello", "previous_response_id":"resp_shared",
+                "client_metadata":{"session_id":"shared", "x-codex-turn-metadata":{"thread_id":thread}}
+            }),
+            "shared",
+        )
+    };
+    let child = identity("child-a").refusal_key(&key).unwrap();
+    for thread in ["parent", "child-b"] {
+        assert!(!identity(thread).lookup_keys(&key).contains(&child));
+    }
+    assert!(identity("child-a").lookup_keys(&key).contains(&child));
+    assert!(!identity("child-a").lookup_keys(&other).contains(&child));
+    let encoded = cyber_request(
+        json!({"input":"hello","client_metadata":{"x-codex-turn-metadata":"{\"thread_id\":\"child-a\"}"}}),
+        "different",
+    );
+    assert_eq!(encoded.refusal_key(&key), Some(child));
+    assert_eq!(
+        cyber_request(json!({}), "legacy-session")
+            .lookup_keys(&key)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn cyber_transcript_prefixes_preserve_descendants_and_bound_lookups() {
+    let key = gateway_core::policy::ClientApiKeyId::new("key-a").unwrap();
+    let first = cyber_request(
+        json!({"instructions":"same","input":[{"role":"user","content":"blocked"}]}),
+        "",
+    );
+    let marker = first.refusal_key(&key).unwrap();
+    let descendant = cyber_request(
+        json!({"instructions":"same","input":[{"content":"blocked","role":"user"},{"role":"assistant","content":"next"}]}),
+        "",
+    );
+    assert!(descendant.lookup_keys(&key).contains(&marker));
+    assert!(
+        !cyber_request(
+            json!({"instructions":"different","input":[{"role":"user","content":"blocked"}]}),
+            ""
+        )
+        .lookup_keys(&key)
+        .contains(&marker)
+    );
+    let long = cyber_request(
+        json!({"input":(0..300).map(|n| json!({"content":n})).collect::<Vec<_>>()}),
+        "",
+    );
+    assert_eq!(
+        long.lookup_keys(&key).len(),
+        gateway_core::provider_ports::MAX_TRANSCRIPT_LOOKUPS
+    );
+}

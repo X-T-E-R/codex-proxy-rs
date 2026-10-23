@@ -323,7 +323,6 @@ impl CodexProvider {
                 .validate_translated_selection(
                     &mut lease,
                     session_affinity.as_ref(),
-                    None,
                     context.account_selection_policy(),
                 )
                 .await

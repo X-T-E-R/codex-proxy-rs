@@ -511,7 +511,7 @@ pub(super) fn decode_request_object(
         .map(|response_id| ContinuationIntent::PreviousResponseId(response_id.to_owned()))
         .unwrap_or(ContinuationIntent::None);
 
-    let cyber_session = gateway_core::provider_ports::CyberSessionRequest::from_responses(
+    let cyber_session = super::cyber::from_responses(
         &object,
         request_headers.turn_metadata.as_deref(),
         request_headers
