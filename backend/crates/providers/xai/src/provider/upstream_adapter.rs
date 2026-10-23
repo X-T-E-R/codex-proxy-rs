@@ -130,7 +130,7 @@ impl UpstreamAccountConnection for SelectedConnection {
                 &self.session,
                 error,
                 failure,
-                self.context.credential_recovery_attempted(),
+                &self.context,
             )
             .await
         })
