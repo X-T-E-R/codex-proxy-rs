@@ -7,6 +7,32 @@ use gateway_core::provider_ports::{
 use gateway_core::settings::RuntimeProtectionSettings;
 use std::sync::atomic::AtomicU64;
 
+struct PinnedContinuation(&'static str);
+
+impl NativeContinuationPort for PinnedContinuation {
+    fn resolve<'a>(
+        &'a self,
+        client: &'a ClientApiKeyId,
+        previous: &'a PreviousResponseId,
+    ) -> BoxFuture<'a, Result<Option<NativeContinuationPin>, NativeContinuationStoreError>> {
+        Box::pin(async move {
+            Ok(Some(NativeContinuationPin::new(
+                previous.clone(),
+                previous.clone(),
+                client.clone(),
+                ProviderKind::new(self.0).unwrap(),
+                ProviderAccountId::new("acct_other").unwrap(),
+            )))
+        })
+    }
+    fn record<'a>(
+        &'a self,
+        _: NativeContinuationPin,
+    ) -> BoxFuture<'a, Result<(), NativeContinuationStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 #[derive(Default)]
 struct Markers {
     now: AtomicU64,
@@ -197,7 +223,7 @@ fn cyber_refusal_blocks_new_attempts_across_transports_and_provider_routes() {
                     store.clone(),
                     ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
                     Arc::new(Admissions::default()),
-                    Arc::new(UnusedContinuation),
+                    Arc::new(PinnedContinuation(kind)),
                     Arc::new(RecordingClientApiKeyUsage::default()),
                     Arc::new(crate::RecordingDiagnostics::default()),
                 )
@@ -241,6 +267,16 @@ fn cyber_refusal_blocks_new_attempts_across_transports_and_provider_routes() {
                     assert_eq!(blocked.send_state, UpstreamSendState::NotSent);
                     assert_eq!(blocked.client_status_code, Some(403));
                 }
+                let mut pinned = protected_request(&service, transport, "child-a", "sk_start_test");
+                pinned.metadata.previous_response_id =
+                    Some(PreviousResponseId::new("resp_previous"));
+                let pinned_error = service.start(pinned).await.err().unwrap();
+                assert_eq!(pinned_error.kind(), GatewayErrorKind::PolicyDenied);
+                assert_eq!(
+                    provider.calls.load(Ordering::SeqCst),
+                    1,
+                    "a different fixed continuation account cannot bypass the marker"
+                );
                 provider.mode.store(1, Ordering::SeqCst);
                 for (thread, key) in [
                     ("parent", "sk_start_test"),
@@ -291,6 +327,27 @@ fn cyber_disabled_success_does_not_clear_marker_and_expiry_reopens_the_session()
             .unwrap();
         assert!(first.session.collect_uncommitted().await.is_err());
         handle.publish(snapshot("openai", false));
+        let mut disabled_refusal = service
+            .start(protected_request(
+                &service,
+                ClientTransport::HttpSse,
+                "child-b",
+                "sk_start_test",
+            ))
+            .await
+            .unwrap();
+        assert!(
+            disabled_refusal
+                .session
+                .collect_uncommitted()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            markers.records.load(Ordering::SeqCst),
+            1,
+            "disabled protection must not record a new marker"
+        );
         provider.mode.store(1, Ordering::SeqCst);
         let mut allowed = service
             .start(protected_request(

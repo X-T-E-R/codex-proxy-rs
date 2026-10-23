@@ -8,6 +8,53 @@ use serde_json::json;
 
 use super::openai_wire_body;
 
+#[test]
+fn cyber_identity_matches_http_sse_and_each_websocket_frame_without_parent_leakage() {
+    use gateway_api::openai::responses::{
+        OpenAiRequestHeaders, decode_response_create_with_context,
+    };
+    use gateway_core::policy::ClientApiKeyId;
+    let key = ClientApiKeyId::new("key-a").unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-codex-turn-metadata",
+        HeaderValue::from_static(r#"{"thread_id":"parent","session_id":"shared"}"#),
+    );
+    let opening = OpenAiRequestHeaders::from_headers(&headers);
+    let body = json!({"model":"gpt-test","input":"hello","client_metadata":{"session_id":"shared", "x-codex-turn-metadata":{"thread_id":"child-a"}}});
+    let marker = decode_request_with_headers(body.to_string().as_bytes(), &headers, 65536)
+        .unwrap()
+        .metadata()
+        .cyber_session()
+        .refusal_key(&key)
+        .unwrap();
+    for stream in [false, true] {
+        let mut http = body.clone();
+        http["stream"] = json!(stream);
+        let decoded =
+            decode_request_with_headers(http.to_string().as_bytes(), &headers, 65536).unwrap();
+        assert_eq!(
+            decoded.metadata().cyber_session().refusal_key(&key),
+            Some(marker.clone())
+        );
+    }
+    for thread in ["child-a", "child-b", "parent"] {
+        let mut frame = body.clone();
+        frame["type"] = json!("response.create");
+        frame["previous_response_id"] = json!("resp_shared_parent");
+        frame["client_metadata"]["x-codex-turn-metadata"]["thread_id"] = json!(thread);
+        let decoded = decode_response_create_with_context(&frame.to_string(), &opening).unwrap();
+        assert_eq!(
+            decoded
+                .metadata()
+                .cyber_session()
+                .lookup_keys(&key)
+                .contains(&marker),
+            thread == "child-a"
+        );
+    }
+}
+
 const ENCODINGS: [&str; 3] = ["gzip", "deflate", "zstd"];
 const REQUEST: &[u8] = br#"{"model":"gpt-test","input":"hello","future_field":{"value":1}}"#;
 const DECOMPRESSED_LIMIT: u64 = 64 * 1024 * 1024;
