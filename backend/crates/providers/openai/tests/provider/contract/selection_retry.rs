@@ -58,7 +58,7 @@ impl ExecutionStore for NoopExecutionStore {
 }
 
 #[tokio::test]
-async fn cyber_policy_rotation_preserves_upstream_response_and_next_request_stays_local() {
+async fn enabled_cyber_protection_preserves_original_http_refusal_without_replaying() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_subagent_a").await;
     let server = MockServer::start().await;
