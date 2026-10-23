@@ -99,6 +99,30 @@ try:
         'expectedRevision':account['revision'], 'mode':'inherit', 'autoOffOnQuotaReset':None})
     assert account['effectiveMode'] == 'enabled' and account['effectiveAutoOffOnQuotaReset'] is True
     checks.append('account nullable inheritance, explicit off, and persisted re-inheritance')
+    quota = api('/api/admin/quota-policy')
+    policy = {'primary':{'action':'off', 'thresholdPercent':95},
+        'secondary':{'action':'stop', 'thresholdPercent':98},
+        'autoReset':{'maxAttemptsPer24h':2, 'cooldownSeconds':7200}}
+    quota_command = {'expectedRevision':quota['revision'], 'policy':policy}
+    quota_saved = api('/api/admin/quota-policy/update', quota_command)
+    assert quota_saved['policy'] == policy
+    api('/api/admin/quota-policy/update', quota_command, status=409)
+    inherited = api('/api/admin/accounts/quota-policy?accountId=acct_ci_policy')
+    assert inherited['mode'] == 'inherit' and inherited['effectivePolicy'] == policy
+    disabled_command = {'accountId':'acct_ci_policy', 'expectedRevision':inherited['revision'],
+        'mode':'disabled', 'policy':None}
+    disabled = api('/api/admin/accounts/quota-policy/update', disabled_command)
+    api('/api/admin/accounts/quota-policy/update', disabled_command, status=409)
+    assert disabled['source'] == 'disabled' and disabled['effectivePolicy']['secondary']['action'] == 'off'
+    custom = dict(policy, primary={'action':'stop', 'thresholdPercent':90})
+    customized = api('/api/admin/accounts/quota-policy/update', {'accountId':'acct_ci_policy',
+        'expectedRevision':disabled['revision'], 'mode':'custom', 'policy':custom})
+    assert customized['source'] == 'account' and customized['effectivePolicy'] == custom
+    readback = api('/api/admin/accounts/quota-policy?accountId=acct_ci_policy')
+    assert readback['revision'] == customized['revision'] and readback['policy'] == custom
+    assert readback['status']['pendingOperationId'] is None and readback['status']['autoAttemptsLast24h'] == 0
+    api('/api/admin/quota-policy/update', {'expectedRevision':quota_saved['revision'], 'policy':quota['policy']})
+    checks.append('real QuotaPolicy global/account save and readback, inheritance/disabled/custom, stale-revision 409; no reset action')
     summary = api('/api/admin/errors/summary?period=7d')
     expected = {'retainedRequests':3, 'serverRelatedRequests':3, 'terminalServerRelatedRequests':3,
         'overloaded':1, 'status503':2, 'upstream503':1, 'infrastructure503':1,
