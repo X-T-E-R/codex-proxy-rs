@@ -1133,32 +1133,11 @@ async fn progress_congestion_preserves_failure_reserve_without_waiting() {
     database.close().await;
 }
 
-#[tokio::test]
-async fn diagnostic_contract_red_reproduces_terminal_loss_and_false_reaping() {
-    let Some(database) = TestDatabase::create("diagnostic_contract_red").await else {
-        return;
-    };
-    let request = accepted_request("req_diagnostic_contract");
-    let trace = gateway_core::diagnostics::TraceContext::new(request.id.as_str());
-    for index in 0..4 {
-        trace.record_evidence(
-            "test.evidence",
-            serde_json::json!({"index": index, "data": "e".repeat(16_000)}),
-        );
-    }
-    trace.record(
-        "test.ordinary",
-        serde_json::json!({"data": "o".repeat(4_000)}),
-    );
-    let snapshot = trace.snapshot().unwrap();
-    assert_eq!(snapshot["events"].as_array().unwrap().len(), 5);
-    assert_eq!(snapshot["droppedEvents"], 0);
-    let encoded = snapshot.to_string();
-    assert!(encoded.len() > 64 * 1024);
-    if let Ok(path) = std::env::var("CPR_TEST_DIAGNOSTIC_FIXTURE_OUT") {
-        std::fs::write(path, &encoded).expect("save synthetic TraceContext fixture");
-    }
-    let mut finalization = early_failure(&request);
+fn diagnostic_contract_finalization(
+    request: &NewModelRequest,
+    trace: String,
+) -> ModelRequestFinalization {
+    let mut finalization = early_failure(request);
     finalization.outcome = gateway_core::engine::ExecutionOutcome::Succeeded;
     finalization.error = None;
     finalization.client_status_code = Some(200);
@@ -1171,14 +1150,140 @@ async fn diagnostic_contract_red_reproduces_terminal_loss_and_false_reaping() {
     finalization.cost = gateway_core::metering::CalculatedCost::from_usd_ticks(12_300_000)
         .unwrap()
         .into_estimate();
-    finalization.diagnostic_trace_json = Some(encoded.clone());
+    finalization.diagnostic_trace_json = Some(trace);
+    finalization
+}
+
+#[tokio::test]
+async fn diagnostic_contract_keeps_legal_terminals_and_usage_through_buffered_postgres() {
+    use gateway_core::diagnostics::{MAX_DIAGNOSTIC_TRACE_BYTES, TraceContext};
+    use serde_json::{Value, json};
+
+    let Some(database) = TestDatabase::create("diagnostic_contract_green").await else {
+        return;
+    };
+    // 此输入由未修复 TraceContext 在隔离 PG 红证运行中生成，不以新生成器替换旧输入
+    let old_trace = include_str!("../fixtures/diagnostic-contract-old.json");
+    let old: Value = serde_json::from_str(old_trace).unwrap();
+    assert!(old_trace.len() > MAX_DIAGNOSTIC_TRACE_BYTES);
+    assert_eq!(old["droppedEvents"], 0);
+    assert_eq!(old["events"].as_array().unwrap().len(), 5);
+    let trace = TraceContext::new("req_diagnostic_current");
+    for index in 0..4 {
+        trace.record_evidence(
+            "test.evidence",
+            json!({"index": index, "data": "e".repeat(16_000)}),
+        );
+    }
+    trace.record("test.ordinary", json!({"data": "o".repeat(4_000)}));
+    let current = trace.snapshot().unwrap();
+    assert!(current.to_string().len() <= MAX_DIAGNOSTIC_TRACE_BYTES);
+    assert!(current["droppedEvents"].as_u64().unwrap() > 0);
+    let small = TraceContext::new("req_diagnostic_small");
+    small.record("request.finished", json!({"outcome": "succeeded"}));
+    let small = small.snapshot().unwrap();
+    let cases = [
+        ("req_diagnostic_contract", old_trace.to_owned(), None),
+        ("req_diagnostic_current", current.to_string(), Some(current)),
+        ("req_diagnostic_small", small.to_string(), Some(small)),
+        ("req_diagnostic_invalid_json", "{invalid".to_owned(), None),
+        ("req_diagnostic_not_object", "[]".to_owned(), None),
+    ];
+    let (store, writer) =
+        BufferedExecutionStore::new(Arc::new(PgExecutionStore::new(database.pool.clone())));
+    let mut deadline = None;
+    for (id, encoded, _) in &cases {
+        let request = accepted_request(id);
+        deadline = request.deadline_at.at();
+        store.create_model_request(request.clone()).await.unwrap();
+        store
+            .finalize_model_request(diagnostic_contract_finalization(&request, encoded.clone()))
+            .await
+            .unwrap();
+    }
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    writer
+        .run(WorkerDaemonContext::new(cancellation))
+        .await
+        .unwrap();
+    assert_eq!(store.stats().persisted_total, (cases.len() * 2) as u64);
+    assert_eq!(store.stats().write_failure_total, 0);
+    assert_eq!(store.stats().dropped_total, 0);
+    for (id, _, expected_trace) in &cases {
+        let row: Value =
+            sqlx::query_scalar("select to_jsonb(mr) from model_requests mr where id = $1")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(row["outcome"], "succeeded");
+        assert_eq!(row["upstream_send_state"], "not_sent");
+        assert_eq!(row["input_tokens"], 101);
+        assert_eq!(row["output_tokens"], 23);
+        assert_eq!(row["total_tokens"], 124);
+        assert_eq!(row["cost_source"], "calculated");
+        assert_eq!(row["cost_currency"], "USD");
+        assert_eq!(row["cost_amount"].as_f64(), Some(0.00123));
+        assert_eq!(row["provider_observation_json"], json!({"fixture": true}));
+        assert_eq!(
+            row.get("diagnostic_trace_json")
+                .filter(|value| !value.is_null()),
+            expected_trace.as_ref()
+        );
+    }
+    assert_eq!(
+        store
+            .recover_expired(deadline.unwrap())
+            .await
+            .unwrap()
+            .requests,
+        0
+    );
+    println!(
+        "DIAGNOSTIC_CONTRACT_GREEN old_bytes={} cases=5 persisted=10 write_failure=0 terminals=succeeded input=101 output=23 total=124 cost=0.00123USD provider_observation=preserved reaped=0",
+        old_trace.len()
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn diagnostic_degradation_does_not_swallow_invalid_core_fields() {
+    let Some(database) = TestDatabase::create("diagnostic_core_rejected").await else {
+        return;
+    };
     let pg = Arc::new(PgExecutionStore::new(database.pool.clone()));
+    for (id, status, metadata) in [
+        ("req_diagnostic_bad_status", 99, "{\"fixture\":true}"),
+        ("req_diagnostic_bad_provider_json", 200, "{invalid"),
+        ("req_diagnostic_bad_provider_shape", 200, "[]"),
+    ] {
+        let request = accepted_request(id);
+        pg.create_model_request(request.clone()).await.unwrap();
+        let mut finalization = diagnostic_contract_finalization(&request, "{invalid".to_owned());
+        finalization.client_status_code = Some(status);
+        finalization.provider_metadata_json = Some(metadata.to_owned());
+        assert_eq!(
+            pg.finalize_model_request(finalization)
+                .await
+                .unwrap_err()
+                .kind(),
+            StoreErrorKind::InvalidData
+        );
+        let outcome: String =
+            sqlx::query_scalar("select outcome from model_requests where id = $1")
+                .bind(id)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+        assert_eq!(outcome, "running");
+    }
+    let request = accepted_request("req_diagnostic_bad_status_buffered");
     let (store, writer) = BufferedExecutionStore::new(pg);
     store.create_model_request(request.clone()).await.unwrap();
-    store
-        .finalize_model_request(finalization)
-        .await
-        .expect("enqueue is Ok before rejected persistence");
+    let mut finalization = diagnostic_contract_finalization(&request, "{invalid".to_owned());
+    finalization.client_status_code = Some(99);
+    store.finalize_model_request(finalization).await.unwrap();
     let cancellation = CancellationToken::new();
     cancellation.cancel();
     writer
@@ -1187,45 +1292,11 @@ async fn diagnostic_contract_red_reproduces_terminal_loss_and_false_reaping() {
         .unwrap();
     assert_eq!(store.stats().persisted_total, 1);
     assert_eq!(store.stats().write_failure_total, 1);
-    assert_eq!(store.stats().dropped_total, 0);
-    let row: serde_json::Value =
-        sqlx::query_scalar("select to_jsonb(mr) from model_requests mr where id = $1")
-            .bind(request.id.as_str())
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    assert_eq!(row["outcome"], "running");
-    for field in [
-        "input_tokens",
-        "cost_amount",
-        "provider_observation_json",
-        "diagnostic_trace_json",
-    ] {
-        assert!(
-            row[field].is_null(),
-            "{field} rejected with the entire terminal write"
-        );
-    }
-    assert_eq!(
-        store
-            .recover_expired(request.deadline_at.at().unwrap())
-            .await
-            .unwrap()
-            .requests,
-        1
-    );
-    let recovered = observability_repository(&database.pool)
-        .usage_record_detail(request.id.as_str())
+    let outcome: String = sqlx::query_scalar("select outcome from model_requests where id = $1")
+        .bind(request.id.as_str())
+        .fetch_one(&database.pool)
         .await
         .unwrap();
-    assert_eq!(recovered.request.outcome.as_str(), "incomplete");
-    assert_eq!(
-        recovered.request.error_kind.as_deref(),
-        Some("process_interrupted")
-    );
-    println!(
-        "DIAGNOSTIC_CONTRACT_RED bytes={} events=5 dropped=0 enqueue=Ok persisted=1 write_failure=1 db_before=running reaped=1 db_after=incomplete/process_interrupted",
-        encoded.len()
-    );
+    assert_eq!(outcome, "running");
     database.close().await;
 }

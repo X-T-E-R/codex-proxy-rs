@@ -171,27 +171,6 @@ jobs:
           done
           echo "$client_dir" >> "$GITHUB_PATH"
 
-      - name: Reproduce diagnostic terminal rejection with a synthetic trace
-        working-directory: backend
-        env:
-          CPR_TEST_DIAGNOSTIC_FIXTURE_OUT: ${{ runner.temp }}/diagnostic-contract-old.json
-        run: |
-          set -euo pipefail
-          cargo nextest run \
-            --cargo-metadata "$RUNNER_TEMP/nextest-cargo-metadata.json" \
-            --binaries-metadata "$RUNNER_TEMP/nextest-binaries.json" \
-            --no-tests fail -E 'test(diagnostic_contract_red)' --success-output immediate \
-            2>&1 | tee "$RUNNER_TEMP/diagnostic-contract-red.log"
-
-      - name: Preserve synthetic diagnostic reproduction
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: task36-diagnostic-red
-          path: |
-            ${{ runner.temp }}/diagnostic-contract-old.json
-            ${{ runner.temp }}/diagnostic-contract-red.log
-          if-no-files-found: error
-
       - name: Rust tests
         working-directory: backend
         run: |

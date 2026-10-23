@@ -994,7 +994,9 @@ Usage 详情中的 attempt 因此是 best-effort，并通过
 Store 按生命周期原子更新所属分组，保留其他阶段的事实；查询通过 `model_request_observations`
 集中提取类型化字段，Admin 与 API 不依赖数据库 JSON 路径。官方计时与本地计时分别归入
 `timings.upstream` 和 `timings.local`，缺失保持未知；原始错误、Provider metadata、费用快照及
-诊断轨迹仍按各自合同独立保存
+诊断轨迹仍按各自合同独立保存。Core 的诊断快照与 Store 共享完整序列化字节上限，
+Store 只对可选诊断字段的解析、形状和大小失败降级并记录固定原因、大小及累计次数，
+不让诊断拒掉合法终态；HTTP 状态、费用、Provider 观测等核心字段仍按原合同校验
 
 `model_requests.deadline_at` 是异常回收租约的到期时间，运行会话持续刷新，且不超过显式执行截止。
 进程退出后停止刷新，Worker 按过期租约收敛遗留的 running 记录；该观测续期失败不取消客户端执行

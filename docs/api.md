@@ -2212,9 +2212,12 @@ WebSocket 握手不主动添加专项计时请求头，客户端显式提供的�
 实际参与决策的门槛、剩余预算和发送状态，`retry.policy` 保存宿主及插件策略的停止事实。
 已有的 `provider.precommit.released` 数据保留释放原因、预取字节数与等待时间，不等同于下游已提交
 
-Trace v3 为路由、账号选择、失败、重试、响应边界及终态事实预留独立的 64 KiB 预算，
-普通事件另有 64 KiB 预算，总事件数最多 128。`stageCounts` 记录至多 64 类已采集阶段的次数，
-事件淘汰不抹除阶段计数；`droppedEvidenceEvents` 与 `stageCountOverflow` 分别报告关键证据淘汰和阶段统计超限
+Trace v3 的完整紧凑 JSON 快照最多 64 KiB，包含封装、UTF-8 字节和 JSON 转义，总事件数最多 128。
+路由、账号选择、失败、重试、响应边界及终态等关键证据优先于普通流事件保留；
+`droppedEvents` 与 `droppedEvidenceEvents` 分别记录全部事件及其中关键证据的淘汰次数。
+`stageCounts` 保留至多 64 类已采集阶段的次数，事件淘汰不抹除对应阶段计数；
+阶段统计因容量或编码预算超限而未保留的次数计入 `stageCountOverflow`。
+可选时间线因 JSON 非法、非对象或超限而缺失时，请求终态、用量、费用和 Provider 观测仍独立保存
 
 OpenAI Responses 的 `provider.request.input` 与 `provider.request.outbound` 分别记录 Provider 收到的
 已解析正文和最终准备发送的正文指纹，包括指令、工具、缓存键、模型设置与有序输入。

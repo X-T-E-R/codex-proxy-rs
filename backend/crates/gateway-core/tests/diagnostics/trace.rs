@@ -67,7 +67,7 @@ fn critical_evidence_has_an_independent_bound_and_reports_its_own_loss() {
         events.len() as u64 + snapshot["droppedEvents"].as_u64().unwrap(),
         100
     );
-    assert!(snapshot.to_string().len() < 128 * 1024);
+    assert!(snapshot.to_string().len() <= gateway_core::diagnostics::MAX_DIAGNOSTIC_TRACE_BYTES);
 }
 #[test]
 fn bounded_history_preserves_start_failure_and_final_result() {
@@ -499,4 +499,60 @@ impl Visit for LogFields<'_> {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         write!(self.0, "{}={value:?} ", field.name()).unwrap();
     }
+}
+
+#[test]
+fn serialized_snapshot_budget_includes_envelope_utf8_and_escaping() {
+    use gateway_core::diagnostics::MAX_DIAGNOSTIC_TRACE_BYTES;
+
+    for (ordinary, evidence) in [
+        ("o".repeat(4_000), "e".repeat(16_000)),
+        ("界".repeat(1_300), "界".repeat(5_300)),
+        ("\"\\\n\0".repeat(300), "\"\\\n\0".repeat(1_300)),
+    ] {
+        let trace = TraceContext::new(&"\"\\\n界".repeat(32));
+        trace.record("request.routed", json!({"provider": "openai"}));
+        for index in 0..4 {
+            trace.record_evidence("test.evidence", json!({"index": index, "data": evidence}));
+        }
+        trace.record("test.ordinary", json!({"data": ordinary}));
+        let snapshot = trace.snapshot().unwrap();
+        assert!(snapshot.to_string().len() <= MAX_DIAGNOSTIC_TRACE_BYTES);
+        assert_eq!(snapshot["maxBufferBytes"], MAX_DIAGNOSTIC_TRACE_BYTES);
+        let events = snapshot["events"].as_array().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event["stage"] == "request.routed")
+        );
+        assert!(events.iter().any(|event| event["data"]["index"] == 3));
+        assert!(!events.iter().any(|event| event["stage"] == "test.ordinary"));
+        let kept: u64 = events
+            .iter()
+            .map(|event| event["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(kept + snapshot["droppedEvents"].as_u64().unwrap(), 6);
+        let evidence_kept = events
+            .iter()
+            .filter(|event| event["stage"] != "test.ordinary")
+            .count() as u64;
+        assert_eq!(
+            evidence_kept + snapshot["droppedEvidenceEvents"].as_u64().unwrap(),
+            5
+        );
+        assert_eq!(trace.snapshot(), Some(snapshot));
+    }
+}
+
+#[test]
+fn small_snapshot_preserves_events_without_budget_degradation() {
+    let trace = TraceContext::new("req_small_contract");
+    trace.record("request.started", json!({"operation": "generate"}));
+    trace.record("request.finished", json!({"outcome": "succeeded"}));
+    let snapshot = trace.snapshot().unwrap();
+    assert_eq!(snapshot["events"].as_array().unwrap().len(), 2);
+    assert_eq!(snapshot["events"][0]["stage"], "request.started");
+    assert_eq!(snapshot["events"][1]["stage"], "request.finished");
+    assert_eq!(snapshot["droppedEvents"], 0);
+    assert_eq!(snapshot["droppedEvidenceEvents"], 0);
 }

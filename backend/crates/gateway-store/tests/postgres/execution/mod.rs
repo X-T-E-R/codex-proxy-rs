@@ -1781,25 +1781,6 @@ async fn zero_attempt_finalization_rejects_sent_or_missing_attempt_facts_atomica
             before
         );
     }
-    for invalid_trace in [
-        "not JSON".to_owned(),
-        "[]".to_owned(),
-        json!({"data": "x".repeat(65_536)}).to_string(),
-    ] {
-        let mut finalization = early_failure(&request);
-        finalization.diagnostic_trace_json = Some(invalid_trace);
-        assert_eq!(
-            ExecutionStore::finalize_model_request(&store, finalization)
-                .await
-                .expect_err("invalid trace")
-                .kind(),
-            StoreErrorKind::InvalidData,
-        );
-        assert_eq!(
-            stored_row(&database.pool, request.id.as_str()).await,
-            before
-        );
-    }
     ExecutionStore::finalize_model_request(&store, early_failure(&request))
         .await
         .expect("valid zero attempt");

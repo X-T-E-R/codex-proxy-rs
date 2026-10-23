@@ -1,5 +1,7 @@
 //! 单行 `model_requests` 生命周期与最终 usage/cost 的 PostgreSQL owner
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::core_store_error;
 
 use async_trait::async_trait;
@@ -8,6 +10,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use gateway_core::diagnostics::MAX_DIAGNOSTIC_TRACE_BYTES;
 use gateway_core::engine::{
     AttemptRecord as CoreAttemptRecord, ExecutionStore, IntermediateFailure,
     ModelRequestFinalization as CoreModelRequestFinalization, ModelRequestId,
@@ -29,6 +32,44 @@ mod request_observation;
 use request_observation::RequestObservation;
 
 const ENTITY: &str = "model request";
+static DIAGNOSTIC_DEGRADATION_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+fn parse_diagnostic_trace(encoded: Option<&str>) -> Option<Value> {
+    let encoded = encoded?;
+    // 仅可选诊断允许降级，JSON 错误不扩散成 usage/cost 等核心终态的拒写
+    match serde_json::from_str(encoded) {
+        Ok(trace) => Some(trace),
+        Err(_) => {
+            diagnostic_degraded("invalid_json", encoded.len());
+            None
+        }
+    }
+}
+
+fn normalize_diagnostic_trace(trace: Option<Value>) -> Option<Value> {
+    let trace = trace?;
+    let bytes = trace.to_string().len();
+    let reason = if !trace.is_object() {
+        "not_object"
+    } else if bytes > MAX_DIAGNOSTIC_TRACE_BYTES {
+        "serialized_size_limit"
+    } else {
+        return Some(trace);
+    };
+    diagnostic_degraded(reason, bytes);
+    None
+}
+
+fn diagnostic_degraded(reason: &'static str, diagnostic_bytes: usize) {
+    let degradation_total = DIAGNOSTIC_DEGRADATION_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    // 固定原因和大小足以定位合同故障，不输出内容、解析错误或请求标识
+    tracing::warn!(
+        reason,
+        diagnostic_bytes,
+        degradation_total,
+        "optional diagnostic trace omitted from terminal observation"
+    );
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpstreamSendState {
@@ -326,11 +367,9 @@ impl ModelRequestFinalization {
         {
             return Err(invalid("provider observation must be a JSON object"));
         }
-        if self
-            .diagnostic_trace_json
-            .as_ref()
-            .is_some_and(|trace| !trace.is_object() || trace.to_string().len() > 64 * 1024)
-        {
+        if self.diagnostic_trace_json.as_ref().is_some_and(|trace| {
+            !trace.is_object() || trace.to_string().len() > MAX_DIAGNOSTIC_TRACE_BYTES
+        }) {
             return Err(invalid(
                 "diagnostic trace must be a JSON object within 64 KiB",
             ));
@@ -643,8 +682,10 @@ impl ModelRequestRepository for PgExecutionStore {
 
     async fn finalize_model_request(
         &self,
-        finalization: ModelRequestFinalization,
+        mut finalization: ModelRequestFinalization,
     ) -> StoreResult<bool> {
+        finalization.diagnostic_trace_json =
+            normalize_diagnostic_trace(finalization.diagnostic_trace_json.take());
         finalization.validate()?;
         let observation = RequestObservation::finalized(&finalization)?;
         // 墙上时间可能回拨；终态必须可落盘，实际耗时仍保留 Core 的单调时钟观测
@@ -1183,14 +1224,9 @@ impl ExecutionStore for PgExecutionStore {
                 service_tier: finalization.service_tier,
                 upstream_response_model: finalization.upstream_response_model,
                 provider_metadata_json,
-                diagnostic_trace_json: finalization
-                    .diagnostic_trace_json
-                    .as_deref()
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .map_err(|source| {
-                        CoreStoreError::caused_by(CoreStoreErrorKind::InvalidData, source)
-                    })?,
+                diagnostic_trace_json: parse_diagnostic_trace(
+                    finalization.diagnostic_trace_json.as_deref(),
+                ),
                 error_kind,
                 provider_error_code: finalization.provider_error_code,
                 error_message,
