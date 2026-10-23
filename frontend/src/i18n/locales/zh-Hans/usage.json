@@ -1,5 +1,59 @@
 {
   "usage": {
+    "serverErrors": {
+      "title": "服务端错误",
+      "description": "同一窗口内按请求去重的服务端错误，过载单独突出",
+      "loading": "正在加载服务端错误摘要",
+      "loadFailed": "服务端错误摘要加载失败",
+      "kpis": {
+        "overloaded": "过载",
+        "overloadedHint": "与 503 可重叠",
+        "status503": "503 响应",
+        "status503Hint": "不按来源相加",
+        "serverRelated": "服务端相关",
+        "serverRelatedHint": "按请求去重",
+        "terminal": "其中终态",
+        "terminalHint": "仅终态，用于核对",
+        "client200": "200 流内错误",
+        "client200Hint": "已返回 200 后失败"
+      },
+      "sources": {
+        "upstream": "上游 503",
+        "infrastructure": "基础设施 503",
+        "noProvider": "无可用账号 503",
+        "unclassified": "未分类 503"
+      },
+      "families": {
+        "otherServerPrefix": "其他 server_*",
+        "otherServerPrefixHint": "除过载外的 server_*，可与 503 重叠",
+        "other5xx": "其他 5xx",
+        "legacyMessageMatches": "已存消息匹配",
+        "legacyMessageMatchesHint": "不读取请求正文"
+      },
+      "daily": {
+        "title": "每日趋势",
+        "hint": "按请求开始时间归桶 · 来源可重叠",
+        "legend": "每日 503 来源与过载",
+        "aria": "每日趋势：过载 {overloaded} 次，503 共 {status503} 次"
+      },
+      "footer": {
+        "retention": "按请求开始时间归桶 · {timezone} · 仅统计仍保留的记录",
+        "attempts": "尝试观测（仅已观测）：观测 {observed} · 服务端相关 {serverRelated} · 过载 {overloaded} · 503 {status503}"
+      },
+      "emptyNoRecords": "所选窗口没有保留的请求记录",
+      "emptyNoRecordsHint": "可调整日期范围后重试",
+      "emptyNoErrors": "该窗口未记录服务端错误",
+      "emptyNoErrorsHint": "保留 {retained} 条请求记录",
+      "help": {
+        "label": "服务端错误统计规则",
+        "dedupe": "服务端相关请求按请求 ID 去重，包含仍保留的中间错误事件",
+        "overlap": "过载、503、其他 server_* 与其他 5xx 可重叠，不能相加",
+        "sources": "503 按上游、本地基础设施、无可用账号与未分类分别统计；同一请求可同时命中多个来源，可重叠、不可相加",
+        "client200": "200 流内错误包含已发送 SSE 响应头后的失败",
+        "retention": "保留集合不保证整窗完整，不能据此计算历史错误率",
+        "attempts": "尝试观测只覆盖已观测到的尝试，不代表全部尝试"
+      }
+    },
     "health": {
       "point": {
         "serviceFailed": "服务失败",
@@ -86,6 +140,9 @@
       "label": "使用记录筛选与操作",
       "refreshUsageHistory": "刷新使用记录",
       "keyName": "密钥名称",
+      "requestId": "请求 ID",
+      "upstreamRequestId": "上游 ID",
+      "responseId": "响应 ID",
       "account": "账号",
       "fieldLabel": "请求明细筛选字段",
       "enterFilterValue": "输入筛选内容",
@@ -301,6 +358,9 @@
       "useStatisticalObservations": "使用统计观测"
     },
     "request": {
+      "loadingDetails": "正在加载请求详情",
+      "detailTarget": "{time} · {model}",
+      "detailFailed": "请求详情加载失败",
       "statusCode": "状态码",
       "message": "消息",
       "upstreamTimeConsumption": "上游耗时",

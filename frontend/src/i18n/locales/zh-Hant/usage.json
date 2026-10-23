@@ -1,5 +1,59 @@
 {
   "usage": {
+    "serverErrors": {
+      "title": "服務端錯誤",
+      "description": "同一窗口內按請求去重的服務端錯誤，過載單獨突出",
+      "loading": "正在加載服務端錯誤摘要",
+      "loadFailed": "服務端錯誤摘要加載失敗",
+      "kpis": {
+        "overloaded": "過載",
+        "overloadedHint": "與 503 可重疊",
+        "status503": "503 響應",
+        "status503Hint": "不按來源相加",
+        "serverRelated": "服務端相關",
+        "serverRelatedHint": "按請求去重",
+        "terminal": "其中終態",
+        "terminalHint": "僅終態，用於核對",
+        "client200": "200 流內錯誤",
+        "client200Hint": "已返回 200 後失敗"
+      },
+      "sources": {
+        "upstream": "上游 503",
+        "infrastructure": "基礎設施 503",
+        "noProvider": "無可用賬號 503",
+        "unclassified": "未分類 503"
+      },
+      "families": {
+        "otherServerPrefix": "其他 server_*",
+        "otherServerPrefixHint": "除過載外的 server_*，可與 503 重疊",
+        "other5xx": "其他 5xx",
+        "legacyMessageMatches": "已存消息匹配",
+        "legacyMessageMatchesHint": "不讀取請求正文"
+      },
+      "daily": {
+        "title": "每日趨勢",
+        "hint": "按請求開始時間歸桶 · 來源可重疊",
+        "legend": "每日 503 來源與過載",
+        "aria": "每日趨勢：過載 {overloaded} 次，503 共 {status503} 次"
+      },
+      "footer": {
+        "retention": "按請求開始時間歸桶 · {timezone} · 僅統計仍保留的記錄",
+        "attempts": "嘗試觀測（僅已觀測）：觀測 {observed} · 服務端相關 {serverRelated} · 過載 {overloaded} · 503 {status503}"
+      },
+      "emptyNoRecords": "所選窗口沒有保留的請求記錄",
+      "emptyNoRecordsHint": "可調整日期範圍後重試",
+      "emptyNoErrors": "該窗口未記錄服務端錯誤",
+      "emptyNoErrorsHint": "保留 {retained} 條請求記錄",
+      "help": {
+        "label": "服務端錯誤統計規則",
+        "dedupe": "服務端相關請求按請求 ID 去重，包含仍保留的中間錯誤事件",
+        "overlap": "過載、503、其他 server_* 與其他 5xx 可重疊，不能相加",
+        "sources": "503 按上游、本地基礎設施、無可用賬號與未分類分別統計；同一請求可同時命中多個來源，可重疊、不可相加",
+        "client200": "200 流內錯誤包含已發送 SSE 響應頭後的失敗",
+        "retention": "保留集合不保證整窗完整，不能據此計算歷史錯誤率",
+        "attempts": "嘗試觀測只覆蓋已觀測到的嘗試，不代表全部嘗試"
+      }
+    },
     "health": {
       "point": {
         "serviceFailed": "服務失敗",
@@ -86,6 +140,9 @@
       "label": "使用記錄篩選與操作",
       "refreshUsageHistory": "刷新使用記錄",
       "keyName": "密鑰名稱",
+      "requestId": "請求 ID",
+      "upstreamRequestId": "上游 ID",
+      "responseId": "響應 ID",
       "account": "賬號",
       "fieldLabel": "請求明細篩選字段",
       "enterFilterValue": "輸入篩選內容",
@@ -301,6 +358,9 @@
       "useStatisticalObservations": "使用統計觀測"
     },
     "request": {
+      "loadingDetails": "正在加載請求詳情",
+      "detailTarget": "{time} · {model}",
+      "detailFailed": "請求詳情加載失敗",
       "statusCode": "狀態碼",
       "message": "消息",
       "upstreamTimeConsumption": "上游耗時",

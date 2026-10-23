@@ -24,12 +24,15 @@ const fieldOptions = computed(() => [
   { value: 'key', label: t('usage.filters.keyName') },
   { value: 'account', label: t('usage.filters.account') },
   { value: 'model', label: t('usage.fields.model') },
+  { value: 'requestId', label: t('usage.filters.requestId') },
+  { value: 'upstreamRequestId', label: t('usage.filters.upstreamRequestId') },
+  { value: 'responseId', label: t('usage.filters.responseId') },
 ])
 </script>
 
 <template>
   <div class="flex w-full flex-wrap items-center gap-3" role="group" :aria-label="t('usage.filters.label')">
-    <div class="grid w-full min-w-0 grid-cols-[8rem_minmax(0,1fr)] gap-2 sm:w-md sm:flex-none">
+    <div class="grid w-full min-w-0 grid-cols-[9.5rem_minmax(0,1fr)] gap-2 sm:w-md sm:flex-none">
       <ZSelect v-model="field" :options="fieldOptions" :aria-label="t('usage.filters.fieldLabel')" />
       <ZInput
         v-model="value"

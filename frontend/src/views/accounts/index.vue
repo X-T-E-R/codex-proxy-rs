@@ -23,6 +23,7 @@ import AccountEditModal from './components/AccountEditModal.vue'
 import AccountFilters from './components/AccountFilters.vue'
 import AccountIdentityCell from './components/AccountIdentityCell.vue'
 import AccountOverviewCards from './components/AccountOverviewCards.vue'
+import AccountPriorityPolicy from './components/AccountPriorityPolicy.vue'
 import AccountTableActions from './components/AccountTableActions.vue'
 import AccountUsagePanel from './components/AccountUsagePanel.vue'
 import { useAccountBatchEditor } from './composables/useAccountBatchEditor'
@@ -33,6 +34,7 @@ import { useAccountMutations } from './composables/useAccountMutations'
 import { useAccountsQuery } from './composables/useAccountsQuery'
 import { useAccountsTable } from './composables/useAccountsTable'
 import { accountColumns } from './constants'
+import { isOpenAiOAuthAccount } from './utils/upstreamApiKey'
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -366,6 +368,7 @@ const {
                   @refresh-quota="handleRefreshQuota"
                 />
                 <AccountUsagePanel :account="row" />
+                <AccountPriorityPolicy v-if="isOpenAiOAuthAccount(row)" :account="row" />
               </div>
             </template>
           </ZTable>

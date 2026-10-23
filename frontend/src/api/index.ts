@@ -4,6 +4,9 @@ export * from './modules/accounts'
 // Dashboard 聚合
 export * from './modules/dashboard'
 
+// 错误摘要
+export * from './modules/errors'
+
 // 账号分组
 export * from './modules/groups'
 
@@ -15,6 +18,9 @@ export * from './modules/login'
 
 // 插件管理
 export * from './modules/plugins'
+
+// 快速模式策略
+export * from './modules/priority'
 
 // 代理管理
 export * from './modules/proxies'

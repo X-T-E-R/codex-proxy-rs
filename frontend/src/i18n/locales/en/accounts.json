@@ -457,6 +457,35 @@
       "noSubscriptionInformationYet": "No subscription information yet",
       "refreshInformation": "Refresh information"
     },
+    "priority": {
+      "title": "Fast mode",
+      "effective": "Currently effective: {mode} without a matching group",
+      "effectiveAutoOff": "auto-disable {state}",
+      "modeLabel": "Account tier",
+      "modeAria": "Account fast mode",
+      "modes": {
+        "inherit": "Follow global"
+      },
+      "autoOff": "Disable after quota reset",
+      "autoOffAria": "Disable after quota reset for this account",
+      "status": {
+        "awaitingBaseline": "Waiting for a new quota observation",
+        "armed": "Bound to the current quota, disables after reset",
+        "quotaReset": "Disabled after a quota reset"
+      },
+      "help": {
+        "label": "Fast mode auto-disable rules",
+        "baseline": "Enabling records one reliable quota observation first, fast mode turns off once a new quota generation is confirmed, changing the policy rebinds a new observation",
+        "inherit": "Following global uses the global default, or set it explicitly for this account",
+        "percent": "Quota is recorded as a used ratio, 0 to 1 means 0% to 100%, not remaining quota"
+      },
+      "refresh": "Refresh fast mode status",
+      "save": "Save fast mode",
+      "undo": "Discard fast mode changes",
+      "saved": "Fast mode settings saved",
+      "loadFailed": "Could not load fast mode settings",
+      "conflict": "Another administrator updated these settings. The latest values are loaded, review and save again"
+    },
     "quotaForecast": {
       "tokenCapacity": "Token capacity",
       "equivalentFeeUsd": "Equivalent cost · USD",

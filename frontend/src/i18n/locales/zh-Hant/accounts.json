@@ -457,6 +457,35 @@
       "noSubscriptionInformationYet": "暫無訂閱信息",
       "refreshInformation": "刷新信息"
     },
+    "priority": {
+      "title": "快速模式",
+      "effective": "當前生效：未命中分組時 {mode}",
+      "effectiveAutoOff": "自動關閉 {state}",
+      "modeLabel": "賬號檔位",
+      "modeAria": "賬號快速模式",
+      "modes": {
+        "inherit": "跟隨全局"
+      },
+      "autoOff": "配額重置後關閉",
+      "autoOffAria": "賬號配額重置後關閉",
+      "status": {
+        "awaitingBaseline": "等待新的配額觀察",
+        "armed": "已綁定當前配額，重置後自動關閉",
+        "quotaReset": "已因配額重置自動關閉"
+      },
+      "help": {
+        "label": "快速模式自動關閉規則",
+        "baseline": "開啓後先記錄一次可靠配額，確認出現新的配額代次後才會關閉快速模式，修改配置會重新綁定觀察",
+        "inherit": "自動關閉跟隨全局時使用全局默認值，也可為這個賬號單獨開啓或關閉",
+        "percent": "配額按已用比例記錄，0 到 1 表示 0% 到 100%，不是剩餘額度"
+      },
+      "refresh": "刷新快速模式狀態",
+      "save": "保存快速模式",
+      "undo": "撤銷快速模式更改",
+      "saved": "快速模式設置已保存",
+      "loadFailed": "快速模式設置加載失敗",
+      "conflict": "設置已被其他管理員更新，最新值已載入，請確認後重新保存"
+    },
     "quotaForecast": {
       "tokenCapacity": "Token 容量",
       "equivalentFeeUsd": "等價費用 · USD",

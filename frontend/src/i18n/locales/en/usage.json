@@ -1,5 +1,59 @@
 {
   "usage": {
+    "serverErrors": {
+      "title": "Server errors",
+      "description": "Server errors in this window, de-duplicated per request, with overloaded highlighted",
+      "loading": "Loading server error summary",
+      "loadFailed": "Could not load server error summary",
+      "kpis": {
+        "overloaded": "Overloaded",
+        "overloadedHint": "Overlaps with 503",
+        "status503": "503 responses",
+        "status503Hint": "Not a sum of sources",
+        "serverRelated": "Server related",
+        "serverRelatedHint": "De-duplicated per request",
+        "terminal": "Of which terminal",
+        "terminalHint": "Terminal only, for reconciliation",
+        "client200": "Stream errors after 200",
+        "client200Hint": "Failed after returning 200"
+      },
+      "sources": {
+        "upstream": "Upstream 503",
+        "infrastructure": "Infrastructure 503",
+        "noProvider": "No provider 503",
+        "unclassified": "Unclassified 503"
+      },
+      "families": {
+        "otherServerPrefix": "Other server_*",
+        "otherServerPrefixHint": "Server prefix other than overloaded, overlaps with 503",
+        "other5xx": "Other 5xx",
+        "legacyMessageMatches": "Stored message matches",
+        "legacyMessageMatchesHint": "Request bodies are not read"
+      },
+      "daily": {
+        "title": "Daily trend",
+        "hint": "Bucketed by request start time · Sources may overlap",
+        "legend": "Daily 503 sources and overloaded",
+        "aria": "Daily trend: {overloaded} overloaded, {status503} total 503"
+      },
+      "footer": {
+        "retention": "Bucketed by request start time · {timezone} · Retained records only",
+        "attempts": "Attempt observations (observed only): observed {observed} · server related {serverRelated} · overloaded {overloaded} · 503 {status503}"
+      },
+      "emptyNoRecords": "No retained request records in this window",
+      "emptyNoRecordsHint": "Adjust the date range and try again",
+      "emptyNoErrors": "No server errors recorded in this window",
+      "emptyNoErrorsHint": "{retained} retained request records",
+      "help": {
+        "label": "Server error counting rules",
+        "dedupe": "Server-related requests are de-duplicated by request ID and include retained intermediate error events",
+        "overlap": "Overloaded, 503, other server_* and other 5xx overlap and must not be added together",
+        "sources": "503 is counted per request for upstream, local infrastructure, no provider and unclassified; one request can match several sources, so sources overlap and must not be added together",
+        "client200": "Stream errors after 200 include failures after SSE headers were sent",
+        "retention": "The retained set does not guarantee a complete window, so historical error rates cannot be computed from it",
+        "attempts": "Attempt observations cover observed attempts only and are not the total attempt count"
+      }
+    },
     "health": {
       "point": {
         "serviceFailed": "Failed",
@@ -86,6 +140,9 @@
       "label": "Usage record filters and actions",
       "refreshUsageHistory": "Refresh usage history",
       "keyName": "Key name",
+      "requestId": "Request ID",
+      "upstreamRequestId": "Upstream ID",
+      "responseId": "Response ID",
       "account": "Account",
       "fieldLabel": "Request detail filter field",
       "enterFilterValue": "Enter filter value",
@@ -301,6 +358,9 @@
       "useStatisticalObservations": "Use statistical observations"
     },
     "request": {
+      "loadingDetails": "Loading request details",
+      "detailTarget": "{time} · {model}",
+      "detailFailed": "Could not load request details",
       "statusCode": "Status code",
       "message": "Message",
       "upstreamTimeConsumption": "Upstream time consumption",

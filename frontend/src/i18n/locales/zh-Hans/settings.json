@@ -312,6 +312,28 @@
       "description": "覆盖 Codex 请求中的时区与位置字段，账号出站代理的自定义位置优先",
       "enableLocationOverlay": "启用位置覆盖"
     },
+    "priority": {
+      "title": "快速模式",
+      "description": "为未指定快速模式的请求设定默认档位",
+      "modeHelp": {
+        "default": "沿用客户端与分组的现有决定",
+        "enabled": "账号未单独设置时请求优先档",
+        "disabled": "账号未单独设置时不请求优先档"
+      },
+      "autoOff": "配额重置后关闭",
+      "autoOffHint": "跟随全局的账号使用这个默认值",
+      "help": {
+        "label": "快速模式规则",
+        "groupCap": "分组已禁用快速模式时仍按分组限制生效",
+        "explicitTier": "客户端显式指定的 flex 等档位保持不变",
+        "scope": "不作用于 Images、Search 与 xAI 请求，不改变计费模型"
+      },
+      "save": "保存快速模式",
+      "undo": "撤销快速模式更改",
+      "saved": "快速模式设置已保存",
+      "loadFailed": "快速模式设置加载失败",
+      "conflict": "设置已被其他管理员更新，最新值已载入，请确认后重新保存"
+    },
     "quotaReset": {
       "title": "主动重置卡",
       "enableHelp": "在账号的「额度重置」中开启自动使用",

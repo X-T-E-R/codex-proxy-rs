@@ -41,12 +41,14 @@ export function useUsageTimeRange() {
     }
   }
 
-  function refreshTimeRangeEnd() {
-    rangeEnd.value = Date.now()
+  // 返回本次使用的 asOf，调用方把它传给同一轮的列表请求，保证两个窗口末端一致
+  function refreshTimeRangeEnd(asOf = Date.now()) {
+    rangeEnd.value = asOf
+    return asOf
   }
 
-  function latestTimeRangeParams() {
-    return rangeParams(Date.now())
+  function latestTimeRangeParams(asOf = Date.now()) {
+    return rangeParams(asOf)
   }
 
   return { timeRange, timeRangeParams, disabledDate, refreshTimeRangeEnd, latestTimeRangeParams }

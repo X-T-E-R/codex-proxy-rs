@@ -14,6 +14,7 @@ import SettingsBackupSection from './components/backup/SettingsBackupSection.vue
 import ClientProfileCard from './components/ClientProfileCard.vue'
 import ConcurrencyPolicyCard from './components/ConcurrencyPolicyCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
+import PriorityPolicyCard from './components/PriorityPolicyCard.vue'
 import PrivacyPolicyCard from './components/privacy/PrivacyPolicyCard.vue'
 import RequestHistoryCard from './components/RequestHistoryCard.vue'
 import RequestLocationCard from './components/RequestLocationCard.vue'
@@ -177,6 +178,7 @@ watch(section, (value) => {
             v-model:max-account-rotations="maxAccountRotationsValue"
             :disabled="disabled"
           />
+          <PriorityPolicyCard />
           <ConcurrencyPolicyCard
             v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
             v-model:max-waiting-per-key="maxWaitingPerKeyValue"

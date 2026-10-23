@@ -312,6 +312,28 @@
       "description": "Override time zone and location fields in Codex requests, custom locations on account proxies take precedence",
       "enableLocationOverlay": "Enable location overlay"
     },
+    "priority": {
+      "title": "Fast mode",
+      "description": "Default tier for requests that do not set fast mode",
+      "modeHelp": {
+        "default": "Keep existing client and group decisions",
+        "enabled": "Accounts without an override request the priority tier",
+        "disabled": "Accounts without an override do not request the priority tier"
+      },
+      "autoOff": "Disable after quota reset",
+      "autoOffHint": "Applies to accounts that follow global",
+      "help": {
+        "label": "Fast mode rules",
+        "groupCap": "A group with fast mode disabled still caps requests",
+        "explicitTier": "Explicit client tiers such as flex are preserved",
+        "scope": "Does not apply to Images, Search or xAI requests and does not change the billing model"
+      },
+      "save": "Save fast mode",
+      "undo": "Discard fast mode changes",
+      "saved": "Fast mode settings saved",
+      "loadFailed": "Could not load fast mode settings",
+      "conflict": "Another administrator updated these settings. The latest values are loaded, review and save again"
+    },
     "quotaReset": {
       "title": "Quota reset credits",
       "enableHelp": "Enable automatic use in the account's Quota reset panel",

@@ -15,12 +15,16 @@ import { withMinimumDuration } from '@/utils/operation'
 
 interface UseUsageRecordsTableOptions {
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>
-  latestTimeRangeParams: () => UsageTimeRangeParams
+  latestTimeRangeParams: (asOf?: number) => UsageTimeRangeParams
   status: Readonly<Ref<UsageRecordStatus>>
 }
 
 type UsageLoadScope = 'all' | 'table'
-export type UsageRecordFilterField = 'key' | 'account' | 'model'
+export type UsageRecordFilterField = 'key' | 'account' | 'model' | 'requestId' | 'upstreamRequestId' | 'responseId'
+// 精确 ID 定位不携带 status，后端据此同时查成功与失败
+export function isUsageLocatorField(field: UsageRecordFilterField): boolean {
+  return field === 'requestId' || field === 'upstreamRequestId' || field === 'responseId'
+}
 type LoadingAnalytics<T> = Omit<T, 'analytics'> & { analytics: AnalyticsMetadata | null }
 
 interface UsageLoadOptions {
@@ -36,6 +40,9 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   const filterParams = computed(() => {
     const value = filterValue.value.trim() || undefined
     return {
+      requestId: filterField.value === 'requestId' ? value : undefined,
+      upstreamRequestId: filterField.value === 'upstreamRequestId' ? value : undefined,
+      responseId: filterField.value === 'responseId' ? value : undefined,
       clientApiKeyName: filterField.value === 'key' ? value : undefined,
       accountName: filterField.value === 'account' ? value : undefined,
       model: filterField.value === 'model' ? value : undefined,
@@ -64,24 +71,28 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     total: totalRecords.value,
   }))
 
-  function snapshot() {
+  function snapshot(asOf?: number) {
     return {
-      ...options.latestTimeRangeParams(),
+      ...options.latestTimeRangeParams(asOf),
       provider: providerQuery.value || undefined,
       ...filterParams.value,
-      status: options.status.value,
+      // 精确 ID 定位时省略 status，让后端同时查成功与失败
+      status: isUsageLocatorField(filterField.value) ? undefined : options.status.value,
     }
   }
 
   function filterChanged() {
     const filter = filterParams.value
-    return tableParams.clientApiKeyName !== filter.clientApiKeyName
+    return tableParams.requestId !== filter.requestId
+      || tableParams.upstreamRequestId !== filter.upstreamRequestId
+      || tableParams.responseId !== filter.responseId
+      || tableParams.clientApiKeyName !== filter.clientApiKeyName
       || tableParams.accountName !== filter.accountName
       || tableParams.model !== filter.model
   }
 
-  function resetTable() {
-    tableParams = snapshot()
+  function resetTable(asOf?: number) {
+    tableParams = snapshot(asOf)
     // 筛选范围变化后不能继续展示上一范围的数据，即使新查询失败。
     records.value = []
     currentPage.value = 1
@@ -166,20 +177,20 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     catch {}
   }
 
-  async function refreshUsageRecords() {
+  async function refreshUsageRecords(asOf?: number) {
     if (refreshingList.value || loading.value)
       return
     refreshingList.value = true
     try {
-      await withMinimumDuration(reloadLatestTable)
+      await withMinimumDuration(() => reloadLatestTable(asOf))
     }
     finally {
       refreshingList.value = false
     }
   }
 
-  function reloadLatestTable() {
-    resetTable()
+  function reloadLatestTable(asOf?: number) {
+    resetTable(asOf)
     return loadUsageRecords({ scope: 'table' })
   }
 

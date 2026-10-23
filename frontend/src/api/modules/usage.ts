@@ -384,6 +384,11 @@ interface PageQuery {
 }
 
 type UsagePageQuery = UsageRangeQuery & PageQuery & {
+  requestId?: string
+  upstreamRequestId?: string
+  responseId?: string
+  search?: string
+  statusCode?: number
   clientApiKeyName?: string
   accountName?: string
   model?: string

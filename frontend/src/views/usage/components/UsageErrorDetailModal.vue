@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { UsageRecordDetail } from '@/api'
+import type { UsageListRecord, UsageRecordDetail } from '@/api'
 
 import { ZButton, ZDialog } from '@codex-proxy/ui'
 import { computed } from 'vue'
@@ -10,9 +10,17 @@ import { attemptOutcomeClass, attemptOutcomeText, visibleResponseText } from '..
 import DiagnosticsDownloadButton from './DiagnosticsDownloadButton.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
+import UsageDetailRequestState from './UsageDetailRequestState.vue'
 import UsageStatusCodeBadge from './UsageStatusCodeBadge.vue'
 
-const props = defineProps<{ record: UsageRecordDetail | null }>()
+const props = defineProps<{
+  record: UsageRecordDetail | null
+  loading?: boolean
+  error?: string
+  target?: UsageListRecord | null
+}>()
+
+const emit = defineEmits<{ retry: [] }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -68,6 +76,13 @@ const attempts = computed(() => (props.record?.attempts ?? []).map(attempt => ({
 
 <template>
   <ZDialog v-model="open" :title="t('usage.error.errorDetails')" :description="t('usage.error.description')" type="danger" width="64rem">
+    <UsageDetailRequestState
+      v-if="!record && (loading || error)"
+      :loading="loading ?? false"
+      :error="error ?? ''"
+      :target="target ?? null"
+      @retry="emit('retry')"
+    />
     <div v-if="record" class="grid min-w-0 gap-3">
       <section class="min-w-0 rounded-cp-card bg-cp-error-container px-4 py-3.5 text-cp-error-on-container">
         <div class="flex items-center gap-3">

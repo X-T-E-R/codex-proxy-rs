@@ -312,6 +312,28 @@
       "description": "覆蓋 Codex 請求中的時區與位置字段，賬號出站代理的自定義位置優先",
       "enableLocationOverlay": "啓用位置覆蓋"
     },
+    "priority": {
+      "title": "快速模式",
+      "description": "為未指定快速模式的請求設定默認檔位",
+      "modeHelp": {
+        "default": "沿用客戶端與分組的現有決定",
+        "enabled": "賬號未單獨設置時請求優先檔",
+        "disabled": "賬號未單獨設置時不請求優先檔"
+      },
+      "autoOff": "配額重置後關閉",
+      "autoOffHint": "跟隨全局的賬號使用這個默認值",
+      "help": {
+        "label": "快速模式規則",
+        "groupCap": "分組已禁用快速模式時仍按分組限制生效",
+        "explicitTier": "客戶端顯式指定的 flex 等檔位保持不變",
+        "scope": "不作用於 Images、Search 與 xAI 請求，不改變計費模型"
+      },
+      "save": "保存快速模式",
+      "undo": "撤銷快速模式更改",
+      "saved": "快速模式設置已保存",
+      "loadFailed": "快速模式設置加載失敗",
+      "conflict": "設置已被其他管理員更新，最新值已載入，請確認後重新保存"
+    },
     "quotaReset": {
       "title": "主動重置卡",
       "enableHelp": "在賬號的「額度重置」中開啓自動使用",

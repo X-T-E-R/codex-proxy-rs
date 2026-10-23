@@ -457,6 +457,35 @@
       "noSubscriptionInformationYet": "暂无订阅信息",
       "refreshInformation": "刷新信息"
     },
+    "priority": {
+      "title": "快速模式",
+      "effective": "当前生效：未命中分组时 {mode}",
+      "effectiveAutoOff": "自动关闭 {state}",
+      "modeLabel": "账号档位",
+      "modeAria": "账号快速模式",
+      "modes": {
+        "inherit": "跟随全局"
+      },
+      "autoOff": "配额重置后关闭",
+      "autoOffAria": "账号配额重置后关闭",
+      "status": {
+        "awaitingBaseline": "等待新的配额观察",
+        "armed": "已绑定当前配额，重置后自动关闭",
+        "quotaReset": "已因配额重置自动关闭"
+      },
+      "help": {
+        "label": "快速模式自动关闭规则",
+        "baseline": "开启后先记录一次可靠配额，确认出现新的配额代次后才会关闭快速模式，修改配置会重新绑定观察",
+        "inherit": "自动关闭跟随全局时使用全局默认值，也可为这个账号单独开启或关闭",
+        "percent": "配额按已用比例记录，0 到 1 表示 0% 到 100%，不是剩余额度"
+      },
+      "refresh": "刷新快速模式状态",
+      "save": "保存快速模式",
+      "undo": "撤销快速模式更改",
+      "saved": "快速模式设置已保存",
+      "loadFailed": "快速模式设置加载失败",
+      "conflict": "设置已被其他管理员更新，最新值已载入，请确认后重新保存"
+    },
     "quotaForecast": {
       "tokenCapacity": "Token 容量",
       "equivalentFeeUsd": "等价费用 · USD",

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { EChartsOption } from 'echarts'
 
-import type { UsageRecordDetail } from '@/api'
+import type { UsageListRecord, UsageRecordDetail } from '@/api'
 import { defineTableColumns, ZButton, ZDialog, ZTable } from '@codex-proxy/ui'
 
 import { computed } from 'vue'
@@ -25,11 +25,17 @@ import { attemptOutcomeClass, attemptOutcomeText, displayValue, fieldLabelClass,
 import DiagnosticsDownloadButton from './DiagnosticsDownloadButton.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
+import UsageDetailRequestState from './UsageDetailRequestState.vue'
 import UsageStatusCodeBadge from './UsageStatusCodeBadge.vue'
 
 const props = defineProps<{
   record: UsageRecordDetail | null
+  loading?: boolean
+  error?: string
+  target?: UsageListRecord | null
 }>()
+
+const emit = defineEmits<{ retry: [] }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -304,6 +310,13 @@ const tokenDonutOption = computed<EChartsOption>(() => {
     type="info"
     width="64rem"
   >
+    <UsageDetailRequestState
+      v-if="!record && (loading || error)"
+      :loading="loading ?? false"
+      :error="error ?? ''"
+      :target="target ?? null"
+      @retry="emit('retry')"
+    />
     <div v-if="record" class="grid min-w-0 gap-3">
       <section class="grid min-w-0 gap-3 lg:grid-cols-2">
         <section :class="panelClass">

@@ -15,9 +15,10 @@ import UsageErrorDetailModal from './components/UsageErrorDetailModal.vue'
 import UsageFilters from './components/UsageFilters.vue'
 import UsageInsightsGrid from './components/UsageInsightsGrid.vue'
 import UsageRecordDetailModal from './components/UsageRecordDetailModal.vue'
+import UsageServerErrorSummary from './components/UsageServerErrorSummary.vue'
 import UsageSummaryCards from './components/UsageSummaryCards.vue'
 import { useUsageRecordDetail } from './composables/useUsageRecordDetail'
-import { useUsageRecordsTable } from './composables/useUsageRecordsTable'
+import { isUsageLocatorField, useUsageRecordsTable } from './composables/useUsageRecordsTable'
 import { useUsageTimeRange } from './composables/useUsageTimeRange'
 import { isErrorUsageRecord } from './utils/detail'
 
@@ -56,14 +57,26 @@ const {
   status: recordView,
 })
 
-const { showDetailModal, selectedUsageRecord, handleViewDetail } = useUsageRecordDetail()
-const detailComponent = computed(() => isErrorUsageRecord(selectedUsageRecord.value)
+const { showDetailModal, selectedUsageRecord, pendingUsageRecord, detailLoading, detailError, handleViewDetail, retryDetail } = useUsageRecordDetail()
+const detailComponent = computed(() => isErrorUsageRecord(pendingUsageRecord.value)
   ? UsageErrorDetailModal
   : UsageRecordDetailModal)
+
+// 刷新先推进窗口末端，列表与摘要共用同一 asOf，避免摘要停留在页面打开时的截止时间
+function refreshUsage() {
+  const asOf = refreshTimeRangeEnd()
+  void refreshUsageRecords(asOf)
+}
 
 watch(timeRange, () => {
   refreshTimeRangeEnd()
   void loadUsageRecords()
+})
+
+// 精确 ID 定位跨越成功与失败，视图同步回到全部状态避免提示与实际结果不一致
+watch(filterField, (field) => {
+  if (isUsageLocatorField(field) && recordView.value !== 'all')
+    recordView.value = 'all'
 })
 </script>
 
@@ -96,6 +109,10 @@ watch(timeRange, () => {
       :diagnostics="insights.diagnostics"
       :loading="analyticsLoading"
     />
+    <UsageServerErrorSummary
+      v-if="recordView === 'error'"
+      :range="timeRangeParams"
+    />
 
     <ZCard
       class="mt-5 flex flex-col"
@@ -122,7 +139,7 @@ watch(timeRange, () => {
             v-model:value="filterValue"
             :loading="loading"
             :refreshing="refreshingList"
-            @refresh="refreshUsageRecords"
+            @refresh="refreshUsage"
           >
             <template #actions>
               <UsageRecordStatusFilter v-model="recordView" />
@@ -166,6 +183,14 @@ watch(timeRange, () => {
       </template>
     </ZCard>
 
-    <component :is="detailComponent" v-model="showDetailModal" :record="selectedUsageRecord" />
+    <component
+      :is="detailComponent"
+      v-model="showDetailModal"
+      :record="selectedUsageRecord"
+      :loading="detailLoading"
+      :error="detailError"
+      :target="pendingUsageRecord"
+      @retry="retryDetail"
+    />
   </div>
 </template>
