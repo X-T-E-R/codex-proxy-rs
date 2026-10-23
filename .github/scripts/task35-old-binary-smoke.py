@@ -11,6 +11,7 @@ parser.add_argument('--artifacts', type=Path, required=True)
 parser.add_argument('--binary-directory', type=Path, required=True)
 parser.add_argument('--postgres', required=True)
 parser.add_argument('--redis', required=True)
+parser.add_argument('--restore-dump', action='store_true')
 args = parser.parse_args()
 receipt_path = args.artifacts / 'task35-recovery.json'
 receipt = json.loads(receipt_path.read_text())
@@ -29,7 +30,9 @@ config = {
     'schema_version': 1,
     'host': {'listen': {'host':'0.0.0.0','port':8080},'runtime_data_dir':'/workspace/runtime',
              'logging':{'level':'info','stdout':True,'oauth_recovery':False,'request_dump':False,
-                        'file':{'enabled':False,'directory':'/workspace/runtime/logs'}},
+                        'request_dump_retention_days':1,
+                        'file':{'enabled':False,'directory':'/workspace/runtime/logs',
+                                'retention_days':7,'max_file_size_mb':20}},
              'drain_timeout_seconds':2,'worker_shutdown_timeout_seconds':2},
     'store': {'database':{'url':'postgres://codex_proxy@postgres:5432/'+database+'?options='+quote('-csearch_path='+schema,safe=''),
                            'password':'codex_proxy'},
@@ -52,6 +55,14 @@ def sql(text):
                   'psql','-X','-U','codex_proxy','-d',database,'-At','-v','ON_ERROR_STOP=1','-c',text],text=True)
     return result.stdout.strip()
 
+if args.restore_dump:
+    began = time.monotonic()
+    run(['docker','exec','--env','PGPASSWORD=codex_proxy',args.postgres,
+         'createdb','-U','codex_proxy',database])
+    with (args.artifacts / receipt['dump_file']).open('rb') as dump:
+        run(['docker','exec','-i','--env','PGPASSWORD=codex_proxy',args.postgres,
+             'pg_restore','-U','codex_proxy','-d',database,'--exit-on-error','--no-owner'],stdin=dump)
+    receipt['old_binary_dump_replay_seconds'] = round(time.monotonic()-began,3)
 began = time.monotonic()
 health_status = None
 try:

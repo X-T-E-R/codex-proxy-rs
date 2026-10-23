@@ -154,6 +154,10 @@ runs:
         "${compose[@]}" exec -T codex-proxy-rs sh -c \
           'touch /app/.runtime/data/.ci-write /app/.runtime/logs/.ci-write && rm /app/.runtime/data/.ci-write /app/.runtime/logs/.ci-write'
 
+    - name: Verify authenticated Admin policy and observability APIs
+      shell: bash
+      run: python .github/scripts/admin-api-smoke.py
+
     - name: Verify application restart after installer permissions
       shell: bash
       run: |
