@@ -25,7 +25,12 @@ impl CyberSessionKey {
 
     #[must_use]
     pub fn expose_to_store(&self) -> String {
-        hex::encode(self.0)
+        use std::fmt::Write as _;
+        let mut encoded = String::with_capacity(64);
+        for byte in self.0 {
+            write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        encoded
     }
 }
 

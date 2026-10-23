@@ -1,4 +1,5 @@
 //! 执行服务的准入、预算、请求记录与终结行为测试
+mod cyber;
 use gateway_core::routing::extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference};
 
 use std::{
