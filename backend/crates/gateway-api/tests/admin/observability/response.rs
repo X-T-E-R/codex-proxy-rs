@@ -1530,3 +1530,60 @@ async fn dashboard_summary_should_identify_metrics_without_localized_labels() {
         }
     }
 }
+
+#[tokio::test]
+async fn usage_locator_and_legacy_search_reach_store_without_hiding_failed_requests() {
+    use crate::admin::{AdminTestFixture, quota_policy::request};
+    use axum::http::StatusCode;
+    use gateway_admin::model::observability::UsageRecordStatus;
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let (status, _) = request(&fixture, "/api/admin/usage/records?requestId=req_exact&upstreamRequestId=upstream_exact&responseId=resp_exact&search=prefix&statusCode=503", None, true).await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let observations = fixture.observations.lock().unwrap();
+        let query = observations.records.last().unwrap();
+        assert_eq!(query.status, UsageRecordStatus::All);
+        assert_eq!(query.filter.request_id.as_deref(), Some("req_exact"));
+        assert_eq!(
+            query.filter.upstream_request_id.as_deref(),
+            Some("upstream_exact")
+        );
+        assert_eq!(query.filter.response_id.as_deref(), Some("resp_exact"));
+        assert_eq!(query.filter.search.as_deref(), Some("prefix"));
+        assert_eq!(query.filter.status_code, Some(503));
+    }
+    assert_eq!(
+        request(
+            &fixture,
+            "/api/admin/usage/records?requestId=req_exact&status=error",
+            None,
+            true
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        fixture
+            .observations
+            .lock()
+            .unwrap()
+            .records
+            .last()
+            .unwrap()
+            .status,
+        UsageRecordStatus::Error
+    );
+    assert_eq!(
+        request(
+            &fixture,
+            "/api/admin/usage/records?statusCode=600",
+            None,
+            true
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+}

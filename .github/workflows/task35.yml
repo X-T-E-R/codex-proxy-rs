@@ -34,6 +34,7 @@ jobs:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rehearse upgrade and independent recovery with synthetic facts
+        shell: bash
         env:
           CPR_DRILL_CONTAINER: ${{ job.services.postgres.id }}
         run: python .github/scripts/task35-recovery-drill.py --repo . --container "$CPR_DRILL_CONTAINER" | tee "$RUNNER_TEMP/task35-recovery.json"

@@ -74,10 +74,10 @@ async fn summary_counts_stream_errors_legacy_codes_and_intermediate_attempts_onc
         ("success", 200, Some(200), "", None, None, None, 1),
     ];
     for (id, client, upstream, kind, code, message, details, attempts) in rows {
-        sqlx::query("insert into model_requests(id,client_api_key_ref,operation,client_transport,outcome,client_status_code,upstream_status_code,error_kind,attempt_count,started_at,recovery_lease_expires_at,completed_at,error_details,request_observation_json) values($1,'key','responses','http_sse',$2,$3,$4,nullif($5,''),$6,$7,$7+interval '1 hour',$7,$8,$9)")
+        sqlx::query("insert into model_requests(id,client_api_key_ref,operation,client_transport,provider_kind,provider_account_ref,upstream_transport,outcome,client_status_code,upstream_status_code,error_kind,attempt_count,started_at,recovery_lease_expires_at,completed_at,error_details,request_observation_json) values($1,'key','responses','http_sse','openai','acct_synthetic','http_sse',$2,$3,$4,nullif($5,''),$6,$7,$7+interval '1 hour',$7,$8,$9)")
             .bind(id).bind(if kind.is_empty() { "succeeded" } else { "failed" }).bind(client).bind(upstream)
             .bind(kind).bind(attempts).bind(now).bind(details)
-            .bind(serde_json::json!({"error":{"providerErrorCode":code,"message":message}}))
+            .bind(serde_json::json!({"request":{"configRevision":1,"protocol":"openai","endpoint":"/v1/responses","compact":false},"account":{"name":"Synthetic","authenticationKind":"oauth"},"routing":{"scope":"all","groupRefs":[],"groupNamesSnapshot":[]},"error":{"providerErrorCode":code,"message":message}}))
             .execute(&db.pool).await.unwrap();
     }
     for (id, request, attempt) in [

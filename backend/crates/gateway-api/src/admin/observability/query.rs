@@ -29,6 +29,11 @@ impl DashboardQuery {
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UsageQuery {
+    pub request_id: Option<String>,
+    pub upstream_request_id: Option<String>,
+    pub response_id: Option<String>,
+    pub search: Option<String>,
+    pub status_code: Option<i64>,
     pub client_api_key_name: Option<String>,
     pub account_name: Option<String>,
     pub status: Option<String>,
@@ -279,14 +284,19 @@ pub(crate) fn dashboard_today_range(
     crate::time::query_range(start, end, period, as_of, timezone, "today")
 }
 
-pub(crate) fn usage_filter(query: &UsageQuery) -> domain::UsageFilter {
-    domain::UsageFilter {
+pub(crate) fn usage_filter(query: &UsageQuery) -> Result<domain::UsageFilter, WireValidationError> {
+    Ok(domain::UsageFilter {
+        request_id: non_empty(query.request_id.clone()),
+        upstream_request_id: non_empty(query.upstream_request_id.clone()),
+        response_id: non_empty(query.response_id.clone()),
+        search: non_empty(query.search.clone()),
+        status_code: parse_status(query.status_code)?,
         client_api_key_name: non_empty(query.client_api_key_name.clone()),
         provider_account_name: non_empty(query.account_name.clone()),
         provider_kind: non_empty(query.provider.clone()),
         model_contains: non_empty(query.model.clone()),
         ..Default::default()
-    }
+    })
 }
 
 pub(crate) fn usage_command(
@@ -296,8 +306,15 @@ pub(crate) fn usage_command(
     let (current_page, page_size) = query.validate_pagination()?;
     let page_size_value =
         DomainPageSize::new(page_size).map_err(|_| WireValidationError::new("pageSize"))?;
+    let filter = usage_filter(query)?;
+    let locating = filter.request_id.is_some()
+        || filter.upstream_request_id.is_some()
+        || filter.response_id.is_some()
+        || filter.search.is_some()
+        || filter.status_code.is_some();
     Ok(domain::UsageQuery {
         status: match query.status.as_deref() {
+            None if locating => domain::UsageRecordStatus::All,
             None | Some("success") => domain::UsageRecordStatus::Success,
             Some("error") => domain::UsageRecordStatus::Error,
             Some("all") => domain::UsageRecordStatus::All,
@@ -310,7 +327,7 @@ pub(crate) fn usage_command(
             query.as_of,
             timezone,
         )?,
-        filter: usage_filter(query),
+        filter,
         current_page,
         page_size: page_size_value,
     })
