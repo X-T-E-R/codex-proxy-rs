@@ -497,6 +497,12 @@
       "separateSave": "额度策略单独保存，不随账号其他字段提交",
       "conflict": "额度策略已被其他管理员修改，已载入最新版本，请确认后重新保存",
       "inheritSummary": "继承全局：{summary}",
+      "inheritFollowsGlobal": "保存后本账号持续跟随全局策略；全局以后修改时，本账号随之变化",
+      "inheritConfirmDescription": "保存后本账号改为继承全局策略；若全局包含自动重置，达到阈值时可自动消耗重置卡",
+      "inheritConfirmFollowsGlobal": "继承关系保存后持续生效，全局策略以后的变化会直接应用到本账号",
+      "globalLoadFailed": "全局默认策略读取失败",
+      "globalPreviewLoading": "正在读取全局默认策略…",
+      "globalPreviewFailed": "全局策略读取失败，请重新读取后再切换为继承",
       "inheritAutoReset": "继承后允许不可撤销地消耗重置卡，每账号滚动 24 小时最多 {max} 次，最小间隔 {cooldown} 秒，未决结果确认前不耗下一卡",
       "disabledNote": "本账号不执行额度策略，不影响账号启用状态或其他调度限制",
       "help": {

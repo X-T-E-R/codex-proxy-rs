@@ -1,6 +1,6 @@
-import type { AccountQuotaPolicy, AccountQuotaPolicyMode, QuotaPolicy } from '@/api'
+import type { AccountQuotaPolicy, AccountQuotaPolicyMode, GlobalQuotaPolicy, QuotaPolicy } from '@/api'
 import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue'
-import { getAccountQuotaPolicy, updateAccountQuotaPolicy } from '@/api'
+import { getAccountQuotaPolicy, getGlobalQuotaPolicy, updateAccountQuotaPolicy } from '@/api'
 import { ApiError } from '@/api/request'
 
 import { t } from '@/i18n'
@@ -15,12 +15,15 @@ interface AccountQuotaDraft {
 
 export function useAccountQuotaPolicy(options: { accountId: () => string }) {
   const view = shallowRef<AccountQuotaPolicy>()
+  const global = shallowRef<GlobalQuotaPolicy>()
   const saved = shallowRef<AccountQuotaDraft>()
   const mode = shallowRef<AccountQuotaPolicyMode>('inherit')
   const form = ref(quotaPolicyForm())
   const loading = shallowRef(true)
+  const globalLoading = shallowRef(true)
   const saving = shallowRef(false)
   const loadError = shallowRef('')
+  const globalError = shallowRef('')
   const conflict = shallowRef(false)
   let sequence = 0
   let controller: AbortController | undefined
@@ -55,25 +58,36 @@ export function useAccountQuotaPolicy(options: { accountId: () => string }) {
     const next = new AbortController()
     controller = next
     loadError.value = ''
+    globalError.value = ''
     if (!view.value)
       loading.value = true
-    try {
-      const result = await getAccountQuotaPolicy({ accountId }, { silent: true, signal: next.signal })
-      if (current === sequence)
-        apply(result, keepDraft)
+    if (!global.value)
+      globalLoading.value = true
+    const requestOptions = { silent: true, signal: next.signal }
+    // 账号视图只代表“已保存模式”的生效策略；继承预览必须来自当前全局策略
+    const [accountResult, globalResult] = await Promise.allSettled([
+      getAccountQuotaPolicy({ accountId }, requestOptions),
+      getGlobalQuotaPolicy(requestOptions),
+    ])
+    if (current !== sequence)
+      return
+    if (accountResult.status === 'fulfilled') {
+      apply(accountResult.value, keepDraft)
     }
-    catch (cause: unknown) {
-      if (current !== sequence || next.signal.aborted)
-        return
+    else if (!next.signal.aborted) {
       if (view.value)
-        ZNotification.error({ message: errorMessage(cause, t('accounts.quotaPolicy.loadFailed')) })
+        ZNotification.error({ message: errorMessage(accountResult.reason, t('accounts.quotaPolicy.loadFailed')) })
       else
-        loadError.value = errorMessage(cause)
+        loadError.value = errorMessage(accountResult.reason)
     }
-    finally {
-      if (current === sequence)
-        loading.value = false
+    if (globalResult.status === 'fulfilled') {
+      global.value = globalResult.value
     }
+    else if (!next.signal.aborted) {
+      globalError.value = errorMessage(globalResult.reason, t('accounts.quotaPolicy.globalLoadFailed'))
+    }
+    loading.value = false
+    globalLoading.value = false
   }
 
   function reset() {
@@ -131,6 +145,9 @@ export function useAccountQuotaPolicy(options: { accountId: () => string }) {
 
   return {
     view,
+    globalPolicy: global,
+    globalLoading,
+    globalError,
     mode,
     form,
     loading,

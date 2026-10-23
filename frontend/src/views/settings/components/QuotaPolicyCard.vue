@@ -27,7 +27,14 @@ const {
 } = useGlobalQuotaPolicy()
 
 const confirming = ref(false)
-const validationText = computed(() => validation.value ? t(`settings.quotaPolicy.validation.${validation.value}`) : '')
+const validationText = computed(() => {
+  switch (validation.value) {
+    case 'threshold': return t('settings.quotaPolicy.validation.threshold')
+    case 'attempts': return t('settings.quotaPolicy.validation.attempts')
+    case 'cooldown': return t('settings.quotaPolicy.validation.cooldown')
+    default: return ''
+  }
+})
 
 onMounted(() => {
   void load()

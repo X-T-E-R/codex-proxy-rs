@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Account } from '@/api'
+import type { Account, QuotaPolicy } from '@/api'
 import { ZButton, ZConfirmDialog, ZEmpty, ZIconButton, ZPopover, ZSegmented, ZSkeleton } from '@codex-proxy/ui'
 
 import { CircleAlert, RefreshCw, Save, TriangleAlert, Undo2 } from '@lucide/vue'
@@ -16,6 +16,9 @@ const { t } = useI18n({ useScope: 'global' })
 
 const {
   view,
+  globalPolicy,
+  globalLoading,
+  globalError,
   mode,
   form,
   loading,
@@ -24,7 +27,6 @@ const {
   conflict,
   dirty,
   validation,
-  effectivePolicy,
   source,
   status,
   load,
@@ -32,26 +34,73 @@ const {
   reset,
 } = useAccountQuotaPolicy({ accountId: () => props.account.id })
 
-const modeOptions = computed(() => (['inherit', 'disabled', 'custom'] as const).map(value => ({
-  value,
-  label: t(`accounts.quotaPolicy.modes.${value}`),
-})))
+const modeOptions = computed(() => [
+  { value: 'inherit' as const, label: t('accounts.quotaPolicy.modes.inherit') },
+  { value: 'disabled' as const, label: t('accounts.quotaPolicy.modes.disabled') },
+  { value: 'custom' as const, label: t('accounts.quotaPolicy.modes.custom') },
+])
 
-const validationText = computed(() => validation.value ? t(`settings.quotaPolicy.validation.${validation.value}`) : '')
-const sourceText = computed(() => source.value ? t(`accounts.quotaPolicy.source.${source.value}`) : '')
-const reasonText = computed(() => t(`accounts.quotaPolicy.reasons.${status.value?.reason ?? 'unknown'}`))
+const validationText = computed(() => {
+  switch (validation.value) {
+    case 'threshold': return t('settings.quotaPolicy.validation.threshold')
+    case 'attempts': return t('settings.quotaPolicy.validation.attempts')
+    case 'cooldown': return t('settings.quotaPolicy.validation.cooldown')
+    default: return ''
+  }
+})
 
-const effectiveSummary = computed(() => effectivePolicy.value
-  ? quotaPolicyWindows(effectivePolicy.value).map(({ window, action, thresholdPercent }) => {
-      const label = window === 'primary' ? t('settings.quotaPolicy.windows.primary') : t('settings.quotaPolicy.windows.secondary')
-      if (action === 'off')
-        return t('settings.quotaPolicy.summary.off', { window: label })
-      return t(action === 'stop' ? 'settings.quotaPolicy.summary.stop' : 'settings.quotaPolicy.summary.reset', { window: label, threshold: thresholdPercent })
-    }).join(' · ')
-  : '')
+const sourceText = computed(() => {
+  switch (source.value) {
+    case 'global': return t('accounts.quotaPolicy.source.global')
+    case 'disabled': return t('accounts.quotaPolicy.source.disabled')
+    case 'account': return t('accounts.quotaPolicy.source.account')
+    default: return ''
+  }
+})
 
-const inheritAutoReset = computed(() => mode.value !== 'disabled' && effectivePolicy.value ? hasAutoReset(effectivePolicy.value) : false)
-const confirmNeeded = computed(() => mode.value === 'custom' && hasAutoReset(policyFromForm(form.value)))
+const reasonText = computed(() => {
+  switch (status.value?.reason) {
+    case 'off': return t('accounts.quotaPolicy.reasons.off')
+    case 'ready': return t('accounts.quotaPolicy.reasons.ready')
+    case 'threshold_primary': return t('accounts.quotaPolicy.reasons.threshold_primary')
+    case 'threshold_secondary': return t('accounts.quotaPolicy.reasons.threshold_secondary')
+    case 'quota_unconfirmed': return t('accounts.quotaPolicy.reasons.quota_unconfirmed')
+    case 'reset_pending': return t('accounts.quotaPolicy.reasons.reset_pending')
+    case 'reset_failed': return t('accounts.quotaPolicy.reasons.reset_failed')
+    case 'reset_readback_unconfirmed': return t('accounts.quotaPolicy.reasons.reset_readback_unconfirmed')
+    case 'auto_budget_exhausted': return t('accounts.quotaPolicy.reasons.auto_budget_exhausted')
+    case 'auto_cooldown': return t('accounts.quotaPolicy.reasons.auto_cooldown')
+    default: return t('accounts.quotaPolicy.reasons.unknown')
+  }
+})
+
+function windowSummaryLabel(window: 'primary' | 'secondary') {
+  return window === 'primary' ? t('settings.quotaPolicy.windows.primary') : t('settings.quotaPolicy.windows.secondary')
+}
+
+function effectiveSummary(policy: QuotaPolicy | undefined) {
+  return policy
+    ? quotaPolicyWindows(policy).map(({ window, action, thresholdPercent }) => {
+        const label = windowSummaryLabel(window)
+        switch (action) {
+          case 'off': return t('settings.quotaPolicy.summary.off', { window: label })
+          case 'stop': return t('settings.quotaPolicy.summary.stop', { window: label, threshold: thresholdPercent })
+          default: return t('settings.quotaPolicy.summary.reset', { window: label, threshold: thresholdPercent })
+        }
+      }).join(' · ')
+    : ''
+}
+
+// 草稿继承的预览与耗卡判断只来自当前全局策略，不能用账号已保存模式的 effectivePolicy 冒充
+const inheritPreview = computed(() => mode.value === 'inherit' ? globalPolicy.value?.policy : undefined)
+const inheritSummary = computed(() => effectiveSummary(inheritPreview.value))
+const inheritAutoReset = computed(() => mode.value === 'inherit' && !!inheritPreview.value && hasAutoReset(inheritPreview.value))
+const customAutoReset = computed(() => mode.value === 'custom' && hasAutoReset(policyFromForm(form.value)))
+const confirmNeeded = computed(() => customAutoReset.value || inheritAutoReset.value)
+const inheritBlocked = computed(() => mode.value === 'inherit' && (globalLoading.value || !globalPolicy.value || !!globalError.value))
+const confirmPolicy = computed(() => mode.value === 'inherit'
+  ? inheritPreview.value
+  : mode.value === 'custom' ? policyFromForm(form.value) : undefined)
 
 const statusTone = computed(() => status.value?.paused || status.value?.pendingOperationId
   ? 'bg-cp-warning-container text-cp-warning-on-container'
@@ -177,16 +226,33 @@ function confirmSave() {
       />
 
       <div v-else class="mt-2 grid gap-1 text-cp-xs leading-relaxed text-cp-text-secondary">
-        <p class="m-0">
-          {{ mode === 'inherit'
-            ? t('accounts.quotaPolicy.inheritSummary', { summary: effectiveSummary })
-            : t('accounts.quotaPolicy.disabledNote') }}
-        </p>
-        <p v-if="mode === 'inherit' && inheritAutoReset && effectivePolicy" class="m-0 text-cp-warning-text">
-          {{ t('accounts.quotaPolicy.inheritAutoReset', {
-            max: effectivePolicy.autoReset.maxAttemptsPer24h,
-            cooldown: effectivePolicy.autoReset.cooldownSeconds,
-          }) }}
+        <template v-if="mode === 'inherit'">
+          <p v-if="globalLoading && !globalPolicy" class="m-0">
+            {{ t('accounts.quotaPolicy.globalPreviewLoading') }}
+          </p>
+          <p v-else-if="globalError" class="m-0 text-cp-error-text" role="alert">
+            {{ t('accounts.quotaPolicy.globalPreviewFailed') }}
+            <button type="button" class="ml-1 underline underline-offset-2" @click="load()">
+              {{ t('common.actions.retry') }}
+            </button>
+          </p>
+          <template v-else>
+            <p class="m-0">
+              {{ t('accounts.quotaPolicy.inheritSummary', { summary: inheritSummary }) }}
+            </p>
+            <p class="m-0">
+              {{ t('accounts.quotaPolicy.inheritFollowsGlobal') }}
+            </p>
+          </template>
+          <p v-if="inheritAutoReset && inheritPreview" class="m-0 text-cp-warning-text">
+            {{ t('accounts.quotaPolicy.inheritAutoReset', {
+              max: inheritPreview.autoReset.maxAttemptsPer24h,
+              cooldown: inheritPreview.autoReset.cooldownSeconds,
+            }) }}
+          </p>
+        </template>
+        <p v-else class="m-0">
+          {{ t('accounts.quotaPolicy.disabledNote') }}
         </p>
       </div>
 
@@ -201,7 +267,7 @@ function confirmSave() {
           <ZIconButton v-if="dirty" :aria-label="t('accounts.quotaPolicy.undo')" variant="solid" :disabled="saving" @click="reset">
             <Undo2 class="size-4" />
           </ZIconButton>
-          <ZButton type="primary" :loading="saving" :disabled="saving || !dirty || (mode === 'custom' && !!validation)" @click="requestSave">
+          <ZButton type="primary" :loading="saving" :disabled="saving || !dirty || inheritBlocked || (mode === 'custom' && !!validation)" @click="requestSave">
             <template #icon>
               <Save class="size-4" />
             </template>
@@ -214,16 +280,21 @@ function confirmSave() {
     <ZConfirmDialog
       v-model="confirming"
       :title="t('settings.quotaPolicy.confirm.title')"
-      :description="t('settings.quotaPolicy.confirm.accountDescription')"
+      :description="mode === 'inherit'
+        ? t('accounts.quotaPolicy.inheritConfirmDescription')
+        : t('settings.quotaPolicy.confirm.accountDescription')"
       :confirm-text="t('settings.quotaPolicy.confirm.confirm')"
       :loading="saving"
       @confirm="confirmSave"
     >
       <p class="m-0 text-cp-sm leading-relaxed">
         {{ t('settings.quotaPolicy.confirm.body', {
-          max: policyFromForm(form).autoReset.maxAttemptsPer24h,
-          cooldown: policyFromForm(form).autoReset.cooldownSeconds,
+          max: confirmPolicy?.autoReset.maxAttemptsPer24h ?? 1,
+          cooldown: confirmPolicy?.autoReset.cooldownSeconds ?? 86400,
         }) }}
+      </p>
+      <p v-if="mode === 'inherit'" class="m-0 mt-2 text-cp-sm leading-relaxed">
+        {{ t('accounts.quotaPolicy.inheritConfirmFollowsGlobal') }}
       </p>
     </ZConfirmDialog>
   </section>

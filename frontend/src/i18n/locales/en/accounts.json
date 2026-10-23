@@ -497,6 +497,12 @@
       "separateSave": "The quota policy saves separately from the rest of the account",
       "conflict": "Another administrator changed this quota policy; the latest revision is loaded, review and save again",
       "inheritSummary": "Inherits the global policy: {summary}",
+      "inheritFollowsGlobal": "After saving, this account keeps following the global policy; later global changes apply automatically",
+      "inheritConfirmDescription": "After saving, this account inherits the global policy; if that policy resets automatically, it can use reset cards at the threshold",
+      "inheritConfirmFollowsGlobal": "The inherited relationship stays in effect, so future global changes apply to this account directly",
+      "globalLoadFailed": "Could not load the global policy",
+      "globalPreviewLoading": "Loading the global policy…",
+      "globalPreviewFailed": "Could not load the global policy; reload before switching to inherit",
       "inheritAutoReset": "Inheriting allows irreversible reset-card usage, up to {max} sends per account per rolling 24 hours with a minimum interval of {cooldown} seconds; a pending result blocks the next card",
       "disabledNote": "This account runs no quota policy; the account stays enabled and other scheduling limits still apply",
       "help": {

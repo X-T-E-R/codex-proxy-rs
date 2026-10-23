@@ -497,6 +497,12 @@
       "separateSave": "額度策略單獨儲存，不隨賬號其他欄位提交",
       "conflict": "額度策略已被其他管理員修改，已載入最新版本，請確認後重新儲存",
       "inheritSummary": "繼承全域：{summary}",
+      "inheritFollowsGlobal": "儲存後本賬號持續跟隨全域策略；全域以後修改時，本賬號隨之變化",
+      "inheritConfirmDescription": "儲存後本賬號改為繼承全域策略；若全域包含自動重置，達到閾值時可自動消耗重置卡",
+      "inheritConfirmFollowsGlobal": "繼承關係儲存後持續生效，全域策略以後的變化會直接套用到本賬號",
+      "globalLoadFailed": "全域預設策略讀取失敗",
+      "globalPreviewLoading": "正在讀取全域預設策略…",
+      "globalPreviewFailed": "全域策略讀取失敗，請重新讀取後再切換為繼承",
       "inheritAutoReset": "繼承後允許不可撤銷地消耗重置卡，每賬號滾動 24 小時最多 {max} 次，最小間隔 {cooldown} 秒，未決結果確認前不耗下一卡",
       "disabledNote": "本賬號不執行額度策略，不影響賬號啟用狀態或其他調度限制",
       "help": {

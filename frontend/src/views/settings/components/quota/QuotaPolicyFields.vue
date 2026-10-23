@@ -11,10 +11,11 @@ const form = defineModel<QuotaPolicyForm>({ required: true })
 
 const { t } = useI18n({ useScope: 'global' })
 
-const actionOptions = computed(() => (['off', 'stop', 'reset_then_stop'] as const).map(value => ({
-  value,
-  label: t(`settings.quotaPolicy.actions.${value}`),
-})))
+const actionOptions = computed(() => [
+  { value: 'off' as const, label: t('settings.quotaPolicy.actions.off') },
+  { value: 'stop' as const, label: t('settings.quotaPolicy.actions.stop') },
+  { value: 'reset_then_stop' as const, label: t('settings.quotaPolicy.actions.reset_then_stop') },
+])
 
 const autoReset = computed(() => hasAutoReset(policyFromForm(form.value)))
 </script>
