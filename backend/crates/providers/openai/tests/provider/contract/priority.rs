@@ -245,3 +245,49 @@ async fn same_request_reuses_account_tier_after_auto_off_but_next_request_observ
     );
     assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn api_key_account_keeps_native_group_tier_without_querying_oauth_priority_policy() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let server = MockServer::start().await;
+    store
+        .seed_api_key(
+            "acct_priority_wire",
+            server.uri(),
+            provider_openai::credential::ResponsesTransport::Http,
+        )
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(format!("data: {}\n\n", completed()), "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let policy = Arc::new(AccountPolicy {
+        mode: Mutex::new(AccountPriorityMode::Disabled),
+        calls: AtomicUsize::new(0),
+    });
+    let mut stream = priority_provider(&store, server.uri(), &policy)
+        .execute(
+            request(false, None),
+            context_with_fast_policy(
+                "req_api_key_priority",
+                CancellationToken::new(),
+                FastMode::Enabled,
+            ),
+        )
+        .await
+        .unwrap();
+    while let Some(event) = stream.next().await {
+        event.unwrap();
+    }
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        captured_request_body(&requests[0])["service_tier"],
+        "priority"
+    );
+    assert_eq!(policy.calls.load(Ordering::SeqCst), 0);
+}

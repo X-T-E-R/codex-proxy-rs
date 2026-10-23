@@ -1329,6 +1329,29 @@ GET 和 POST 均返回 `enabled`、`leadMinutes`、`nextDiscoveryAtDisplay`、`n
 `nothing_to_reset` 表示当前没有可重置窗口，这三种状态均保留卡片并稍后重查，其中 `nothing_to_reset` 的下一次消费使用新幂等键。
 结果未知的未决操作继续使用原幂等键确认，不重新应用周额度上限；自动操作未决且对应卡片尚未到期时，手动消费返回 `409`
 
+### 全局与账号快速模式
+
+| 方法 | 路由 | 内容 |
+| --- | --- | --- |
+| `GET` | `/api/admin/priority-policy` | 全局 `revision`、`mode`、`autoOffOnQuotaReset` |
+| `POST` | `/api/admin/priority-policy/update` | 保存 `{expectedRevision,mode,autoOffOnQuotaReset}` |
+| `GET` | `/api/admin/accounts/priority-policy?accountId=...` | OpenAI OAuth 账号配置及生效状态 |
+| `POST` | `/api/admin/accounts/priority-policy/update` | 保存 `{accountId,expectedRevision,mode,autoOffOnQuotaReset}` |
+
+全局 `mode` 为 `default`、`enabled` 或 `disabled`，默认 `default` 保留原请求/分组决定；账号 `mode` 为
+`inherit`、`enabled` 或 `disabled`。账号显式配置覆盖全局，但分组 `disabled` 仍禁止快速模式。
+生效后仅对支持 priority 的 OpenAI 推理请求设置 `service_tier=priority`，保留显式 flex 等非默认档位，
+不用于 Images、独立 Search 或 xAI。HTTP/WS 共用所选账号策略，同一次请求的同账号重试保持冻结值
+
+全局 `autoOffOnQuotaReset` 为布尔值，默认 `false`；账号该字段为 `null` 时继承全局，`true/false`
+显式覆盖。账号读值另含 `effectiveMode`、`effectiveAutoOffOnQuotaReset`、`global` 和
+`status:{armed,lastObservedAt,lastAutoOffAt,reason}`。`effectiveMode` 不包含具体请求的分组限制
+
+开启自动关闭后，`awaiting_baseline` 表示等待可靠新观测，`armed` 表示已绑定基线，`quota_reset`
+表示已确认该账号窗口重置并持久设置账号 `mode=disabled`，`off` 表示未启用。已用百分比 0/1
+本身不证明重置，还须同身份、更新的观测和重置边界推进；旧观察、读取失败或同代次下降不会关闭。
+各账号独立关闭，不修改全局模式、不消费重置卡。重新开启会绑定新基线；配置冲突返回 `409`，重新读取后再保存
+
 ## 6. 账号分组
 
 分组是 Provider-neutral 的账号集合；一个组可包含任意 Provider 账号，一个账号也可属于多个组。
@@ -1990,6 +2013,7 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 | `GET` | `/api/admin/usage/insights/overview` | 用量、成本与成功率洞察 |
 | `GET` | `/api/admin/usage/insights/diagnostics` | 按维度聚合诊断 |
 | `GET` | `/api/admin/operations/errors` | 运维错误分页列表 |
+| `GET` | `/api/admin/errors/summary` | 服务端错误族的请求去重摘要与日桶 |
 | `GET` | `/api/admin/diagnostics/export` | 按 `requestId` 或 `errorId` 下载诊断 ZIP 附件 |
 
 ### Dashboard 趋势指标
@@ -2022,11 +2046,12 @@ Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`
 Dashboard 默认 `period=today`，用量、诊断和错误查询默认 `period=7d`，范围参数遵循[页面时间合同](#页面时间合同)。
 Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚点
 
-请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountName`、`model` 和 `status`。
+请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountName`、`model`、`status`，
+以及 `requestId`、`upstreamRequestId`、`responseId` 精确定位、`search` 前缀搜索和 `statusCode` 筛选。
 汇总和洞察只接受时间范围与 `provider`；诊断另接受 `dimension`、`model` 和 `statusCode`。
 各接口拒绝未知参数，明细筛选不改变顶部统计范围
 
-请求列表的 `status` 可取 `success`、`error`、`all`，默认 `success`；未知值返回 `400`。
+请求列表的 `status` 可取 `success`、`error`、`all`，默认 `success`；带上述定位、搜索或状态码筛选且未显式指定 `status` 时默认 `all`，避免漏掉失败记录。未知值返回 `400`。
 `success` 沿用成功用量记录范围，`error` 包含最终 `failed`、`incomplete` 的请求，
 `all` 合并成功用量记录及全部非成功请求，包括执行中和已取消请求。每个请求只返回一行，
 重试中间错误不改变请求最终分类；`logicalOutcome` 保留真实结果。状态筛选只影响明细列表，
@@ -2070,8 +2095,26 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 请求明细的 `clientApiKeyName`、`accountName` 按字面量包含匹配请求保存的历史名称快照，区分大小写，
 不解析为 ID，也不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
 
-运维错误列表的 `search` 使用字面量前缀匹配，不支持密钥值或可见前缀搜索。
-请求详情通过 `/api/admin/usage/records/detail?id=...` 查询
+请求列表的 `search` 按字面量前缀匹配模型、Key/账号引用和已存账号名称/邮箱快照，Key 名称匹配不区分大小写。
+运维错误列表同样使用字面量前缀搜索，另接受 `requestId`、`upstreamRequestId`、`responseId` 精确定位。
+两者均不支持密钥值搜索；请求详情通过 `/api/admin/usage/records/detail?id=...` 查询
+
+### 服务端错误族摘要
+
+`GET /api/admin/errors/summary` 接受 `period`、`asOf` 或 `startTime/endTime`，默认 7 天，单次最长 31 天。
+返回 `fromInclusive/toExclusive`、部署 `timezone` 和 `timeBasis:"started_at"`，请求按开始时间落日桶
+
+`totals` 与 `daily[]` 使用同一组字段：`retainedRequests`、`serverRelatedRequests`、`terminalServerRelatedRequests`、
+`overloaded`、`status503`、`otherServerPrefix`、`other5xx`、`upstream503`、`infrastructure503`、`noProvider503`、
+`unclassified503`、`client200Errors`、`legacyMessageMatches`；日桶另含 `day`
+
+`serverRelatedRequests` 对请求终态和仍保留的中间错误事件取请求 ID 去重集合，纳入 overloaded、server 前缀和 5xx，
+包括 client200 的流内失败；`terminalServerRelatedRequests` 仅看终态。分类读取已存 code、受控错误结构和旧错误消息，
+不扫描请求正文。子项可能重叠，不相加；本地基础设施或无可用账号的 503 不标成上游过载
+
+`attempts` 返回 `observed/serverRelated/overloaded/status503`，按请求和 attempt 去重，不重复累计相同的末次事件，
+`coverage:"observed_only"` 表示并非完整尝试账本。`source:"retained_records"` 及窗内
+`earliestRetainedAt/latestRetainedAt` 说明实际保留范围，不保证历史流量完整，不能据此计算历史错误率
 
 ### 记录范围与统计口径
 

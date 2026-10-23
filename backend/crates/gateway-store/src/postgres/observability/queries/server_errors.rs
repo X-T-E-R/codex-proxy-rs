@@ -25,8 +25,9 @@ with base as materialized (
   from documents
 ), codes as (
   select *,lower(coalesce(provider_error_code,'')) stored_code,
-    lower(coalesce(raw_error#>>'{error,code}',raw_error->>'code','')) raw_code,
-    lower(coalesce(raw_error#>>'{error,type}',raw_error->>'type','')) raw_type,
+    lower(coalesce(raw_error#>>'{error,code}',raw_error#>>'{response,error,code}',raw_error->>'code','')) raw_code,
+    lower(coalesce(raw_error#>>'{error,type}',raw_error#>>'{response,error,type}',raw_error->>'type','')) raw_type,
+    coalesce(raw_error#>>'{error,status}',raw_error#>>'{response,error,status}',raw_error->>'status','') raw_status,
     coalesce(error_message,'') ~* 'server[ _]+(is[ _]+)?overloaded|server_overloaded' message_overload,
     coalesce(error_message,'') ~* '\mserver_[a-z0-9_]+' message_server
   from upstream
@@ -34,8 +35,8 @@ with base as materialized (
   select *,
     (stored_code like '%overload%' or raw_code like '%overload%' or raw_type like '%overload%' or message_overload) overloaded,
     (left(stored_code,7)='server_' or left(raw_code,7)='server_' or left(raw_type,7)='server_' or message_server) server_prefix,
-    (coalesce(client_status_code=503,false) or coalesce(upstream_status_code=503,false) or stored_code='503' or raw_code='503') status503,
-    (coalesce(client_status_code between 500 and 599,false) or coalesce(upstream_status_code between 500 and 599,false)) status5xx,
+    (coalesce(client_status_code=503,false) or coalesce(upstream_status_code=503,false) or stored_code='503' or raw_code='503' or raw_status='503') status503,
+    (coalesce(client_status_code between 500 and 599,false) or coalesce(upstream_status_code between 500 and 599,false) or raw_status ~ '^5[0-9]{2}$') status5xx,
     (message_overload or message_server) legacy_message
   from codes
 ), attempts as (
@@ -49,7 +50,7 @@ with base as materialized (
     bool_or(f.overloaded) overloaded,bool_or(f.status503) status503,
     bool_or(f.server_prefix and not f.overloaded) other_prefix,
     bool_or(f.status5xx and not f.status503) other5xx,
-    bool_or(f.upstream_status_code=503 or (f.status503 and f.error_kind not in ('provider_infrastructure_unavailable','no_available_provider') and (f.raw_code='503' or f.stored_code='503'))) upstream503,
+    bool_or(f.upstream_status_code=503 or (f.status503 and f.error_kind not in ('provider_infrastructure_unavailable','no_available_provider') and (f.raw_code='503' or f.stored_code='503' or f.raw_status='503'))) upstream503,
     bool_or(f.status503 and f.error_kind='provider_infrastructure_unavailable') infra503,
     bool_or(f.status503 and f.error_kind='no_available_provider') no_provider503,
     bool_or(f.legacy_message) legacy_message

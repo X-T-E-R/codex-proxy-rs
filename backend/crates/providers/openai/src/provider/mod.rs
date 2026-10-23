@@ -660,7 +660,7 @@ impl Provider for CodexProvider {
             None => {
                 let mode = self
                     .quota
-                    .resolve_priority(&account_id, context.fast_mode())
+                    .resolve_priority(lease.account(), context.fast_mode())
                     .await
                     .map_err(|source| {
                         map_selection_error(CredentialSelectionError::Store(

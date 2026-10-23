@@ -47,7 +47,9 @@ async fn summary_counts_stream_errors_legacy_codes_and_intermediate_attempts_onc
             "upstream_error",
             None,
             None,
-            Some(r#"{"upstream":"{\"error\":{\"type\":\"server_overloaded\"}}"}"#),
+            Some(
+                r#"{"upstream":"{\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"server_overloaded\",\"status\":503}}}"}"#,
+            ),
             1,
         ),
         (
@@ -101,10 +103,10 @@ async fn summary_counts_stream_errors_legacy_codes_and_intermediate_attempts_onc
     assert_eq!(summary.totals.server_related_requests, 7);
     assert_eq!(summary.totals.terminal_server_related_requests, 6);
     assert_eq!(summary.totals.overloaded, 4);
-    assert_eq!(summary.totals.status503, 4);
+    assert_eq!(summary.totals.status503, 5);
     assert_eq!(summary.totals.infrastructure503, 1);
     assert_eq!(summary.totals.no_provider503, 1);
-    assert_eq!(summary.totals.upstream503, 2);
+    assert_eq!(summary.totals.upstream503, 3);
     assert_eq!(summary.totals.client200_errors, 4);
     assert_eq!(summary.totals.legacy_message_matches, 1);
     assert_eq!(summary.attempts.observed, 7);
