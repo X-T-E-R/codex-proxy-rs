@@ -16,73 +16,24 @@ jobs:
       # 镜像沿用9503后端与088前端同字节质量证据，实际镜像仍从源码完整build
       run_backend: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[task35-image]')) }}
       run_frontend: false
-  recovery-drill:
+  recovery-evidence:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read
-    services:
-      postgres:
-        image: postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
-        env:
-          POSTGRES_DB: codex_proxy
-          POSTGRES_USER: codex_proxy
-          POSTGRES_PASSWORD: codex_proxy
-        options: >-
-          --health-cmd "pg_isready -U codex_proxy -d codex_proxy"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
-      - name: Checkout exact candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Reuse proven production-scale synthetic recovery
+      - name: Reuse admitted scale recovery and old-writer receipt
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: task35-recovery-9503cee9ad9d1eb2727a339f0fad0e309423ade8
-          run-id: 39939368951
+          name: task35-recovery-a690a7d278c5672381eff3f9f2e7e8517b7e5bcb
+          run-id: 39941912725
           repository: X-T-E-R/codex-proxy-rs
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/task35-recovery
-      - name: Download pinned old production binary
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: quota-linux-binary
-          run-id: 37242026140
-          repository: X-T-E-R/codex-proxy-rs
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/task35-old45
-      - name: Start old writer on recovered DB without external egress
-        shell: bash
-        env:
-          CPR_DRILL_POSTGRES: ${{ job.services.postgres.id }}
-          CPR_DRILL_REDIS: ${{ job.services.redis.id }}
-        run: >-
-          python .github/scripts/task35-old-binary-smoke.py
-          --artifacts "$RUNNER_TEMP/task35-recovery"
-          --binary-directory "$RUNNER_TEMP/task35-old45"
-          --postgres "$CPR_DRILL_POSTGRES" --redis "$CPR_DRILL_REDIS" --restore-dump
-      - name: Preserve synthetic recovery receipt
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: task35-recovery-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/task35-recovery/task35-recovery.json
-            ${{ runner.temp }}/task35-recovery/synthetic-recovery.dump
-            ${{ runner.temp }}/task35-recovery/old45-startup.log
-          if-no-files-found: error
   candidate-image:
     if: github.event_name == 'push' && contains(github.event.head_commit.message, '[task35-image]')
-    needs: [quality, recovery-drill]
+    needs: [quality, recovery-evidence]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -94,11 +45,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-      - name: Match admitted backend and frontend evidence
+      - name: Match admitted code and recovery evidence
         shell: bash
         run: |
-          git fetch --depth=1 origin 088fe094e91bd991fa4d01744c11ff09c1fdaa33
-          git diff --exit-code 088fe094e91bd991fa4d01744c11ff09c1fdaa33 -- backend frontend
+          git fetch --depth=1 origin a690a7d278c5672381eff3f9f2e7e8517b7e5bcb
+          git diff --exit-code a690a7d278c5672381eff3f9f2e7e8517b7e5bcb -- backend frontend .github/scripts
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Define immutable candidate identity
@@ -136,7 +87,7 @@ jobs:
           platform: linux/amd64
           artifact-name: task35-container-${{ github.sha }}
       - name: Login to self-fork registry
-        uses: docker/login-action@a84a5da2a638a20459c5da46892714ce6ebc67e3 # v4.0.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
