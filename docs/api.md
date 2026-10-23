@@ -1480,11 +1480,9 @@ HTTP 返回 `403` 和 `image_generation_disabled`，WebSocket 每个 `response.c
 插件显式选号须通过账号资格与租约检查，见[调度合同](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#路由调度与观察)。普通请求关闭账号排队且没有可用容量时返回 `503` / `account_capacity_unavailable`，
 与无候选账号的 `no_available_provider` 区分；排队不绕过账号范围、模型权限、RPM 或金额限额
 
-OpenAI 会话因之前的上游 `cyber_policy` 拒绝而排除全部可选账号时，选号失败返回 `400` / `cyber_policy`，
-提示停止反复重试该会话，不代表账号被封或服务整体不可用；固定账号请求只判断其绑定范围。
-该本地失败禁止自动重放；会话排除期限为一小时，严格亲和后代线程仍按上述规则等待。
-同次请求换号耗尽时保留已收到的原始上游错误；后续请求没有上游失败可交付时才使用上述本地提示。
-已开始交付的请求沿用流内错误合同，不能再改变 HTTP 状态
+启用 [Cyber 会话防护](#cyber-会话防护与-websocket-池)后，上游结构化 `cyber_policy` 拒绝会阻止同一 Client Key、同一语义线程在 TTL 内再次发送。
+本地拒绝返回 `403` / `session_blocked_by_cyber_policy`，尝试数为零；更换账号、固定账号和原生续接均不能绕过，路由到 OpenAI 或 xAI 的 Responses 请求采用同一规则。
+线程身份优先于共享 session，父、子、兄弟线程及不同 Key 独立。当前请求保留原始上游错误且不自动重放；已开始交付时沿用流内错误合同，不能改变 HTTP 状态
 
 xAI 由本地账号/模型冷却、无可选账号、并发容量不足及选号基础设施不可用引起的终态错误返回 `503`，
 保留 `account_unavailable_error` 类型和各自的机器码；可用备用 Provider 仍按路由范围与换号预算尝试。
@@ -1547,6 +1545,26 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 | [账号自动冻结](#账号自动冻结) | `accountAutoFreezeEnabled`、`accountAutoFreezeThreshold`、`accountAutoFreezeWindowSeconds`、`accountAutoFreezeDurationSeconds`、`accountAutoFreezeProbeEnabled`、`accountAutoFreezeProbeModel`、`accountAutoFreezeAdaptiveConcurrency` |
 | [账号预热](#账号预热) | `accountWarmupEnabled`、`accountWarmupScheduleTime`、`accountWarmupModel` |
 | [主动额度重置卡](#主动额度重置卡) | `resetCreditLeadMinutes`、`resetCreditMaxWeeklyRemainingPercent` |
+| [Cyber 与 WebSocket 池](#cyber-会话防护与-websocket-池) | `cyberSessionBlockEnabled`、`cyberSessionBlockTtlSeconds`、`wsPoolEnabled`、`wsPoolMaxAgeMs`、`wsPoolMaxConnecting`、`wsPoolStreamIdleTimeoutMs`、`wsPoolFastPathBudgetMs` |
+
+### Cyber 会话防护与 WebSocket 池
+
+这七项设置省略时保留已保存的值；显式 `false` 关闭对应功能，不清空其余参数。保存沿用同一 `configRevision` 比较与发布机制，无需重启
+
+`cyberSessionBlockEnabled` 默认 `false`，`cyberSessionBlockTtlSeconds` 默认 3600 秒，范围 1～4294967295。
+首次结构化拒绝写入固定到期的 marker，重复拒绝不会延长 TTL；关闭防护不清除旧 marker，重新开启时尚未到期的 marker 继续生效，成功请求也不清除
+
+WebSocket 池只影响 OpenAI Responses 的连接复用和建立，继续使用同一个受管池：
+
+| 字段 | 单位与范围 | 作用 |
+| --- | --- | --- |
+| `wsPoolEnabled` | 布尔值 | 关闭后新请求不租用或创建池连接；允许降级的请求按既有规则使用 HTTP，必须原连接续接的请求返回续接不可用 |
+| `wsPoolMaxAgeMs` | 毫秒，1～9223372036854775807 | 超龄空闲连接不再复用；在飞响应完成后回收 |
+| `wsPoolMaxConnecting` | 整数，1～4294967295 | 全部账号并发 opening 的上限，缩容不撤销已取得的建连租约 |
+| `wsPoolStreamIdleTimeoutMs` | 毫秒，1～9223372036854775807 | 新响应流等待下一条消息的空闲时限，已开始的流保持原值 |
+| `wsPoolFastPathBudgetMs` | 毫秒，1～9223372036854775807 | 可降级请求等待 WebSocket 建立的前台预算；预算用尽后按既有规则转 HTTP，必须 WebSocket 的请求不套用该预算 |
+
+禁用或缩容不取消在途握手和在飞响应；空闲连接由后续租用或维护任务回收。已有管理员自定义值按原单位读取，不因发布新版本而重置
 
 ### 历史保留
 

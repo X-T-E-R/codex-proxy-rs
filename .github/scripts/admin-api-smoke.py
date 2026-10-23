@@ -40,6 +40,35 @@ def sql(statement):
 assert api('/api/auth/login', {'mode':'admin', 'username':'admin@cpr.local',
     'password':os.environ['CI_ADMIN_PASSWORD']})['role'] == 'admin'
 checks.append('real admin login and cookie authentication')
+
+
+def settings_command(view):
+    read_only = {'smartSchedulingDefaults', 'updatedAt', 'updatedAtDisplay',
+                 'providerRequestProfiles', 'openaiClientProfile', 'xaiClientProfile'}
+    return {key:value for key,value in view.items() if key not in read_only}
+
+
+original_settings = api('/api/admin/settings')
+protection = {'cyberSessionBlockEnabled':True, 'cyberSessionBlockTtlSeconds':3600,
+    'wsPoolEnabled':True, 'wsPoolMaxAgeMs':10000000, 'wsPoolMaxConnecting':16,
+    'wsPoolStreamIdleTimeoutMs':3000000, 'wsPoolFastPathBudgetMs':30000}
+command = settings_command(original_settings)
+command.update(protection)
+settings = api('/api/admin/settings/update', command)
+assert {key:settings[key] for key in protection} == protection
+api('/api/admin/settings/update', command, status=409)
+partial = settings_command(settings)
+for key in protection:
+    del partial[key]
+partial['cyberSessionBlockEnabled'] = False
+settings = api('/api/admin/settings/update', partial)
+expected = dict(protection, cyberSessionBlockEnabled=False)
+assert {key:settings[key] for key in protection} == expected
+assert {key:value for key,value in api('/api/admin/settings').items() if key in protection} == expected
+restore = settings_command(original_settings)
+restore['configRevision'] = settings['configRevision']
+api('/api/admin/settings/update', restore)
+checks.append('real Settings/PG save, seven retained Cyber/pool values, omitted fields, explicit off, and stale-revision 409')
 initial = api('/api/admin/priority-policy')
 assert initial['mode'] == 'default' and initial['autoOffOnQuotaReset'] is False
 command = {'expectedRevision':initial['revision'], 'mode':'enabled', 'autoOffOnQuotaReset':True}

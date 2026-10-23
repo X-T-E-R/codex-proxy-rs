@@ -52,7 +52,12 @@ async fn cyber_marker_keeps_original_ttl_and_key_thread_isolation() {
         after > 0 && after <= before,
         "NX must retain the first deadline"
     );
-    assert!(repository.contains_any(&[blocked.clone()]).await.unwrap());
+    assert!(
+        repository
+            .contains_any(std::slice::from_ref(&blocked))
+            .await
+            .unwrap()
+    );
     for candidate in [
         key("key-a", "parent"),
         key("key-a", "child-b"),
