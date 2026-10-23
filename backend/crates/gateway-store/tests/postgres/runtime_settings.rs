@@ -509,7 +509,8 @@ async fn concurrency_queue_settings_round_trip_into_the_runtime_snapshot() {
             before.values.concurrency_wait_timeout_seconds,
             before.values.openai_guardian_reserved_concurrency,
         ),
-        (0, 0, 30, 0)
+        // 冻结的 fork 队列兼容合同保留原来等待能力，不能以主干新库默认关闭覆盖
+        (1000, 1000, 60, 0)
     );
     let mut update = settings_with_margin(1234);
     update.values.max_concurrent_per_account = 7;

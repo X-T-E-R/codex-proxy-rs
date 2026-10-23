@@ -197,7 +197,7 @@ jobs:
           cargo nextest run \
             --cargo-metadata "$RUNNER_TEMP/nextest-cargo-metadata.json" \
             --binaries-metadata "$RUNNER_TEMP/nextest-binaries.json" \
-            --no-tests fail
+            --no-tests fail --no-fail-fast
 
       - name: Store tests with Redis ACL authentication
         working-directory: backend
