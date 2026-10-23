@@ -457,6 +457,55 @@
       "noSubscriptionInformationYet": "暂无订阅信息",
       "refreshInformation": "刷新信息"
     },
+    "quotaPolicy": {
+      "title": "额度策略",
+      "modeLabel": "本账号额度策略",
+      "modeAria": "本账号额度策略",
+      "modes": {
+        "inherit": "继承全局",
+        "disabled": "禁用",
+        "custom": "自定义"
+      },
+      "source": {
+        "global": "全局默认",
+        "disabled": "本账号已禁用策略",
+        "account": "账号自定义"
+      },
+      "status": {
+        "paused": "已暂停新分配",
+        "pending": "重置待确认",
+        "active": "未被额度策略暂停"
+      },
+      "reasons": {
+        "off": "额度策略未启用",
+        "ready": "额度策略未暂停新分配",
+        "threshold_primary": "主窗口达到已用比例阈值",
+        "threshold_secondary": "次窗口达到已用比例阈值",
+        "quota_unconfirmed": "额度尚未确认，请刷新额度",
+        "reset_pending": "重置结果待确认，确认前不会消耗下一张卡",
+        "reset_failed": "自动重置未成功，继续暂停新分配",
+        "reset_readback_unconfirmed": "重置已成功，最新额度未确认，尚未恢复新分配",
+        "auto_budget_exhausted": "已达到滚动 24 小时自动发送上限",
+        "auto_cooldown": "尚未达到自动发送最小间隔",
+        "unknown": "策略状态待确认，请刷新读取"
+      },
+      "loadFailed": "账号额度策略读取失败",
+      "saved": "账号额度策略已保存",
+      "refresh": "刷新额度策略",
+      "undo": "放弃更改",
+      "save": "保存额度策略",
+      "separateSave": "额度策略单独保存，不随账号其他字段提交",
+      "conflict": "额度策略已被其他管理员修改，已载入最新版本，请确认后重新保存",
+      "inheritSummary": "继承全局：{summary}",
+      "inheritAutoReset": "继承后允许不可撤销地消耗重置卡，每账号滚动 24 小时最多 {max} 次，最小间隔 {cooldown} 秒，未决结果确认前不耗下一卡",
+      "disabledNote": "本账号不执行额度策略，不影响账号启用状态或其他调度限制",
+      "help": {
+        "label": "额度策略说明",
+        "ratio": "只按 Codex 主/次窗口的已用比例判断，不是剩余额度；额外点数和容量类 429 不触发自动重置",
+        "stop": "停止仅暂停新分配，不禁用账号，不中断正在进行的请求",
+        "autoReset": "自动重置消耗主动重置卡且不可撤销；结果待确认时只确认原操作，不消耗下一张卡"
+      }
+    },
     "priority": {
       "title": "快速模式",
       "effective": "当前生效：未命中分组时 {mode}",

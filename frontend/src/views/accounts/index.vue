@@ -24,6 +24,7 @@ import AccountFilters from './components/AccountFilters.vue'
 import AccountIdentityCell from './components/AccountIdentityCell.vue'
 import AccountOverviewCards from './components/AccountOverviewCards.vue'
 import AccountPriorityPolicy from './components/AccountPriorityPolicy.vue'
+import AccountQuotaPolicy from './components/AccountQuotaPolicy.vue'
 import AccountTableActions from './components/AccountTableActions.vue'
 import AccountUsagePanel from './components/AccountUsagePanel.vue'
 import { useAccountBatchEditor } from './composables/useAccountBatchEditor'
@@ -369,6 +370,7 @@ const {
                 />
                 <AccountUsagePanel :account="row" />
                 <AccountPriorityPolicy v-if="isOpenAiOAuthAccount(row)" :account="row" />
+                <AccountQuotaPolicy v-if="isOpenAiOAuthAccount(row)" :account="row" />
               </div>
             </template>
           </ZTable>

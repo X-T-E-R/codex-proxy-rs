@@ -218,6 +218,63 @@
         "description": "修改账号并发上限，恢复后不自动调高"
       }
     },
+    "quotaPolicy": {
+      "title": "Codex 额度策略",
+      "description": "按 Codex 窗口已用比例暂停新分配；每个账号可继承、禁用或自定义",
+      "loadFailed": "额度策略读取失败",
+      "saved": "额度策略已保存",
+      "refresh": "重新读取",
+      "undo": "放弃更改",
+      "save": "保存额度策略",
+      "reloadHint": "额度策略单独保存，不随其他设置一起提交",
+      "conflict": "额度策略已被其他管理员修改，已载入最新版本，请确认后重新保存",
+      "windows": {
+        "primary": "主窗口",
+        "primaryDetail": "Primary，短期额度",
+        "secondary": "次窗口",
+        "secondaryDetail": "Secondary，每周额度",
+        "action": "阈值动作",
+        "threshold": "已用比例 ≥",
+        "actionAria": "{window}阈值动作",
+        "thresholdAria": "{window}已用比例阈值"
+      },
+      "actions": {
+        "off": "不处理",
+        "stop": "停止新分配",
+        "reset_then_stop": "尝试重置，否则停止"
+      },
+      "autoReset": {
+        "title": "自动重置会消耗主动重置卡，消耗后不可撤销",
+        "maxAttempts": "每账号滚动 24 小时自动发送上限",
+        "maxAttemptsHelp": "默认 1 次，允许 1 到 10 次",
+        "cooldown": "自动发送最小间隔",
+        "cooldownHelp": "默认 86400 秒，最少 3600 秒",
+        "times": "次",
+        "seconds": "秒",
+        "boundary": "结果待确认时只确认原操作，不消耗下一张卡；更换凭据、修改策略或窗口重置都不会清空自动发送预算"
+      },
+      "footnotes": {
+        "stopOnly": "停止仅暂停新分配，不禁用账号，不中断正在进行的请求",
+        "ratioOnly": "仅按 Codex 窗口已用比例判断，额外点数和容量类 429 不触发自动重置"
+      },
+      "validation": {
+        "threshold": "已用比例阈值需为 1% 到 100% 之间的整数",
+        "attempts": "滚动 24 小时自动发送上限需为 1 到 10 次",
+        "cooldown": "自动发送最小间隔需为 3600 到 86400 秒"
+      },
+      "summary": {
+        "off": "{window}不处理",
+        "stop": "{window} ≥ {threshold}% 停止新分配",
+        "reset": "{window} ≥ {threshold}% 尝试重置，否则停止"
+      },
+      "confirm": {
+        "title": "允许自动消耗重置卡？",
+        "description": "保存后，继承全局策略的 Codex OAuth 账号达到阈值时可自动消耗主动重置卡",
+        "accountDescription": "保存后，本账号达到窗口阈值时可自动消耗主动重置卡",
+        "confirm": "保存并允许自动重置",
+        "body": "消耗不可撤销，额度回读确认前不会显示恢复完成；每账号滚动 24 小时最多 {max} 次，最小间隔 {cooldown} 秒"
+      }
+    },
     "wsPool": {
       "title": "WebSocket 连接池",
       "description": "OpenAI 上游长连接复用；保存后由后端热更新，无需重启",

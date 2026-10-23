@@ -457,6 +457,55 @@
       "noSubscriptionInformationYet": "暫無訂閱信息",
       "refreshInformation": "刷新信息"
     },
+    "quotaPolicy": {
+      "title": "額度策略",
+      "modeLabel": "本賬號額度策略",
+      "modeAria": "本賬號額度策略",
+      "modes": {
+        "inherit": "繼承全域",
+        "disabled": "禁用",
+        "custom": "自訂"
+      },
+      "source": {
+        "global": "全域預設",
+        "disabled": "本賬號已禁用策略",
+        "account": "賬號自訂"
+      },
+      "status": {
+        "paused": "已暫停新分配",
+        "pending": "重置待確認",
+        "active": "未被額度策略暫停"
+      },
+      "reasons": {
+        "off": "額度策略未啟用",
+        "ready": "額度策略未暫停新分配",
+        "threshold_primary": "主窗口達到已用比例閾值",
+        "threshold_secondary": "次窗口達到已用比例閾值",
+        "quota_unconfirmed": "額度尚未確認，請刷新額度",
+        "reset_pending": "重置結果待確認，確認前不會消耗下一張卡",
+        "reset_failed": "自動重置未成功，繼續暫停新分配",
+        "reset_readback_unconfirmed": "重置已成功，最新額度未確認，尚未恢復新分配",
+        "auto_budget_exhausted": "已達到滾動 24 小時自動發送上限",
+        "auto_cooldown": "尚未達到自動發送最小間隔",
+        "unknown": "策略狀態待確認，請刷新讀取"
+      },
+      "loadFailed": "賬號額度策略讀取失敗",
+      "saved": "賬號額度策略已儲存",
+      "refresh": "刷新額度策略",
+      "undo": "放棄更改",
+      "save": "儲存額度策略",
+      "separateSave": "額度策略單獨儲存，不隨賬號其他欄位提交",
+      "conflict": "額度策略已被其他管理員修改，已載入最新版本，請確認後重新儲存",
+      "inheritSummary": "繼承全域：{summary}",
+      "inheritAutoReset": "繼承後允許不可撤銷地消耗重置卡，每賬號滾動 24 小時最多 {max} 次，最小間隔 {cooldown} 秒，未決結果確認前不耗下一卡",
+      "disabledNote": "本賬號不執行額度策略，不影響賬號啟用狀態或其他調度限制",
+      "help": {
+        "label": "額度策略說明",
+        "ratio": "只按 Codex 主/次窗口的已用比例判斷，不是剩餘額度；額外點數和容量類 429 不觸發自動重置",
+        "stop": "停止僅暫停新分配，不禁用賬號，不中斷正在進行的請求",
+        "autoReset": "自動重置消耗主動重置卡且不可撤銷；結果待確認時只確認原操作，不消耗下一張卡"
+      }
+    },
     "priority": {
       "title": "快速模式",
       "effective": "當前生效：未命中分組時 {mode}",

@@ -218,6 +218,63 @@
         "description": "Lower the account's concurrency limit, recovery does not raise it automatically"
       }
     },
+    "quotaPolicy": {
+      "title": "Codex quota policy",
+      "description": "Pause new assignments by Codex window used percentage; each account can inherit, disable, or override",
+      "loadFailed": "Could not load the quota policy",
+      "saved": "Quota policy saved",
+      "refresh": "Reload",
+      "undo": "Discard changes",
+      "save": "Save quota policy",
+      "reloadHint": "The quota policy saves separately from the other settings",
+      "conflict": "Another administrator changed the quota policy; the latest revision is loaded, review and save again",
+      "windows": {
+        "primary": "Primary window",
+        "primaryDetail": "Primary, short-term quota",
+        "secondary": "Secondary window",
+        "secondaryDetail": "Secondary, weekly quota",
+        "action": "Action at threshold",
+        "threshold": "Used ≥",
+        "actionAria": "{window} action at threshold",
+        "thresholdAria": "{window} used percentage threshold"
+      },
+      "actions": {
+        "off": "Do nothing",
+        "stop": "Stop new assignments",
+        "reset_then_stop": "Try reset, otherwise stop"
+      },
+      "autoReset": {
+        "title": "Automatic reset uses a reset card and cannot be undone",
+        "maxAttempts": "Automatic sends per account per rolling 24 hours",
+        "maxAttemptsHelp": "Defaults to 1, allowed range 1 to 10",
+        "cooldown": "Minimum interval between automatic sends",
+        "cooldownHelp": "Defaults to 86400 seconds, minimum 3600",
+        "times": "sends",
+        "seconds": "s",
+        "boundary": "While a result is pending only the original operation is confirmed and no further card is used; changing credentials, editing the policy, or a window reset does not refill the automatic-send budget"
+      },
+      "footnotes": {
+        "stopOnly": "Stopping only pauses new assignments; it does not disable the account or interrupt running requests",
+        "ratioOnly": "Only Codex window used percentages count; extra credits and capacity 429s do not trigger an automatic reset"
+      },
+      "validation": {
+        "threshold": "Used percentage thresholds must be whole numbers between 1% and 100%",
+        "attempts": "Automatic sends per rolling 24 hours must be between 1 and 10",
+        "cooldown": "Minimum automatic-send interval must be between 3600 and 86400 seconds"
+      },
+      "summary": {
+        "off": "{window} does nothing",
+        "stop": "{window} ≥ {threshold}% stops new assignments",
+        "reset": "{window} ≥ {threshold}% tries a reset, otherwise stops"
+      },
+      "confirm": {
+        "title": "Allow automatic reset-card usage?",
+        "description": "After saving, Codex OAuth accounts inheriting this global policy can automatically use reset cards at the threshold",
+        "accountDescription": "After saving, this account can automatically use reset cards at the window threshold",
+        "confirm": "Save and allow automatic reset",
+        "body": "Usage cannot be undone, and recovery is not shown as complete until quota is read back; up to {max} sends per account per rolling 24 hours, minimum interval {cooldown} seconds"
+      }
+    },
     "wsPool": {
       "title": "WebSocket pool",
       "description": "Reuse long-lived OpenAI upstream connections; the backend hot-applies saved values without a restart",

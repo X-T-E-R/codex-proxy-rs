@@ -457,6 +457,55 @@
       "noSubscriptionInformationYet": "No subscription information yet",
       "refreshInformation": "Refresh information"
     },
+    "quotaPolicy": {
+      "title": "Quota policy",
+      "modeLabel": "This account's quota policy",
+      "modeAria": "This account's quota policy",
+      "modes": {
+        "inherit": "Inherit global",
+        "disabled": "Disabled",
+        "custom": "Custom"
+      },
+      "source": {
+        "global": "Global default",
+        "disabled": "Disabled for this account",
+        "account": "Account override"
+      },
+      "status": {
+        "paused": "New assignments paused",
+        "pending": "Reset pending",
+        "active": "Not paused by quota policy"
+      },
+      "reasons": {
+        "off": "Quota policy is not enabled",
+        "ready": "Quota policy is not pausing new assignments",
+        "threshold_primary": "Primary window reached its used threshold",
+        "threshold_secondary": "Secondary window reached its used threshold",
+        "quota_unconfirmed": "Quota is not confirmed yet; refresh quota",
+        "reset_pending": "Reset result pending; no further card will be used until it is confirmed",
+        "reset_failed": "Automatic reset failed; new assignments stay paused",
+        "reset_readback_unconfirmed": "Reset succeeded but the latest quota is unconfirmed; new assignments stay paused",
+        "auto_budget_exhausted": "Reached the automatic-send limit for the rolling 24 hours",
+        "auto_cooldown": "Minimum interval between automatic sends not reached yet",
+        "unknown": "Policy status unconfirmed; reload to check"
+      },
+      "loadFailed": "Could not load this account's quota policy",
+      "saved": "Account quota policy saved",
+      "refresh": "Reload quota policy",
+      "undo": "Discard changes",
+      "save": "Save quota policy",
+      "separateSave": "The quota policy saves separately from the rest of the account",
+      "conflict": "Another administrator changed this quota policy; the latest revision is loaded, review and save again",
+      "inheritSummary": "Inherits the global policy: {summary}",
+      "inheritAutoReset": "Inheriting allows irreversible reset-card usage, up to {max} sends per account per rolling 24 hours with a minimum interval of {cooldown} seconds; a pending result blocks the next card",
+      "disabledNote": "This account runs no quota policy; the account stays enabled and other scheduling limits still apply",
+      "help": {
+        "label": "About the quota policy",
+        "ratio": "Only Codex primary/secondary used percentages count, not remaining quota; extra credits and capacity 429s do not trigger automatic resets",
+        "stop": "Stopping only pauses new assignments; it does not disable the account or interrupt running requests",
+        "autoReset": "Automatic reset uses a reset card and cannot be undone; while a result is pending only the original operation is confirmed and no further card is used"
+      }
+    },
     "priority": {
       "title": "Fast mode",
       "effective": "Currently effective: {mode} without a matching group",

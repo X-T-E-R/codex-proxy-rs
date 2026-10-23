@@ -17,6 +17,7 @@ import CyberSessionBlockCard from './components/CyberSessionBlockCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import PriorityPolicyCard from './components/PriorityPolicyCard.vue'
 import PrivacyPolicyCard from './components/privacy/PrivacyPolicyCard.vue'
+import QuotaPolicyCard from './components/QuotaPolicyCard.vue'
 import RequestHistoryCard from './components/RequestHistoryCard.vue'
 import RequestLocationCard from './components/RequestLocationCard.vue'
 import ResetCreditCard from './components/ResetCreditCard.vue'
@@ -186,6 +187,7 @@ watch(section, (value) => {
             :disabled="disabled"
           />
           <PriorityPolicyCard />
+          <QuotaPolicyCard />
           <ConcurrencyPolicyCard
             v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"
             v-model:max-waiting-per-key="maxWaitingPerKeyValue"

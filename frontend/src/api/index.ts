@@ -25,6 +25,9 @@ export * from './modules/priority'
 // 代理管理
 export * from './modules/proxies'
 
+// 额度策略
+export * from './modules/quotaPolicy'
+
 // 设置管理
 export * from './modules/settings'
 
