@@ -10,6 +10,7 @@ mod image_model_access;
 mod model_account_eligibility;
 mod passthrough;
 mod precommit;
+mod priority;
 mod privacy;
 mod recovery;
 mod response_interrupt;
@@ -1221,10 +1222,15 @@ fn provider_and_quota_with_affinity_and_base_url_and_leases(
         leases,
         stream_max_retries,
         Arc::new(MemoryCooldownPort::new()),
-        crate::support::runtime_policy(),
+        (crate::support::runtime_policy(), None),
     );
     (provider, quota)
 }
+
+type TestPolicies = (
+    Arc<dyn gateway_core::provider_ports::ProviderRuntimePolicyPort>,
+    Option<Arc<dyn gateway_core::provider_ports::priority_policy::PriorityPolicyStore>>,
+);
 
 fn provider_and_quota_with_runtime_ports(
     store: &Arc<MemoryAccountStore>,
@@ -1233,7 +1239,7 @@ fn provider_and_quota_with_runtime_ports(
     leases: Arc<TestLeaseCoordinator>,
     stream_max_retries: u32,
     cooldowns: Arc<MemoryCooldownPort>,
-    policy: Arc<dyn gateway_core::provider_ports::ProviderRuntimePolicyPort>,
+    policies: TestPolicies,
 ) -> (
     Arc<CodexProvider>,
     Arc<CodexCredentialQuotaService>,
@@ -1252,15 +1258,18 @@ fn provider_and_quota_with_runtime_ports(
         base_url.clone(),
         catalog_cache(),
     ));
-    let quota = Arc::new(CodexCredentialQuotaService::new(
-        store.repository(),
-        profile.clone(),
-        http.clone(),
-        base_url.clone(),
-        cooldowns,
-        Arc::clone(&leases) as Arc<dyn ProviderLeasePort>,
-        policy,
-    ));
+    let quota = Arc::new(
+        CodexCredentialQuotaService::new(
+            store.repository(),
+            profile.clone(),
+            http.clone(),
+            base_url.clone(),
+            cooldowns,
+            Arc::clone(&leases) as Arc<dyn ProviderLeasePort>,
+            policies.0,
+        )
+        .with_priority_policy(policies.1),
+    );
     let account_feedback = Arc::new(AccountFeedbackStats::default());
     let selector = Arc::new(CodexCredentialSelector::new(
         ProviderKind::new("openai").expect("provider"),
@@ -8782,11 +8791,14 @@ fn provider_with_capacity_tracking(
         Arc::new(TestLeaseCoordinator::default()),
         0,
         cooldowns,
-        crate::support::StaticFreezePolicy::policy_port(
-            gateway_core::provider_ports::ProviderFreezePolicy::try_new(
-                true, 12, 600, 7_200, true, None, true,
-            )
-            .expect("freeze policy"),
+        (
+            crate::support::StaticFreezePolicy::policy_port(
+                gateway_core::provider_ports::ProviderFreezePolicy::try_new(
+                    true, 12, 600, 7_200, true, None, true,
+                )
+                .expect("freeze policy"),
+            ),
+            None,
         ),
     );
     (provider, pool)
