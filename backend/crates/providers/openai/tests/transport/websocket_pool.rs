@@ -3,6 +3,254 @@
 use super::*;
 use provider_openai::transport::websocket::PreviousResponseUnavailableReason;
 
+fn runtime_pool_settings(
+    enabled: bool,
+    max_connecting: u32,
+) -> gateway_core::settings::RuntimeProtectionSettings {
+    gateway_core::settings::RuntimeProtectionSettings {
+        ws_pool_enabled: enabled,
+        ws_pool_max_connecting: max_connecting,
+        ws_pool_max_age_ms: 10_000_000,
+        ws_pool_stream_idle_timeout_ms: 3_000_000,
+        ws_pool_fast_path_budget_ms: 30_000,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn runtime_stream_idle_timeout_applies_to_next_stream_not_the_active_stream() {
+    use gateway_core::routing::ConfigRevision;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (created_tx, created_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut websocket = accept_codex_test_websocket(socket).await;
+        websocket.next().await.unwrap().unwrap();
+        websocket.send(Message::Text(json!({"type":"response.created","response":{"id":"resp_idle_first","status":"in_progress"}}).to_string().into())).await.unwrap();
+        created_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        websocket
+            .send(Message::Text(
+                completed_websocket_response("resp_idle_first", 1, 1).into(),
+            ))
+            .await
+            .unwrap();
+        websocket.next().await.unwrap().unwrap();
+        websocket.send(Message::Text(json!({"type":"response.created","response":{"id":"resp_idle_second","status":"in_progress"}}).to_string().into())).await.unwrap();
+        let _ = timeout(Duration::from_secs(1), websocket.next()).await;
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(
+        websocket_pool_config_for_tests(None, None, None),
+    ));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(pool.clone())
+    .with_runtime_pool_settings(
+        ConfigRevision::new(2).unwrap(),
+        runtime_pool_settings(true, 16),
+    );
+    let first_backend = backend.clone();
+    let first = tokio::spawn(async move {
+        first_backend
+            .create_response(
+                &pooled_websocket_request("hot-idle"),
+                request_context("req_idle_first", Some("account-a")),
+            )
+            .await
+            .unwrap()
+    });
+    created_rx.await.unwrap();
+    // 确保第一个 PreparedWebSocket 已经持有旧的 timeout
+    let mut changed = runtime_pool_settings(true, 16);
+    changed.ws_pool_stream_idle_timeout_ms = 10;
+    let backend = backend.with_runtime_pool_settings(ConfigRevision::new(3).unwrap(), changed);
+    release_tx.send(()).unwrap();
+    assert!(first.await.unwrap().body.contains("resp_idle_first"));
+    let error = backend
+        .create_response(
+            &pooled_websocket_request("hot-idle"),
+            request_context("req_idle_second", Some("account-a")),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("idle timeout"), "{error}");
+    server.await.unwrap();
+    pool.shutdown().await;
+}
+
+#[tokio::test]
+async fn runtime_pool_shrink_and_disable_preserve_an_opening_and_its_active_response() {
+    use gateway_core::routing::ConfigRevision;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (opening_tx, opening_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (first, _) = listener.accept().await.unwrap();
+        opening_tx.send(()).unwrap();
+        // 第一条握手仍在途时，新请求只能 HTTP，不能因缩容再开第二条
+        let (mut second, _) = listener.accept().await.unwrap();
+        assert!(
+            read_http_request(&mut second)
+                .await
+                .starts_with("POST /codex/responses ")
+        );
+        write_completed_sse_response(&mut second).await;
+        // 热禁用也只影响后续请求
+        let (mut third, _) = listener.accept().await.unwrap();
+        assert!(
+            read_http_request(&mut third)
+                .await
+                .starts_with("POST /codex/responses ")
+        );
+        write_completed_sse_response(&mut third).await;
+        release_rx.await.unwrap();
+        let mut first = accept_codex_test_websocket(first).await;
+        first.next().await.unwrap().unwrap();
+        first
+            .send(Message::Text(
+                completed_websocket_response("resp_survived_hot_disable", 1, 1).into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(
+        websocket_pool_config_for_tests(None, None, None),
+    ));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(pool.clone());
+    let first_backend = backend.clone().with_runtime_pool_settings(
+        ConfigRevision::new(2).unwrap(),
+        runtime_pool_settings(true, 2),
+    );
+    let first = tokio::spawn(async move {
+        first_backend
+            .create_response(
+                &pooled_websocket_request("hot-first"),
+                request_context("req_hot_first", Some("account-a")),
+            )
+            .await
+            .unwrap()
+    });
+    opening_rx.await.unwrap();
+    let shrunk = backend.clone().with_runtime_pool_settings(
+        ConfigRevision::new(3).unwrap(),
+        runtime_pool_settings(true, 1),
+    );
+    let second = shrunk
+        .create_response(
+            &pooled_websocket_request("hot-second"),
+            request_context("req_hot_second", Some("account-b")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.transport, CodexBackendTransport::HttpSse);
+    let disabled = backend.clone().with_runtime_pool_settings(
+        ConfigRevision::new(4).unwrap(),
+        runtime_pool_settings(false, 1),
+    );
+    // 已排队的旧快照不能把共享池重新启用
+    let _late = backend.with_runtime_pool_settings(
+        ConfigRevision::new(2).unwrap(),
+        runtime_pool_settings(true, 2),
+    );
+    let third = disabled
+        .create_response(
+            &pooled_websocket_request("hot-third"),
+            request_context("req_hot_third", Some("account-c")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(third.transport, CodexBackendTransport::HttpSse);
+    release_tx.send(()).unwrap();
+    assert!(
+        first
+            .await
+            .unwrap()
+            .body
+            .contains("resp_survived_hot_disable")
+    );
+    server.await.unwrap();
+    pool.shutdown().await;
+}
+
+#[tokio::test]
+async fn runtime_pool_max_age_retires_idle_socket_without_reusing_it() {
+    use gateway_core::routing::ConfigRevision;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (first, _) = listener.accept().await.unwrap();
+        let mut first = accept_codex_test_websocket(first).await;
+        first.next().await.unwrap().unwrap();
+        first
+            .send(Message::Text(
+                completed_websocket_response("resp_age_first", 1, 1).into(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            first.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
+        let (second, _) = listener.accept().await.unwrap();
+        let mut second = accept_codex_test_websocket(second).await;
+        second.next().await.unwrap().unwrap();
+        second
+            .send(Message::Text(
+                completed_websocket_response("resp_age_second", 1, 1).into(),
+            ))
+            .await
+            .unwrap();
+    });
+    let pool = Arc::new(CodexWebSocketPool::with_config(
+        websocket_pool_config_for_tests(None, None, None),
+    ));
+    let backend = CodexBackendClient::new(
+        reqwest::Client::builder().no_proxy().build().unwrap(),
+        format!("http://{addr}"),
+        test_wire_profile(),
+    )
+    .with_websocket_pool(pool.clone())
+    .with_runtime_pool_settings(
+        ConfigRevision::new(2).unwrap(),
+        runtime_pool_settings(true, 16),
+    );
+    let request = pooled_websocket_request("hot-age");
+    backend
+        .create_response(
+            &request,
+            request_context("req_age_first", Some("account-a")),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut changed = runtime_pool_settings(true, 16);
+    changed.ws_pool_max_age_ms = 1;
+    let backend = backend.with_runtime_pool_settings(ConfigRevision::new(3).unwrap(), changed);
+    let second = backend
+        .create_response(
+            &request,
+            request_context("req_age_second", Some("account-a")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.transport, CodexBackendTransport::WebSocket);
+    assert_eq!(second.websocket_pool_decision.unwrap().kind(), "new");
+    server.await.unwrap();
+    pool.shutdown().await;
+}
+
 #[tokio::test]
 async fn reused_websocket_does_not_replay_opening_response_cookies() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

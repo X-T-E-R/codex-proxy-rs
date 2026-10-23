@@ -77,6 +77,12 @@ async fn record_websocket_origin_failures(
 
 #[tokio::test(start_paused = true)]
 async fn cold_websocket_should_fall_back_without_recording_a_successful_connect() {
+    for budget_ms in [800, 1200] {
+        cold_websocket_fallback_with_runtime_budget(budget_ms).await;
+    }
+}
+
+async fn cold_websocket_fallback_with_runtime_budget(budget_ms: u64) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -95,8 +101,16 @@ async fn cold_websocket_should_fall_back_without_recording_a_successful_connect(
         format!("http://{addr}"),
         test_wire_profile(),
     )
-    .with_websocket_pool(Arc::clone(&pool));
+    .with_websocket_pool(Arc::clone(&pool))
+    .with_runtime_pool_settings(
+        gateway_core::routing::ConfigRevision::new(2).unwrap(),
+        gateway_core::settings::RuntimeProtectionSettings {
+            ws_pool_fast_path_budget_ms: budget_ms,
+            ..Default::default()
+        },
+    );
 
+    let started = tokio::time::Instant::now();
     let response = backend
         .create_response(
             &new_chain_request("conversation-fast-budget"),
@@ -104,6 +118,7 @@ async fn cold_websocket_should_fall_back_without_recording_a_successful_connect(
         )
         .await
         .expect("pre-send timeout should use HTTP");
+    assert!(started.elapsed() >= Duration::from_millis(budget_ms));
     server.await.unwrap();
 
     assert_eq!(response.transport, CodexBackendTransport::HttpSse);

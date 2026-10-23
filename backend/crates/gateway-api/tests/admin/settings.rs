@@ -1330,6 +1330,89 @@ async fn pricing_endpoints_require_administrator_authentication() {
 }
 
 #[tokio::test]
+async fn protection_settings_round_trip_preserve_omitted_values_and_obey_revision_cas() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let router = app(fixture.state());
+    let protection = json!({"cyberSessionBlockEnabled":true,"cyberSessionBlockTtlSeconds":3600,"wsPoolEnabled":true,"wsPoolMaxAgeMs":10000000,"wsPoolMaxConnecting":16,"wsPoolStreamIdleTimeoutMs":3000000,"wsPoolFastPathBudgetMs":30000});
+    let mut body = update_body();
+    for (field, value) in protection.as_object().unwrap() {
+        body[field] = value.clone();
+    }
+    let first = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_json(first).await["data"].clone();
+    for (field, value) in protection.as_object().unwrap() {
+        assert_eq!(&first[field], value);
+    }
+    let mut partial = update_body();
+    partial["configRevision"] = first["configRevision"].clone();
+    partial["cyberSessionBlockEnabled"] = json!(false);
+    let updated = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(partial),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated = response_json(updated).await["data"].clone();
+    assert_eq!(updated["cyberSessionBlockEnabled"], false);
+    for (field, value) in protection.as_object().unwrap() {
+        if field != "cyberSessionBlockEnabled" {
+            assert_eq!(&updated[field], value);
+        }
+    }
+    let stale = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            "/api/admin/settings/update",
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let current = router
+        .clone()
+        .oneshot(request(Method::GET, "/api/admin/settings", None))
+        .await
+        .unwrap();
+    assert_eq!(response_json(current).await["data"], updated);
+    for field in [
+        "cyberSessionBlockTtlSeconds",
+        "wsPoolMaxAgeMs",
+        "wsPoolMaxConnecting",
+        "wsPoolStreamIdleTimeoutMs",
+        "wsPoolFastPathBudgetMs",
+    ] {
+        let mut invalid = update_body();
+        invalid["configRevision"] = updated["configRevision"].clone();
+        invalid[field] = json!(0);
+        let response = router
+            .clone()
+            .oneshot(request(
+                Method::POST,
+                "/api/admin/settings/update",
+                Some(invalid),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+    }
+}
+
+#[tokio::test]
 async fn settings_update_rejects_a_stale_version_without_replacing_the_saved_value() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");

@@ -62,6 +62,69 @@ fn runtime_settings_keep_account_rotation_global() {
 }
 
 #[tokio::test]
+async fn persisted_protection_scalars_are_loaded_published_and_updated_without_defaults() {
+    use gateway_core::settings::RuntimeProtectionSettings;
+    use gateway_store::postgres::{PgRuntimeSnapshotRepository, RuntimeSnapshotRepository};
+    let Some(database) = TestDatabase::create("runtime_protection").await else {
+        return;
+    };
+    // 模拟升级前已由管理员保存的非默认值，不通过新接口创建
+    sqlx::query("update runtime_settings set cyber_session_block_enabled=true, cyber_session_block_ttl_seconds=3600, ws_pool_enabled=true, ws_pool_max_age_ms=10000000, ws_pool_max_connecting=16, ws_pool_stream_idle_timeout_ms=3000000, ws_pool_fast_path_budget_ms=30000 where id=1")
+        .execute(&database.pool).await.unwrap();
+    let saved = RuntimeProtectionSettings {
+        cyber_session_block_enabled: true,
+        cyber_session_block_ttl_seconds: 3600,
+        ws_pool_enabled: true,
+        ws_pool_max_age_ms: 10_000_000,
+        ws_pool_max_connecting: 16,
+        ws_pool_stream_idle_timeout_ms: 3_000_000,
+        ws_pool_fast_path_budget_ms: 30_000,
+    };
+    let repository = PgRuntimeSettingsRepository::new(database.pool.clone());
+    let before = repository.load_runtime_settings().await.unwrap();
+    assert_eq!(before.values.protection, saved);
+    let snapshots = PgRuntimeSnapshotRepository::new(database.pool.clone());
+    let snapshot = snapshots.load_runtime_snapshot().await.unwrap();
+    assert_eq!(snapshot.settings.protection(), saved);
+    let mut update = settings_with_margin(300);
+    update.values.protection = RuntimeProtectionSettings {
+        cyber_session_block_enabled: false,
+        ws_pool_enabled: false,
+        ws_pool_max_connecting: 2,
+        ..saved
+    };
+    let expected = update.values.protection;
+    repository.update_runtime_settings(update).await.unwrap();
+    assert_eq!(
+        repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .values
+            .protection,
+        expected
+    );
+    assert_eq!(
+        snapshots
+            .load_runtime_snapshot()
+            .await
+            .unwrap()
+            .settings
+            .protection(),
+        expected
+    );
+    assert!(
+        repository
+            .load_runtime_settings()
+            .await
+            .unwrap()
+            .config_revision
+            > before.config_revision
+    );
+    database.close().await;
+}
+
+#[tokio::test]
 async fn privacy_policy_defaults_off_and_round_trips_in_snapshot() {
     use gateway_core::settings::privacy::*;
     use gateway_store::postgres::{PgRuntimeSnapshotRepository, RuntimeSnapshotRepository};
