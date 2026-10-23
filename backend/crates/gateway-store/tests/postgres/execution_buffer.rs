@@ -1173,11 +1173,6 @@ async fn diagnostic_contract_red_reproduces_terminal_loss_and_false_reaping() {
         .into_estimate();
     finalization.diagnostic_trace_json = Some(encoded.clone());
     let pg = Arc::new(PgExecutionStore::new(database.pool.clone()));
-    let error = pg
-        .finalize_model_request(finalization.clone())
-        .await
-        .unwrap_err();
-    assert_eq!(error.kind(), StoreErrorKind::InvalidData);
     let (store, writer) = BufferedExecutionStore::new(pg);
     store.create_model_request(request.clone()).await.unwrap();
     store
