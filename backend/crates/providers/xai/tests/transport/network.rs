@@ -1395,3 +1395,29 @@ fn resolve_with_policy(
         }
     }
 }
+
+#[tokio::test]
+async fn inference_transport_keeps_structured_cyber_code_for_top_and_nested_refusals() {
+    for body in [
+        json!({"error":{"code":"cyber_policy","message":"synthetic refusal"}}),
+        json!({"response":{"error":{"code":"cyber_policy","message":"synthetic refusal"}}}),
+        json!({"error":{"code":""},"response":{"error":{"code":"cyber_policy"}}}),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let origin = Url::parse(&server.uri()).unwrap();
+        let error = inference_transport(&origin)
+            .execute(inference_request(&origin))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.upstream_code().map(|code| code.as_str()),
+            Some("cyber_policy")
+        );
+    }
+}

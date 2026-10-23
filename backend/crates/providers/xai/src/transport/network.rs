@@ -1299,20 +1299,21 @@ fn inference_error_metadata(body: &[u8]) -> InferenceErrorMetadata {
             ..InferenceErrorMetadata::default()
         };
     };
-    let Some(root) = value.as_object() else {
-        return InferenceErrorMetadata::default();
+    let field = |fields: &[&str]| {
+        [
+            value.get("error"),
+            value.pointer("/response/error"),
+            Some(&value),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .find_map(|object| first_string(object, fields))
     };
-    let nested = root.get("error").and_then(Value::as_object);
-    let message = nested
-        .and_then(|error| first_string(error, &["message", "error"]))
-        .or_else(|| first_string(root, &["message", "error"]));
+    let message = field(&["message", "error"]);
     InferenceErrorMetadata {
-        code: nested
-            .and_then(|error| first_string(error, &["code", "error_code"]))
-            .or_else(|| first_string(root, &["code", "error_code"])),
-        error_type: nested
-            .and_then(|error| first_string(error, &["type", "error_type"]))
-            .or_else(|| first_string(root, &["type", "error_type"])),
+        code: field(&["code", "error_code"]),
+        error_type: field(&["type", "error_type"]),
         client_message: message.clone(),
         message,
     }

@@ -124,6 +124,7 @@ pub(super) async fn next_grok_chunk(
                 session,
                 error,
                 upstream_model,
+                context,
             ).await),
             None => Ok(None),
         },
@@ -215,7 +216,7 @@ pub(super) fn cold_compaction_http_sse_stream(
                 }
                 InferenceBoundary::Response(Err(error)) => {
                     if !invalid_encrypted_content_retried
-                        && is_invalid_encrypted_content_failure(&error)
+                        && is_invalid_encrypted_content_failure(&error, &context)
                         && request.strip_invalid_encrypted_reasoning()
                     {
                         invalid_encrypted_content_retried = true;
@@ -234,7 +235,7 @@ pub(super) fn cold_compaction_http_sse_stream(
                         &session,
                         error,
                         credential_failure,
-                        context.credential_recovery_attempted(),
+                        &context,
                     )
                     .await;
                     if let Some(observation) = observation {
@@ -273,6 +274,7 @@ pub(super) fn cold_compaction_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        &context,
                     )
                     .await;
                     Err(mark_transient_compaction_failure(error))?;
@@ -301,6 +303,7 @@ pub(super) fn cold_compaction_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        &context,
                     )
                     .await;
                     Err(mark_transient_compaction_failure(error))?;
@@ -507,7 +510,7 @@ pub(super) fn cold_http_sse_stream(
                 InferenceBoundary::Response(Ok(response)) => break response,
                 InferenceBoundary::Response(Err(error)) => {
                     if !invalid_encrypted_content_retried
-                        && is_invalid_encrypted_content_failure(&error)
+                        && is_invalid_encrypted_content_failure(&error, &context)
                         && request.strip_invalid_encrypted_reasoning()
                     {
                         invalid_encrypted_content_retried = true;
@@ -528,7 +531,7 @@ pub(super) fn cold_http_sse_stream(
                         &session,
                         error,
                         credential_failure,
-                        context.credential_recovery_attempted(),
+                        &context,
                     )
                     .await;
                     yield ProviderEvent::observation(observation);
@@ -569,6 +572,7 @@ pub(super) fn cold_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        &context,
                     ).await),
                     None => Ok(None),
                 },
@@ -591,6 +595,7 @@ pub(super) fn cold_http_sse_stream(
                         &session,
                         error,
                         &upstream_model,
+                        &context,
                     )
                     .await;
                     Err(error)?;
@@ -648,6 +653,7 @@ pub(super) fn cold_http_sse_stream(
                     &session,
                     error,
                     &upstream_model,
+                    &context,
                 )
                 .await;
                 Err(error)?;

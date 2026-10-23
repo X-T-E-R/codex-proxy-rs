@@ -309,8 +309,6 @@ struct AffinityTelemetry {
 
 impl CodexCredentialSelector {
     #[must_use]
-    // 选择器显式持有各能力边界，避免把 Provider 私有服务重新包装成通用容器
-    #[expect(clippy::too_many_arguments)]
     pub fn new(
         provider_kind: ProviderKind,
         repository: CodexCredentialRepository,

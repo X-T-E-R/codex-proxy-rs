@@ -5,7 +5,7 @@ use gateway_core::event::{ContentKind, FinishReason, GatewayEvent, ProviderEvent
 use gateway_core::operation::{GenerateRequest, ProtocolPayload};
 use gateway_core::policy::ClientApiKeyId;
 use gateway_protocol::openai::sse::{encode_sse_event, encode_sse_event_with_metadata};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use provider_xai::{
     GrokCanonicalDecoder, GrokResponsesRequest, grok_billing_breakdown,
@@ -1646,4 +1646,20 @@ fn decoder_should_omit_client_details_for_unstructured_failures() {
         error.upstream_code().map(|code| code.as_str()),
         Some("internal_error")
     );
+}
+
+#[test]
+fn structured_cyber_event_survives_top_and_nested_error_shapes_without_message_matching() {
+    for value in [
+        json!({"type":"response.failed","error":{"code":"cyber_policy"}}),
+        json!({"type":"response.failed","response":{"error":{"code":" CYBER_POLICY "}}}),
+        json!({"type":"response.failed","error":{"code":""},"response":{"error":{"code":"cyber_policy"}}}),
+    ] {
+        let error = GrokCanonicalDecoder::new("fallback")
+            .push(format!("data: {value}\n\n").as_bytes())
+            .unwrap_err();
+        assert!(error.is_cyber_policy_refusal());
+    }
+    let error = GrokCanonicalDecoder::new("fallback").push(b"data: {\"type\":\"response.failed\",\"error\":{\"code\":\"safety_rejected\",\"message\":\"cyber_policy\"}}\n\n").unwrap_err();
+    assert!(!error.is_cyber_policy_refusal());
 }

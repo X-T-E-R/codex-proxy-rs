@@ -4543,3 +4543,62 @@ async fn assert_upstream_adapter_stays_cold(operation: Operation) {
     assert_eq!(selector.calls.load(Ordering::SeqCst), 1);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn cyber_protection_keeps_transport_and_stream_refusals_request_scoped() {
+    for enabled in [false, true] {
+        for source in ["transport", "unauthorized", "chunk", "event"] {
+            let selector = StubSelector::success();
+            let recovery = StubRecovery::new(GrokCredentialRecoveryOutcome::Recovered);
+            let refusal = || {
+                GrokInferenceTransportError::new(
+                    GrokInferenceTransportErrorKind::PermissionDenied,
+                    UpstreamSendState::Sent,
+                )
+                .with_status(403)
+                .with_upstream_code(OpaqueUpstreamValue::new("cyber_policy"))
+            };
+            let transport = match source {
+                "transport" => StubInferenceTransport::error(refusal()),
+                "unauthorized" => StubInferenceTransport::error(GrokInferenceTransportError::new(GrokInferenceTransportErrorKind::Unauthorized, UpstreamSendState::Sent).with_status(401).with_credential_recovery().with_upstream_code(OpaqueUpstreamValue::new("cyber_policy"))),
+                "chunk" => StubInferenceTransport::stream_error(refusal()),
+                _ => StubInferenceTransport::sequence([InferenceMode::SuccessBody(b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"cyber_policy\"}}}\n\n".to_vec())]),
+            };
+            let provider =
+                provider_with_recovery(selector.clone(), transport.clone(), recovery.clone()).await;
+            let context = AttemptContext::new(
+                gateway_core::engine::RequestAttemptContext::new(
+                    ModelRequestId::new("req_xai_cyber").unwrap(),
+                    ClientApiKeyId::new("key_xai_contract").unwrap(),
+                ),
+                NonZeroU32::new(1).unwrap(),
+                SystemTime::now() + Duration::from_secs(30),
+                selection_policy().with_protection(
+                    gateway_core::settings::RuntimeProtectionSettings {
+                        cyber_session_block_enabled: enabled,
+                        ..Default::default()
+                    },
+                ),
+                AccountAttemptContext::new(BTreeSet::new(), None, None),
+                None,
+                CancellationToken::new(),
+            );
+            let mut stream = provider
+                .execute(provider_request("xai"), context)
+                .await
+                .unwrap();
+            let error = next_provider_error(&mut stream).await;
+            assert!(error.is_cyber_policy_refusal());
+            assert_eq!(error.retry_is_prohibited(), enabled);
+            assert_eq!(
+                selector.feedback.lock().unwrap().is_empty(),
+                enabled || source == "unauthorized"
+            );
+            assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                recovery.calls.load(Ordering::SeqCst),
+                usize::from(!enabled && source == "unauthorized")
+            );
+        }
+    }
+}

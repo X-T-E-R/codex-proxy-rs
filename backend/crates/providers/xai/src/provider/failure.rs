@@ -3,7 +3,20 @@
 use super::*;
 use gateway_core::error::ProviderDiagnostic;
 
-pub(super) fn is_invalid_encrypted_content_failure(error: &GrokInferenceTransportError) -> bool {
+pub(super) fn is_invalid_encrypted_content_failure(
+    error: &GrokInferenceTransportError,
+    context: &AttemptContext,
+) -> bool {
+    if context
+        .account_selection_policy()
+        .protection()
+        .cyber_session_block_enabled
+        && error
+            .upstream_code()
+            .is_some_and(|code| code.as_str().trim().eq_ignore_ascii_case("cyber_policy"))
+    {
+        return false;
+    }
     error.kind() == GrokInferenceTransportErrorKind::InvalidRequest
         && error.status() == Some(400)
         && (error.diagnostic().and_then(ProviderDiagnostic::code)
@@ -116,7 +129,16 @@ pub(super) async fn record_stream_failure(
     session: &SelectedGrokSession,
     error: ProviderError,
     upstream_model: &UpstreamModelId,
+    context: &AttemptContext,
 ) -> ProviderError {
+    if context
+        .account_selection_policy()
+        .protection()
+        .cyber_session_block_enabled
+        && error.is_cyber_policy_refusal()
+    {
+        return error.with_retry_prohibited();
+    }
     if !session.allows_account_state_mutation() {
         return error;
     }
@@ -172,12 +194,20 @@ pub(super) async fn recover_or_record_failure(
     session: &SelectedGrokSession,
     error: ProviderError,
     credential_failure: Option<GrokCredentialFailure>,
-    recovery_attempted: bool,
+    context: &AttemptContext,
 ) -> ProviderError {
+    if context
+        .account_selection_policy()
+        .protection()
+        .cyber_session_block_enabled
+        && error.is_cyber_policy_refusal()
+    {
+        return error.with_retry_prohibited();
+    }
     if !session.allows_account_state_mutation() {
         return error;
     }
-    if error.requires_credential_recovery() && !recovery_attempted {
+    if error.requires_credential_recovery() && !context.credential_recovery_attempted() {
         return match recovery
             .recover_unauthorized(session.account_id(), session.credential_revision())
             .await
@@ -301,14 +331,23 @@ pub(super) async fn map_and_record_stream_transport_failure(
     session: &SelectedGrokSession,
     error: GrokInferenceTransportError,
     upstream_model: &UpstreamModelId,
+    context: &AttemptContext,
 ) -> ProviderError {
     let request_scoped = error.kind() == GrokInferenceTransportErrorKind::SafetyRejected;
     let credential_failure = transport_credential_failure(&error, upstream_model);
     let error = map_stream_error(error);
+    if context
+        .account_selection_policy()
+        .protection()
+        .cyber_session_block_enabled
+        && error.is_cyber_policy_refusal()
+    {
+        return error.with_retry_prohibited();
+    }
     match credential_failure {
         Some(failure) => record_credential_failure(selector, session, error, failure).await,
         None if request_scoped => error,
-        None => record_stream_failure(selector, session, error, upstream_model).await,
+        None => record_stream_failure(selector, session, error, upstream_model, context).await,
     }
 }
 
@@ -512,7 +551,17 @@ pub(super) fn map_transport_error_for_context(
 ) -> ProviderError {
     let allow_explicit_replay = context.continuation().is_none()
         || error.kind() == GrokInferenceTransportErrorKind::Unauthorized;
-    map_transport_error_with_state(error, None, allow_explicit_replay)
+    let mapped = map_transport_error_with_state(error, None, allow_explicit_replay);
+    if context
+        .account_selection_policy()
+        .protection()
+        .cyber_session_block_enabled
+        && mapped.is_cyber_policy_refusal()
+    {
+        mapped.with_retry_prohibited()
+    } else {
+        mapped
+    }
 }
 
 pub(super) fn map_stream_error(error: GrokInferenceTransportError) -> ProviderError {

@@ -1247,11 +1247,15 @@ fn upstream_event_error(value: &Value) -> ProviderError {
 }
 
 fn upstream_error_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
-    value
-        .pointer(&format!("/error/{field}"))
-        .or_else(|| value.pointer(&format!("/response/error/{field}")))
-        .or_else(|| value.get(field))
-        .and_then(Value::as_str)
+    [
+        value.pointer(&format!("/error/{field}")),
+        value.pointer(&format!("/response/error/{field}")),
+        value.get(field),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .find(|value| !value.trim().is_empty())
 }
 
 fn protocol_error(error: impl std::error::Error + Send + Sync + 'static) -> ProviderError {
