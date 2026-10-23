@@ -24,6 +24,7 @@ pub mod quota_forecast;
 pub mod quota_forecast_sampling;
 pub mod reset_credit_automation;
 pub mod retention;
+pub mod server_errors;
 pub mod settings;
 pub mod system;
 pub mod usage_data;

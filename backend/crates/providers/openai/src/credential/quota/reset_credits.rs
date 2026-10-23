@@ -210,7 +210,7 @@ impl CodexCredentialQuotaService {
         .map_err(|error| map_reset_credit_attempt_error(error, true))
     }
 
-    async fn reset_credit_account(
+    pub(super) async fn reset_credit_account(
         &self,
         account_id: &ProviderAccountId,
     ) -> Result<ProviderAccount, CodexResetCreditsError> {

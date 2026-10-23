@@ -3,7 +3,9 @@
 mod accounts;
 mod dashboard;
 mod ops;
+mod server_errors;
 mod usage;
+pub(crate) use server_errors::server_error_summary;
 
 pub(crate) use accounts::*;
 pub(crate) use dashboard::*;

@@ -195,6 +195,13 @@ impl CachedObservabilityStore {
 
 #[async_trait]
 impl ObservabilityStore for CachedObservabilityStore {
+    async fn server_error_summary(
+        &self,
+        range: TimeRange,
+        timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> AdminStoreResult<crate::model::server_errors::ServerErrorSummary> {
+        self.inner.server_error_summary(range, timezone).await
+    }
     fn query_timeout(&self) -> Duration {
         self.inner.query_timeout()
     }

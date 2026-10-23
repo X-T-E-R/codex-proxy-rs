@@ -292,6 +292,7 @@ pub struct RequestAttemptContext {
     pricing: Arc<crate::metering::PricingOverrides>,
     request_profile: Option<crate::account::OpaqueProviderData>,
     fast_mode: FastMode,
+    account_fast_modes: Arc<std::sync::Mutex<std::collections::BTreeMap<String, FastMode>>>,
     request_location: Option<crate::account::RequestLocation>,
     privacy: Option<Arc<dyn crate::settings::privacy::CompiledPrivacyPolicy>>,
     request_id: ModelRequestId,
@@ -401,6 +402,7 @@ impl RequestAttemptContext {
             request_profile: None,
             pricing: Arc::default(),
             fast_mode: FastMode::Default,
+            account_fast_modes: Arc::default(),
             request_location: None,
             privacy: None,
             timing_started_at: Instant::now(),
@@ -617,6 +619,28 @@ impl AttemptContext {
     #[must_use]
     pub const fn fast_mode(&self) -> FastMode {
         self.request.fast_mode
+    }
+
+    #[must_use]
+    pub fn account_fast_mode(&self, account: &str) -> Option<FastMode> {
+        self.request
+            .account_fast_modes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(account)
+            .copied()
+    }
+
+    /// 同一请求同一账号只使用第一次解析结果，重试不随配额自动关闭改变档位
+    #[must_use]
+    pub fn freeze_account_fast_mode(&self, account: &str, mode: FastMode) -> FastMode {
+        *self
+            .request
+            .account_fast_modes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(account.to_owned())
+            .or_insert(mode)
     }
 
     #[must_use]

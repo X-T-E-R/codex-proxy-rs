@@ -443,6 +443,17 @@ pub trait UsageBillingProjector: Send + Sync {
 /// 用量、趋势、诊断与运维错误的只读能力
 #[async_trait]
 pub trait ObservabilityStore: Send + Sync {
+    async fn server_error_summary(
+        &self,
+        _range: TimeRange,
+        _timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> AdminStoreResult<crate::model::server_errors::ServerErrorSummary> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "server errors",
+            "summary unavailable",
+        ))
+    }
     /// 读取实现声明的总预算，缓存等待沿用同一配置，避免外层提前截断
     fn query_timeout(&self) -> std::time::Duration;
 

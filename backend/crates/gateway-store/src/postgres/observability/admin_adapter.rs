@@ -404,6 +404,23 @@ impl PgObservabilityRepository {
 
 #[async_trait]
 impl AdminObservabilityStore for PgAdminObservabilityStore {
+    async fn server_error_summary(
+        &self,
+        range: admin_observability::TimeRange,
+        timezone: gateway_core::time::DeploymentTimeZone,
+    ) -> AdminStoreResult<gateway_admin::model::server_errors::ServerErrorSummary> {
+        self.repository
+            .query_budget
+            .run(
+                &self.repository.pool,
+                "summarize server error family",
+                |mut connection| async move {
+                    server_error_summary(&mut connection, range, timezone).await
+                },
+            )
+            .await
+            .map_err(observability_error)
+    }
     async fn diagnostic_errors(
         &self,
         target: &gateway_admin::model::diagnostics::DiagnosticTarget,

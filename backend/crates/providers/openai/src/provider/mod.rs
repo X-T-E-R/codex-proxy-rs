@@ -655,16 +655,21 @@ impl Provider for CodexProvider {
         let provider_kind = ProviderKind::new(PROVIDER_NAME)
             .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
         let account_id = lease.account_id().clone();
-        let fast_mode = self
-            .quota
-            .resolve_priority(&account_id, context.fast_mode())
-            .await
-            .map_err(|_| {
-                provider_error(
-                    ProviderErrorKind::ProviderInfrastructureUnavailable,
-                    UpstreamSendState::NotSent,
-                )
-            })?;
+        let fast_mode = match context.account_fast_mode(account_id.as_str()) {
+            Some(mode) => mode,
+            None => {
+                let mode = self
+                    .quota
+                    .resolve_priority(&account_id, context.fast_mode())
+                    .await
+                    .map_err(|source| {
+                        map_selection_error(CredentialSelectionError::Store(
+                            gateway_core::error::ErrorSource::new(source),
+                        ))
+                    })?;
+                context.freeze_account_fast_mode(account_id.as_str(), mode)
+            }
+        };
         // 选号后合并账号覆盖，仍在 middleware 之前形成唯一原生正文基线
         let mut operation = Operation::Generate(generate.clone());
         if fast_mode != gateway_core::account::FastMode::Default
