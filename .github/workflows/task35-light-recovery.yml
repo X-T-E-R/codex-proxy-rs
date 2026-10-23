@@ -1,0 +1,63 @@
+name: Task35 light business recovery
+on:
+  push:
+    branches: [task35/light-recovery-20261023]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  light-recovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
+        env:
+          POSTGRES_DB: codex_proxy
+          POSTGRES_USER: codex_proxy
+          POSTGRES_PASSWORD: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        options: >-
+          --health-cmd "pg_isready -U codex_proxy -d codex_proxy"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:8-alpine@sha256:9d317178eceac8454a2284a9e6df2466b93c745529947f0cd42a0fa9609d7005
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download pinned old45 binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: quota-linux-binary
+          run-id: 37242026140
+          repository: X-T-E-R/codex-proxy-rs
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/old45
+      - name: Verify business-only inverse bridge and actual old writer
+        env:
+          PGPASSWORD: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+          REDIS_CONTAINER: ${{ job.services.redis.id }}
+        run: >-
+          python .github/scripts/task35-light/verify.py --repo .
+          --container "$PG_CONTAINER" --redis "$REDIS_CONTAINER"
+          --binary-directory "$RUNNER_TEMP/old45"
+          --artifacts "$RUNNER_TEMP/light-recovery"
+      - name: Package standalone recovery entry and immutable migrations
+        run: |
+          mkdir -p "$RUNNER_TEMP/light-package"
+          cp .github/scripts/task35-light/recover.py "$RUNNER_TEMP/light-package/"
+          cp -r backend/migrations "$RUNNER_TEMP/light-package/"
+          tar -czf "$RUNNER_TEMP/light-recovery/task35-light-recovery.tar.gz" -C "$RUNNER_TEMP/light-package" .
+      - name: Preserve proof and executable fallback
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task35-light-recovery-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/light-recovery/light-recovery.json
+            ${{ runner.temp }}/light-recovery/old45-startup.log
+            ${{ runner.temp }}/light-recovery/task35-light-recovery.tar.gz
+          if-no-files-found: error
