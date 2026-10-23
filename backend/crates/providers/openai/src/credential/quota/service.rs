@@ -229,9 +229,16 @@ impl CodexCredentialQuotaService {
     }
 
     pub async fn synchronize(&self) -> Result<CodexQuotaSyncSummary, CodexCredentialQuotaError> {
+        self.synchronize_with_cancellation(&gateway_core::lifecycle::CancellationToken::new())
+            .await
+    }
+
+    pub async fn synchronize_with_cancellation(
+        &self,
+        cancellation: &gateway_core::lifecycle::CancellationToken,
+    ) -> Result<CodexQuotaSyncSummary, CodexCredentialQuotaError> {
         let summary = self.synchronize_at(SystemTime::now()).await?;
-        self.synchronize_policy(&gateway_core::lifecycle::CancellationToken::new())
-            .await;
+        self.synchronize_policy(cancellation).await;
         Ok(summary)
     }
 

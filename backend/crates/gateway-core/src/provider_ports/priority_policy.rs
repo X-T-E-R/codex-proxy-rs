@@ -46,6 +46,7 @@ impl AccountPriorityMode {
 pub struct GlobalPriorityPolicy {
     pub revision: u64,
     pub mode: FastMode,
+    pub auto_off_on_quota_reset: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,7 +100,8 @@ pub struct AccountPriorityPolicy {
     pub account_id: String,
     pub revision: u64,
     pub mode: AccountPriorityMode,
-    pub auto_off_on_quota_reset: bool,
+    pub auto_off_on_quota_reset: Option<bool>,
+    pub effective_auto_off_on_quota_reset: bool,
     pub effective_mode: FastMode,
     pub global: GlobalPriorityPolicy,
     pub status: PriorityPolicyStatus,
@@ -122,6 +124,7 @@ pub trait PriorityPolicyStore: Send + Sync {
         &self,
         expected: u64,
         mode: FastMode,
+        auto_off: bool,
         actor: &str,
     ) -> Result<GlobalPriorityPolicy, PriorityPolicyError>;
     async fn account(&self, id: &str) -> Result<AccountPriorityPolicy, PriorityPolicyError>;
@@ -130,7 +133,7 @@ pub trait PriorityPolicyStore: Send + Sync {
         id: &str,
         expected: u64,
         mode: AccountPriorityMode,
-        auto_off: bool,
+        auto_off: Option<bool>,
         actor: &str,
     ) -> Result<AccountPriorityPolicy, PriorityPolicyError>;
     /// 一次读取所选账号配置；group 为请求已冻结的禁止上限

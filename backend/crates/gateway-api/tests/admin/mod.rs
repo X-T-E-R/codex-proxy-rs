@@ -92,6 +92,7 @@ mod compression;
 mod error_diagnostics;
 mod errors;
 mod observability;
+mod priority_policy;
 mod proxies;
 mod quota_policy;
 mod settings;
@@ -188,7 +189,8 @@ impl AdminTestFixture {
             plugin_ports.clone(),
             plugin_ports.clone(),
         )
-        .with_quota_policy(Arc::new(quota_policy::MemoryPolicy::default()));
+        .with_quota_policy(Arc::new(quota_policy::MemoryPolicy::default()))
+        .with_priority_policy(Arc::new(priority_policy::MemoryPriority::default()));
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new("openai", Arc::clone(&provider_error))),
             Arc::new(UnusedProvider::new("xai", Arc::clone(&provider_error))),

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct PgQuotaPolicyStore {
     pool: PgPool,
     reset_slots: Arc<Semaphore>,

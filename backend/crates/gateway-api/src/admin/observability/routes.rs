@@ -29,6 +29,7 @@ where
             get(usage_insights_diagnostics::<S>),
         )
         .route("/api/admin/operations/errors", get(ops_errors::<S>))
+        .route("/api/admin/errors/summary", get(server_error_summary::<S>))
         .route(
             "/api/admin/diagnostics/export",
             get(super::export::download::<S>),
@@ -264,4 +265,42 @@ where
         .map_err(map_service_error)?;
     let data = ops_page_view(result, time);
     Ok(AdminResponse::new(StatusCode::OK, AdminEnvelope::ok(data)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ServerErrorQuery {
+    period: Option<String>,
+    as_of: Option<i64>,
+    start_time: Option<String>,
+    end_time: Option<String>,
+}
+
+async fn server_error_summary<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<ServerErrorQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: SessionState + Send + Sync,
+{
+    let range = crate::time::query_range(
+        query.start_time.as_deref(),
+        query.end_time.as_deref(),
+        query.period.as_deref(),
+        query.as_of,
+        state.admin_services().timezone(),
+        "7d",
+    )
+    .map_err(map_wire_error)?;
+    let summary = state
+        .admin_services()
+        .observability()
+        .server_error_summary(range)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(summary),
+    ))
 }

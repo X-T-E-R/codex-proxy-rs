@@ -13,10 +13,8 @@ with base as materialized (
     client_status_code,upstream_status_code,provider_error_code,error_message,error_details
   from base
   union all
-  select b.id,'event',e.attempt_index,e.failure_kind,null,e.status_code,
-    e.provider_error_code,e.message,e.error_details
-  from base b join ops_events e on e.model_request_id=b.id
-  where e.attempt_index > 0 and e.attempt_index <> b.attempt_count
+  select b.id,'event',e.attempt_index,e.failure_kind,null,e.status_code,e.provider_error_code,e.message,e.error_details
+  from base b join ops_events e on e.model_request_id=b.id where e.attempt_index > 0
 ), documents as (
   select *,case when pg_input_is_valid(error_details,'jsonb') then error_details::jsonb end document
   from sources
@@ -40,6 +38,10 @@ with base as materialized (
     (coalesce(client_status_code between 500 and 599,false) or coalesce(upstream_status_code between 500 and 599,false)) status5xx,
     (message_overload or message_server) legacy_message
   from codes
+), attempts as (
+  select request_id,attempt_index,bool_or(overloaded) overloaded,bool_or(status503) status503,
+    bool_or(overloaded or server_prefix or status503 or status5xx) server_related
+  from flags where attempt_index>0 group by request_id,attempt_index
 ), requests as (
   select b.id,b.started_at,b.client_status_code,
     bool_or(f.overloaded or f.server_prefix or f.status503 or f.status5xx) server_related,
@@ -71,7 +73,7 @@ select jsonb_build_object(
   'earliestRetainedAt',(select min(started_at) from base),'latestRetainedAt',(select max(started_at) from base),
   'totals',(select to_jsonb(counts)-'day' from counts where day is null),
   'daily',coalesce((select jsonb_agg(to_jsonb(counts) order by day) from counts where day is not null),'[]'::jsonb),
-  'attempts',(select jsonb_build_object('observed',count(*),'serverRelated',count(*) filter(where overloaded or server_prefix or status503 or status5xx),'overloaded',count(*) filter(where overloaded),'status503',count(*) filter(where status503),'coverage','observed_only') from flags where attempt_index>0)
+  'attempts',(select jsonb_build_object('observed',count(*),'serverRelated',count(*) filter(where server_related),'overloaded',count(*) filter(where overloaded),'status503',count(*) filter(where status503),'coverage','observed_only') from attempts)
 )
 "#;
 

@@ -65,6 +65,7 @@ pub trait AccountsService: Send + Sync {
         &self,
         _expected: u64,
         _mode: gateway_core::account::FastMode,
+        _auto_off: bool,
         _context: &MutationContext,
     ) -> Result<gateway_core::provider_ports::priority_policy::GlobalPriorityPolicy, AdminError>
     {
@@ -82,7 +83,7 @@ pub trait AccountsService: Send + Sync {
         _id: &ProviderAccountId,
         _expected: u64,
         _mode: gateway_core::provider_ports::priority_policy::AccountPriorityMode,
-        _auto_off: bool,
+        _auto_off: Option<bool>,
         _context: &MutationContext,
     ) -> Result<gateway_core::provider_ports::priority_policy::AccountPriorityPolicy, AdminError>
     {
@@ -591,6 +592,7 @@ impl AccountsService for DefaultAccountsService {
         &self,
         expected: u64,
         mode: gateway_core::account::FastMode,
+        auto_off: bool,
         context: &MutationContext,
     ) -> Result<gateway_core::provider_ports::priority_policy::GlobalPriorityPolicy, AdminError>
     {
@@ -600,6 +602,7 @@ impl AccountsService for DefaultAccountsService {
             .update_global(
                 expected,
                 mode,
+                auto_off,
                 &format!("{:?}:{}", context.actor, context.request_id),
             )
             .await
@@ -622,7 +625,7 @@ impl AccountsService for DefaultAccountsService {
         id: &ProviderAccountId,
         expected: u64,
         mode: gateway_core::provider_ports::priority_policy::AccountPriorityMode,
-        auto_off: bool,
+        auto_off: Option<bool>,
         context: &MutationContext,
     ) -> Result<gateway_core::provider_ports::priority_policy::AccountPriorityPolicy, AdminError>
     {

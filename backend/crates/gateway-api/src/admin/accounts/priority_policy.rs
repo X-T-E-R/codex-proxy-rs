@@ -9,6 +9,7 @@ use gateway_core::{account::FastMode, provider_ports::priority_policy::AccountPr
 struct GlobalUpdate {
     expected_revision: u64,
     mode: FastMode,
+    auto_off_on_quota_reset: bool,
 }
 
 #[derive(Deserialize)]
@@ -17,7 +18,7 @@ struct AccountUpdate {
     account_id: String,
     expected_revision: u64,
     mode: AccountPriorityMode,
-    auto_off_on_quota_reset: bool,
+    auto_off_on_quota_reset: Option<bool>,
 }
 
 pub(super) fn router<S>() -> Router<S>
@@ -67,6 +68,7 @@ where
         .update_global_priority_policy(
             request.expected_revision,
             request.mode,
+            request.auto_off_on_quota_reset,
             &auth.context().mutation_context(),
         )
         .await

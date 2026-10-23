@@ -122,7 +122,7 @@ impl QuotaPolicyStore for MemoryPolicy {
     }
 }
 
-async fn request(
+pub(super) async fn request(
     fixture: &AdminTestFixture,
     uri: &str,
     body: Option<serde_json::Value>,

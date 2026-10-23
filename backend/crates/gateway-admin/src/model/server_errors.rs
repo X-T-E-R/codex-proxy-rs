@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub struct ServerErrorCounts {
     pub retained_requests: u64,
     pub server_related_requests: u64,
+    pub terminal_server_related_requests: u64,
     pub overloaded: u64,
     pub status503: u64,
     pub other_server_prefix: u64,
