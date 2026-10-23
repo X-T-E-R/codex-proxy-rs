@@ -286,6 +286,7 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
+    config_revision: Option<ConfigRevision>,
     request_body_limit: Option<usize>,
     lease_metadata: Option<Arc<crate::provider_ports::ProviderLeaseMetadata>>,
     response_control: Option<response_control::ResponseControl>,
@@ -313,6 +314,13 @@ pub struct RequestAttemptContext {
 }
 
 impl RequestAttemptContext {
+    /// 资源热更新据此拒绝晚到的旧快照，诊断构造不发布全局配置
+    #[must_use]
+    pub const fn with_config_revision(mut self, revision: ConfigRevision) -> Self {
+        self.config_revision = Some(revision);
+        self
+    }
+
     #[must_use]
     pub const fn with_request_body_limit(mut self, bytes: usize) -> Self {
         self.request_body_limit = Some(bytes);
@@ -394,6 +402,7 @@ impl RequestAttemptContext {
     #[must_use]
     pub fn new(request_id: ModelRequestId, client_api_key_ref: ClientApiKeyId) -> Self {
         Self {
+            config_revision: None,
             response_control: None,
             request_body_limit: None,
             lease_metadata: None,
@@ -552,6 +561,11 @@ pub struct AttemptContext {
 }
 
 impl AttemptContext {
+    #[must_use]
+    pub const fn config_revision(&self) -> Option<ConfigRevision> {
+        self.request.config_revision
+    }
+
     #[must_use]
     pub const fn request_body_limit(&self) -> Option<usize> {
         self.request.request_body_limit

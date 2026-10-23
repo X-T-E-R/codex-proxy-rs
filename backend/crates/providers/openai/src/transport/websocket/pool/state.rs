@@ -106,6 +106,10 @@ const MAX_CONTINUATION_TOMBSTONES: usize = 4_096;
 
 #[derive(Default)]
 pub(super) struct WebSocketPoolState {
+    pub(super) runtime_settings: Option<(
+        gateway_core::routing::ConfigRevision,
+        gateway_core::settings::RuntimeProtectionSettings,
+    )>,
     pub(super) slots: HashMap<CodexWebSocketPoolKey, WebSocketPoolSlot>,
     continuation_tombstones: VecDeque<WebSocketContinuationTombstone>,
     pub(super) shutting_down: bool,

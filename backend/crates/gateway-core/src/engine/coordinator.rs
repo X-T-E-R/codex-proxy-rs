@@ -1156,6 +1156,7 @@ where
         }
         let context = AttemptContext::new(
             RequestAttemptContext::new(self.request_id.clone(), self.client_api_key_ref.clone())
+                .with_config_revision(self.plan.config_revision())
                 .with_lease_metadata(Arc::clone(&self.lease_metadata))
                 .with_response_control(self.response_control.clone())
                 .with_request_profile(self.request_profiles.get(candidate.provider()).cloned())

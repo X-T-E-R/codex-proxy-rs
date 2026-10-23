@@ -81,6 +81,7 @@ impl CodexBackendClient {
             protocol: OpenAiUpstreamProtocol::Codex,
             profile,
             websocket_pool: None,
+            websocket_fast_path_budget: WEBSOCKET_FAST_PATH_BUDGET,
             websocket_origin_breaker: WebSocketOriginBreaker::default(),
         }
     }
@@ -88,6 +89,21 @@ impl CodexBackendClient {
     /// 为 Responses WebSocket 请求启用连接池
     pub fn with_websocket_pool(mut self, pool: Arc<CodexWebSocketPool>) -> Self {
         self.websocket_pool = Some(pool);
+        self
+    }
+
+    /// 每个新请求采用发布快照，旧在飞请求不重配现有流
+    #[must_use]
+    pub fn with_runtime_pool_settings(
+        mut self,
+        revision: gateway_core::routing::ConfigRevision,
+        settings: gateway_core::settings::RuntimeProtectionSettings,
+    ) -> Self {
+        self.websocket_fast_path_budget =
+            Duration::from_millis(settings.ws_pool_fast_path_budget_ms);
+        if let Some(pool) = &self.websocket_pool {
+            pool.configure_runtime(revision, settings);
+        }
         self
     }
 
@@ -368,7 +384,7 @@ impl CodexBackendClient {
         let pool = self.websocket_pool.as_deref().map(|pool| (pool, pool_key));
         let fast_path_budget = match requirement {
             TransportRequirement::PersistedContinuation | TransportRequirement::NewChain => {
-                Some(WEBSOCKET_FAST_PATH_BUDGET)
+                Some(self.websocket_fast_path_budget)
             }
             TransportRequirement::ExplicitWebSocketWarmup
             | TransportRequirement::WebSocketNewChain

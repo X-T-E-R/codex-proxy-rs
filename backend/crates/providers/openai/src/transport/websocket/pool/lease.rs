@@ -1,9 +1,6 @@
 //! WebSocket 连接池 reservation、handoff 与 lease 生命周期
 
-use tokio::{
-    sync::{OwnedSemaphorePermit, watch},
-    time::Instant,
-};
+use tokio::{sync::watch, time::Instant};
 use tokio_util::{
     sync::CancellationToken,
     task::{TaskTracker, task_tracker::TaskTrackerToken},
@@ -55,6 +52,30 @@ impl WebSocketPoolConnectWaiter {
     }
 }
 
+/// 可缩容的 opening 准入只约束新租约，已持有的 permit 不被撤销
+pub(super) struct WebSocketOpeningPermit(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl WebSocketOpeningPermit {
+    pub(super) fn try_acquire(
+        count: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        limit: usize,
+    ) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < limit).then_some(current + 1)
+            })
+            .ok()
+            .map(|_| Self(std::sync::Arc::clone(count)))
+    }
+}
+
+impl Drop for WebSocketOpeningPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 pub(crate) struct WebSocketPoolConnectLease {
     pool: CodexWebSocketPool,
     key: CodexWebSocketPoolKey,
@@ -64,7 +85,7 @@ pub(crate) struct WebSocketPoolConnectLease {
     pub(super) cancellation: CancellationToken,
     // slot 分配时即注册，封闭 acquire 与后台 task spawn 之间的 shutdown 竞态
     _task_registration: TaskTrackerToken,
-    _connect_permit: OwnedSemaphorePermit,
+    _connect_permit: WebSocketOpeningPermit,
     proxy_permit: Option<super::ProxyConnectionPermit>,
     armed: bool,
 }
@@ -73,7 +94,7 @@ impl WebSocketPoolConnectLease {
     pub(super) fn reserve(
         pool: CodexWebSocketPool,
         key: CodexWebSocketPoolKey,
-        connect_permit: OwnedSemaphorePermit,
+        connect_permit: WebSocketOpeningPermit,
         proxy_permit: Option<super::ProxyConnectionPermit>,
     ) -> Self {
         let (outcome, _) = watch::channel(WebSocketPoolConnectOutcome::Pending);

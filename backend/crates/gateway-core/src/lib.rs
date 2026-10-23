@@ -63,6 +63,7 @@ pub struct CoreStorePorts {
     budget: Option<Arc<dyn engine::budget::ClientBudgetPort>>,
     session_affinity: Option<Arc<dyn ProviderSessionAffinityPort>>,
     client_retry: Option<Arc<dyn engine::client_retry::ClientRetryStore>>,
+    cyber_sessions: Option<Arc<dyn provider_ports::CyberSessionPort>>,
 }
 
 impl CoreStorePorts {
@@ -93,7 +94,14 @@ impl CoreStorePorts {
             budget: None,
             session_affinity: None,
             client_retry: None,
+            cyber_sessions: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_cyber_sessions(mut self, port: Arc<dyn provider_ports::CyberSessionPort>) -> Self {
+        self.cyber_sessions = Some(port);
+        self
     }
 
     #[must_use]
@@ -222,6 +230,9 @@ fn build_execution_service(
     }
     if let Some(store) = &ports.client_retry {
         service = service.with_client_retry_store(Arc::clone(store));
+    }
+    if let Some(port) = &ports.cyber_sessions {
+        service = service.with_cyber_sessions(Arc::clone(port));
     }
     if let Some(request_observers) = request_observers {
         service = service.with_request_observers(request_observers);

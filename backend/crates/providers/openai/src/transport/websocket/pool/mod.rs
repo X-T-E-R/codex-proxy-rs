@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Notify;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use uuid::Uuid;
 
@@ -51,7 +51,7 @@ pub struct CodexWebSocketPool {
     config: CodexWebSocketPoolConfig,
     tasks: TaskTracker,
     shutdown: CancellationToken,
-    connect_semaphore: Arc<Semaphore>,
+    opening_count: Arc<std::sync::atomic::AtomicUsize>,
     maintenance_started: Arc<AtomicBool>,
     proxy_capacities: Arc<Mutex<HashMap<String, Weak<ProxyCapacity>>>>,
     capacity_changed: Arc<Notify>,
@@ -131,7 +131,7 @@ impl CodexWebSocketPool {
             config,
             tasks: TaskTracker::new(),
             shutdown: CancellationToken::new(),
-            connect_semaphore: Arc::new(Semaphore::new(config.max_connecting)),
+            opening_count: Arc::default(),
             maintenance_started: Arc::new(AtomicBool::new(false)),
             proxy_capacities: Arc::default(),
             capacity_changed: Arc::default(),
@@ -140,14 +140,47 @@ impl CodexWebSocketPool {
         pool
     }
 
-    /// pump 后台任务的保活策略（供建连时传入）
-    pub(crate) fn keepalive(&self) -> PumpKeepalive {
-        self.config.keepalive()
+    /// 新请求发布已生效的配置代次；晚到的旧请求不能回滚共享池
+    /// 不取消 Busy 或 Connecting，现有流和 opening 继续完成
+    pub fn configure_runtime(
+        &self,
+        revision: gateway_core::routing::ConfigRevision,
+        settings: gateway_core::settings::RuntimeProtectionSettings,
+    ) {
+        let mut state = self.lock_state();
+        if state
+            .runtime_settings
+            .is_none_or(|(current, _)| revision.get() > current.get())
+        {
+            state.runtime_settings = Some((revision, settings));
+        }
     }
 
-    /// 等待下一条上游消息的空闲超时；`None` 或零值使用默认 300 秒
+    fn config_snapshot(&self) -> CodexWebSocketPoolConfig {
+        self.config_with_state(&self.lock_state())
+    }
+
+    fn config_with_state(&self, state: &WebSocketPoolState) -> CodexWebSocketPoolConfig {
+        let mut config = self.config;
+        if let Some((_, settings)) = state.runtime_settings {
+            config.enabled = settings.ws_pool_enabled;
+            config.max_age = Duration::from_millis(settings.ws_pool_max_age_ms);
+            config.max_connecting = settings.ws_pool_max_connecting as usize;
+            config.stream_idle_timeout = Some(Duration::from_millis(
+                settings.ws_pool_stream_idle_timeout_ms,
+            ));
+        }
+        config
+    }
+
+    /// pump 后台任务的保活策略（供建连时传入）
+    pub(crate) fn keepalive(&self) -> PumpKeepalive {
+        self.config_snapshot().keepalive()
+    }
+
+    /// 流开始时冻结空闲超时，不更改正在交付的响应
     pub(crate) fn stream_idle_timeout(&self) -> Option<Duration> {
-        self.config.stream_idle_timeout
+        self.config_snapshot().stream_idle_timeout
     }
 
     /// 注册由连接池生命周期托管的 opening 任务
@@ -168,7 +201,7 @@ impl CodexWebSocketPool {
             let acquire = {
                 let mut state = self.lock_state();
                 let mut continuation_loss = None;
-                if !self.config.enabled || state.shutting_down {
+                if !self.config_with_state(&state).enabled || state.shutting_down {
                     return WebSocketPoolAcquire::Bypass(WebSocketPoolBypassReason::Disabled);
                 }
                 let key = if let Some(response_id) = required_response_id {
@@ -208,7 +241,8 @@ impl CodexWebSocketPool {
                         };
                         // 零成本探活：后台 pump 已实时感知连接死亡（RST/Close/EOF/失活），
                         // 复用前只需读取 is_closed 标志，避免复用到静默死连接后卡到超时
-                        let expired = connection.created_at.elapsed() >= self.config.max_age;
+                        let expired = connection.created_at.elapsed()
+                            >= self.config_with_state(&state).max_age;
                         let closed = connection.websocket.is_closed();
                         if !expired && !closed {
                             let lease = WebSocketPoolLease::reserve(
@@ -253,7 +287,10 @@ impl CodexWebSocketPool {
                 } else if proxy.is_some() && proxy_permit.is_none() {
                     None
                 } else {
-                    let connect_permit = self.connect_semaphore.clone().try_acquire_owned().ok();
+                    let connect_permit = lease::WebSocketOpeningPermit::try_acquire(
+                        &self.opening_count,
+                        self.config_with_state(&state).max_connecting,
+                    );
                     Some(match connect_permit {
                         Some(connect_permit) => {
                             let lease = WebSocketPoolConnectLease::reserve(
@@ -301,15 +338,17 @@ impl CodexWebSocketPool {
         let mut connection = Some(connection);
         {
             let mut state = self.lock_state();
-            let expired = connection
-                .as_ref()
-                .is_some_and(|connection| connection.created_at.elapsed() >= self.config.max_age);
+            let expired = connection.as_ref().is_some_and(|connection| {
+                connection.created_at.elapsed() >= self.config_with_state(&state).max_age
+            });
             let owns_reservation = matches!(
                 state.slots.get(key),
                 Some(WebSocketPoolSlot::Busy(reservation))
                     if reservation.id == reservation_id
             );
-            if owns_reservation && (expired || state.shutting_down || !self.config.enabled) {
+            if owns_reservation
+                && (expired || state.shutting_down || !self.config_with_state(&state).enabled)
+            {
                 if expired && let Some(connection) = connection.as_ref() {
                     state.remember_continuation_loss(
                         key,
@@ -382,7 +421,8 @@ impl CodexWebSocketPool {
             state.slots.get(key),
             Some(WebSocketPoolSlot::Connecting(connecting)) if connecting.id == connect_id
         );
-        if owns_connect && !state.shutting_down && self.config.enabled {
+        // 已取得 opening 租约的请求不因热禁用而失去送达，归还时再关闭
+        if owns_connect && !state.shutting_down {
             let lease = WebSocketPoolLease::reserve(self.clone(), key.clone(), None);
             state.slots.insert(
                 key.clone(),

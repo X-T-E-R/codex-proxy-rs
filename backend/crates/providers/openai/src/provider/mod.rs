@@ -266,8 +266,16 @@ impl CodexProvider {
         &self,
         context: &AttemptContext,
     ) -> Result<CodexBackendClient, ProviderError> {
+        let client = if let Some(revision) = context.config_revision() {
+            self.client.clone().with_runtime_pool_settings(
+                revision,
+                context.account_selection_policy().protection(),
+            )
+        } else {
+            self.client.clone()
+        };
         let Some(profile) = context.request_profile() else {
-            return Ok(self.client.clone());
+            return Ok(client);
         };
         let profile = serde_json::from_value(Value::Object(profile.expose_to_provider().clone()))
             .map_err(|error: serde_json::Error| {
@@ -281,7 +289,7 @@ impl CodexProvider {
             provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent)
                 .with_diagnostic(diagnostic)
         })?;
-        Ok(self.client.clone().with_request_profile(profile))
+        Ok(client.with_request_profile(profile))
     }
 
     // Provider 构造集中装配独立领域服务和透明传输依赖，拆分参数会模糊所有权

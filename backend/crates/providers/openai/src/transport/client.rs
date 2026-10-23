@@ -695,6 +695,7 @@ pub struct CodexBackendClient {
     pub(super) protocol: OpenAiUpstreamProtocol,
     pub(super) profile: CodexWireProfileState,
     pub(super) websocket_pool: Option<Arc<CodexWebSocketPool>>,
+    pub(super) websocket_fast_path_budget: Duration,
     pub(super) websocket_origin_breaker: WebSocketOriginBreaker,
     pub(super) websocket_origin_key: String,
     pub(super) outbound_proxy: Option<gateway_core::account::OutboundProxy>,

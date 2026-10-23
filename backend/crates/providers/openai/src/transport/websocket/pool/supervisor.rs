@@ -108,7 +108,7 @@ impl CodexWebSocketPool {
         let config = self.config;
         let tasks = self.tasks.clone();
         let shutdown = self.shutdown.clone();
-        let connect_semaphore = Arc::clone(&self.connect_semaphore);
+        let opening_count = Arc::clone(&self.opening_count);
         let maintenance_started = Arc::clone(&self.maintenance_started);
         let proxy_capacities = Arc::clone(&self.proxy_capacities);
         let capacity_changed = Arc::clone(&self.capacity_changed);
@@ -127,7 +127,7 @@ impl CodexWebSocketPool {
                     config,
                     tasks: tasks.clone(),
                     shutdown: shutdown.clone(),
-                    connect_semaphore: Arc::clone(&connect_semaphore),
+                    opening_count: Arc::clone(&opening_count),
                     maintenance_started: Arc::clone(&maintenance_started),
                     proxy_capacities: Arc::clone(&proxy_capacities),
                     capacity_changed: Arc::clone(&capacity_changed),
@@ -149,15 +149,18 @@ impl CodexWebSocketPool {
         let mut close = Vec::new();
         let now = Instant::now();
         let mut state = self.lock_state();
-        if state.shutting_down || !self.config.enabled {
+        if state.shutting_down {
             return close;
         }
+        let current = self.config_with_state(&state);
+        // 热更只摘除闲置连接，Busy/Connecting 的既有生命周期界限保持不变
         let keys = state
             .slots
             .iter()
             .filter_map(|(key, slot)| match slot {
                 WebSocketPoolSlot::Idle { connection, .. }
-                    if should_close_idle_connection(connection, now, self.config.max_age) =>
+                    if !current.enabled
+                        || should_close_idle_connection(connection, now, current.max_age) =>
                 {
                     Some(key.clone())
                 }
