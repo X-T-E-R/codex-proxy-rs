@@ -1132,3 +1132,105 @@ async fn progress_congestion_preserves_failure_reserve_without_waiting() {
     assert_eq!(store.stats().queued_bytes, 0);
     database.close().await;
 }
+
+#[tokio::test]
+async fn diagnostic_contract_red_reproduces_terminal_loss_and_false_reaping() {
+    let Some(database) = TestDatabase::create("diagnostic_contract_red").await else {
+        return;
+    };
+    let request = accepted_request("req_diagnostic_contract");
+    let trace = gateway_core::diagnostics::TraceContext::new(request.id.as_str());
+    for index in 0..4 {
+        trace.record_evidence(
+            "test.evidence",
+            serde_json::json!({"index": index, "data": "e".repeat(16_000)}),
+        );
+    }
+    trace.record(
+        "test.ordinary",
+        serde_json::json!({"data": "o".repeat(4_000)}),
+    );
+    let snapshot = trace.snapshot().unwrap();
+    assert_eq!(snapshot["events"].as_array().unwrap().len(), 5);
+    assert_eq!(snapshot["droppedEvents"], 0);
+    let encoded = snapshot.to_string();
+    assert!(encoded.len() > 64 * 1024);
+    if let Ok(path) = std::env::var("CPR_TEST_DIAGNOSTIC_FIXTURE_OUT") {
+        std::fs::write(path, &encoded).expect("save synthetic TraceContext fixture");
+    }
+    let mut finalization = early_failure(&request);
+    finalization.outcome = gateway_core::engine::ExecutionOutcome::Succeeded;
+    finalization.error = None;
+    finalization.client_status_code = Some(200);
+    finalization.upstream_status_code = Some(200);
+    finalization.upstream_transport = Some("http_sse".to_owned());
+    finalization.provider_metadata_json = Some("{\"fixture\":true}".to_owned());
+    finalization.usage.input_tokens = Some(101);
+    finalization.usage.output_tokens = Some(23);
+    finalization.usage.total_tokens = Some(124);
+    finalization.cost = gateway_core::metering::CalculatedCost::from_usd_ticks(12_300_000)
+        .unwrap()
+        .into_estimate();
+    finalization.diagnostic_trace_json = Some(encoded.clone());
+    let pg = Arc::new(PgExecutionStore::new(database.pool.clone()));
+    let error = pg
+        .finalize_model_request(finalization.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), StoreErrorKind::InvalidData);
+    let (store, writer) = BufferedExecutionStore::new(pg);
+    store.create_model_request(request.clone()).await.unwrap();
+    store
+        .finalize_model_request(finalization)
+        .await
+        .expect("enqueue is Ok before rejected persistence");
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    writer
+        .run(WorkerDaemonContext::new(cancellation))
+        .await
+        .unwrap();
+    assert_eq!(store.stats().persisted_total, 1);
+    assert_eq!(store.stats().write_failure_total, 1);
+    assert_eq!(store.stats().dropped_total, 0);
+    let row: serde_json::Value =
+        sqlx::query_scalar("select to_jsonb(mr) from model_requests mr where id = $1")
+            .bind(request.id.as_str())
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(row["outcome"], "running");
+    for field in [
+        "input_tokens",
+        "cost_amount",
+        "provider_observation_json",
+        "diagnostic_trace_json",
+    ] {
+        assert!(
+            row[field].is_null(),
+            "{field} rejected with the entire terminal write"
+        );
+    }
+    assert_eq!(
+        store
+            .recover_expired(request.deadline_at.at().unwrap())
+            .await
+            .unwrap()
+            .requests,
+        1
+    );
+    let recovered = observability_repository(&database.pool)
+        .usage_record_detail(request.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(recovered.request.outcome.as_str(), "incomplete");
+    assert_eq!(
+        recovered.request.error_kind.as_deref(),
+        Some("process_interrupted")
+    );
+    println!(
+        "DIAGNOSTIC_CONTRACT_RED bytes={} events=5 dropped=0 enqueue=Ok persisted=1 write_failure=1 db_before=running reaped=1 db_after=incomplete/process_interrupted",
+        encoded.len()
+    );
+    database.close().await;
+}
