@@ -13,9 +13,9 @@ jobs:
     uses: ./.github/workflows/_quality.yml
     with:
       ref: ${{ github.sha }}
-      # 最终镜像沿用 9503cee9 已完成的同字节后端全套证据，只新增前端与实际镜像验收
+      # 镜像沿用9503后端与088前端同字节质量证据，实际镜像仍从源码完整build
       run_backend: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[task35-image]')) }}
-      run_frontend: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[task35-image]') }}
+      run_frontend: false
   recovery-drill:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -94,19 +94,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-      - name: Match admitted backend evidence
+      - name: Match admitted backend and frontend evidence
         shell: bash
         run: |
-          git fetch --depth=1 origin 9503cee9ad9d1eb2727a339f0fad0e309423ade8
-          git diff --exit-code 9503cee9ad9d1eb2727a339f0fad0e309423ade8 -- backend
+          git fetch --depth=1 origin 088fe094e91bd991fa4d01744c11ff09c1fdaa33
+          git diff --exit-code 088fe094e91bd991fa4d01744c11ff09c1fdaa33 -- backend frontend
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Define immutable candidate identity
         shell: bash
         run: |
-          echo "CPR_IMAGE=codex-proxy-rs:task35-${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "TASK35_IMAGE=ghcr.io/x-t-e-r/codex-proxy-rs:task35-sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "TASK35_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+          {
+            echo "CPR_IMAGE=codex-proxy-rs:task35-${GITHUB_SHA}"
+            echo "TASK35_IMAGE=ghcr.io/x-t-e-r/codex-proxy-rs:task35-sha-${GITHUB_SHA}"
+            echo "TASK35_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
       - name: Build exact full runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

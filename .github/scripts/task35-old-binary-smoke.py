@@ -35,8 +35,8 @@ config = {
                                 'retention_days':7,'max_file_size_mb':20}},
              'drain_timeout_seconds':2,'worker_shutdown_timeout_seconds':2},
     'store': {'database':{'url':'postgres://codex_proxy@postgres:5432/'+database+'?options='+quote('-csearch_path='+schema,safe=''),
-                           'password':'codex_proxy'},
-              'redis':{'url':'redis://redis:6379/','password':''}},
+                           'password':'a'*48},
+              'redis':{'url':'redis://redis:6379/','password':'b'*48}},
     'admin': {'session_ttl_minutes':1440,'default_username':'admin@task35.synthetic',
               'default_password':'task35-synthetic-only'},
     'client':{'session_ttl_minutes':1440},
@@ -51,7 +51,7 @@ def run(arguments, **kwargs):
 
 
 def sql(text):
-    result = run(['docker','exec','--env','PGPASSWORD=codex_proxy',args.postgres,
+    result = run(['docker','exec','--env','PGPASSWORD='+'a'*48,args.postgres,
                   'psql','-X','-U','codex_proxy','-d',database,'-At','-v','ON_ERROR_STOP=1','-c',text],text=True)
     return result.stdout.strip()
 
@@ -63,6 +63,11 @@ if args.restore_dump:
         run(['docker','exec','-i','--env','PGPASSWORD=codex_proxy',args.postgres,
              'pg_restore','-U','codex_proxy','-d',database,'--exit-on-error','--no-owner'],stdin=dump)
     receipt['old_binary_dump_replay_seconds'] = round(time.monotonic()-began,3)
+# 旧45f配置要求存储密码恰好48位hex；只调整本job新建的临时服务
+run(['docker','exec','--env','PGPASSWORD=codex_proxy',args.postgres,
+     'psql','-X','-U','codex_proxy','-d',database,'-v','ON_ERROR_STOP=1',
+     '-c',"alter role codex_proxy password '"+'a'*48+"';"])
+run(['docker','exec',args.redis,'redis-cli','CONFIG','SET','requirepass','b'*48])
 began = time.monotonic()
 health_status = None
 try:
