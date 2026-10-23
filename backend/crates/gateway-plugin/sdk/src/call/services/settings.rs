@@ -126,6 +126,8 @@ pub struct RuntimeSettings {
     pub account_warmup_model: Option<String>,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
+    #[serde(flatten)]
+    pub protection: RuntimeProtectionSettings,
     pub request_profiles: ProviderRequestProfiles,
     pub config_revision: Revision,
     pub model_mappings: ModelMappings,
@@ -167,6 +169,8 @@ pub struct ReplaceRuntimeSettings {
     pub account_warmup_model: Option<String>,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
+    #[serde(flatten)]
+    pub protection: RuntimeProtectionSettings,
     /// 读取设置时的版本；与写入在同一事务内比较，防止覆盖并发更新
     pub expected_revision: Revision,
     /// 只覆盖提交的 Provider；未提交项保留当前持久值
@@ -206,6 +210,17 @@ pub struct RequestLocation {
     pub region: String,
     pub city: String,
     pub timezone: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeProtectionSettings {
+    pub cyber_session_block_enabled: bool,
+    pub cyber_session_block_ttl_seconds: u32,
+    pub ws_pool_enabled: bool,
+    pub ws_pool_max_age_ms: u64,
+    pub ws_pool_max_connecting: u32,
+    pub ws_pool_stream_idle_timeout_ms: u64,
+    pub ws_pool_fast_path_budget_ms: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -372,6 +387,7 @@ impl From<RuntimeSettings> for ReplaceRuntimeSettings {
             reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
             reset_credit_max_weekly_remaining_percent: settings
                 .reset_credit_max_weekly_remaining_percent,
+            protection: settings.protection,
             expected_revision: settings.config_revision,
             request_profile_updates: settings
                 .request_profiles

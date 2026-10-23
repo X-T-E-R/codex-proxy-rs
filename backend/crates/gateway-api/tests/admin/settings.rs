@@ -466,6 +466,13 @@ fn settings_response_should_cover_the_full_runtime_settings_contract() {
                 "accountWarmupModel": null,
                 "resetCreditLeadMinutes": 10,
                 "resetCreditMaxWeeklyRemainingPercent": null,
+                "cyberSessionBlockEnabled": false,
+                "cyberSessionBlockTtlSeconds": 3600,
+                "wsPoolEnabled": true,
+                "wsPoolMaxAgeMs": 3300000,
+                "wsPoolMaxConnecting": 8,
+                "wsPoolStreamIdleTimeoutMs": 300000,
+                "wsPoolFastPathBudgetMs": 800,
                 "updatedAt": "2026-08-02T10:30:00Z",
                 "updatedAtDisplay": "2026-08-02 18:30:00"
         })

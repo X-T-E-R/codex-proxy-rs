@@ -108,9 +108,14 @@ impl Provider for PolicyProvider {
             UpstreamTransport::new("websocket").unwrap(),
         );
         let events = match self.mode.load(Ordering::SeqCst) {
-            1 => vec![Ok(ProviderEvent::canonical(GatewayEvent::Completed(
-                ResponseMeta::new("response-ok", "gpt-start"),
-            )))],
+            1 => vec![
+                Ok(ProviderEvent::canonical(GatewayEvent::Started(
+                    ResponseMeta::new("response-ok", "gpt-start"),
+                ))),
+                Ok(ProviderEvent::canonical(GatewayEvent::Completed(
+                    ResponseMeta::new("response-ok", "gpt-start"),
+                ))),
+            ],
             2 => vec![Err(ProviderError::new(
                 ProviderErrorKind::Transport,
                 UpstreamSendState::Ambiguous,

@@ -340,7 +340,10 @@ pub(crate) async fn load_runtime_settings_in_transaction(
                 account_auto_freeze_window_seconds, account_auto_freeze_duration_seconds,
                 account_auto_freeze_probe_enabled, account_auto_freeze_probe_model,
                 account_auto_freeze_adaptive_concurrency,
-                account_warmup_enabled, account_warmup_schedule_time, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent
+                account_warmup_enabled, account_warmup_schedule_time, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent,
+                jsonb_build_object('cyberSessionBlockEnabled', cyber_session_block_enabled, 'cyberSessionBlockTtlSeconds', cyber_session_block_ttl_seconds,
+                    'wsPoolEnabled', ws_pool_enabled, 'wsPoolMaxAgeMs', ws_pool_max_age_ms, 'wsPoolMaxConnecting', ws_pool_max_connecting,
+                    'wsPoolStreamIdleTimeoutMs', ws_pool_stream_idle_timeout_ms, 'wsPoolFastPathBudgetMs', ws_pool_fast_path_budget_ms) as protection_json
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)

@@ -245,6 +245,10 @@ fn sdk_settings_contract_matches_host_declarations() {
             &["RequestLocation"][..],
         ),
         (
+            "../gateway-core/src/account/protection.rs",
+            &["RuntimeProtectionSettings"][..],
+        ),
+        (
             "../gateway-core/src/account/smart_scheduling.rs",
             &["SmartSchedulingValues"][..],
         ),

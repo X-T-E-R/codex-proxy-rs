@@ -102,6 +102,7 @@ async fn runtime_pool_shrink_and_disable_preserve_an_opening_and_its_active_resp
                 .starts_with("POST /codex/responses ")
         );
         write_completed_sse_response(&mut second).await;
+        drop(second);
         // 热禁用也只影响后续请求
         let (mut third, _) = listener.accept().await.unwrap();
         assert!(
@@ -110,6 +111,7 @@ async fn runtime_pool_shrink_and_disable_preserve_an_opening_and_its_active_resp
                 .starts_with("POST /codex/responses ")
         );
         write_completed_sse_response(&mut third).await;
+        drop(third);
         release_rx.await.unwrap();
         let mut first = accept_codex_test_websocket(first).await;
         first.next().await.unwrap().unwrap();

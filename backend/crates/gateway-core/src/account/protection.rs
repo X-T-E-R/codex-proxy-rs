@@ -1,7 +1,7 @@
 //! 会话保护和 WebSocket 池的持久运行值与范围校验
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeProtectionSettings {
     pub cyber_session_block_enabled: bool,
     pub cyber_session_block_ttl_seconds: u32,

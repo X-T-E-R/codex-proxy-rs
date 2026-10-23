@@ -499,7 +499,7 @@ async fn write_completed_sse_response(stream: &mut TcpStream) {
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_http_fallback\",\"model\":\"gpt-test\"}}\n\n",
         "event: response.completed\n",
-        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http_fallback\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_http_fallback\",\"model\":\"gpt-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n",
     );
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
