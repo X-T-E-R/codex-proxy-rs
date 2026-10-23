@@ -11,6 +11,8 @@ pub use model_access::{
     AccountModelAccess, AccountModelAccessMode, InvalidAccountModelAccess,
     MAX_ACCOUNT_ACCESS_MODELS,
 };
+mod protection;
+pub use protection::RuntimeProtectionSettings;
 mod proxy;
 pub use proxy::{InvalidOutboundProxy, OutboundProxy};
 pub mod scope;

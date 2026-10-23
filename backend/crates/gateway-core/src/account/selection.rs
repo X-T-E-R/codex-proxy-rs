@@ -94,7 +94,7 @@ pub struct AccountSelectionPolicy {
     openai_account_affinity: AccountAffinity,
     max_account_rotations: u32,
     openai_session_affinity_ttl: Duration,
-    protection: crate::settings::RuntimeProtectionSettings,
+    protection: super::RuntimeProtectionSettings,
 }
 
 impl AccountSelectionPolicy {
@@ -111,7 +111,7 @@ impl AccountSelectionPolicy {
             openai_account_affinity: AccountAffinity::default(),
             max_account_rotations: 3,
             openai_session_affinity_ttl: Duration::from_secs(24 * 3600),
-            protection: crate::settings::RuntimeProtectionSettings::default(),
+            protection: super::RuntimeProtectionSettings::default(),
             queue_policy: ConcurrencyQueuePolicy {
                 max_waiting: 0,
                 timeout: Duration::ZERO,
@@ -120,16 +120,13 @@ impl AccountSelectionPolicy {
     }
 
     #[must_use]
-    pub const fn with_protection(
-        mut self,
-        protection: crate::settings::RuntimeProtectionSettings,
-    ) -> Self {
+    pub const fn with_protection(mut self, protection: super::RuntimeProtectionSettings) -> Self {
         self.protection = protection;
         self
     }
 
     #[must_use]
-    pub const fn protection(self) -> crate::settings::RuntimeProtectionSettings {
+    pub const fn protection(self) -> super::RuntimeProtectionSettings {
         self.protection
     }
 
