@@ -220,7 +220,9 @@ async fn connect(
         plugins.clone(),
         plugins,
         usage_data,
-    );
+    )
+    .with_quota_policy(Arc::new(postgres::PgQuotaPolicyStore::new(pool.clone())))
+    .with_priority_policy(Arc::new(postgres::PgPriorityPolicyStore::new(pool.clone())));
 
     let execution_repository = Arc::new(postgres::PgExecutionStore::new(pool.clone()));
     let (execution, execution_writer) =
@@ -284,7 +286,9 @@ async fn connect(
         runtime_policy,
         oauth_pending,
         diagnostics.clone(),
-    );
+    )
+    .with_quota_policy(Arc::new(postgres::PgQuotaPolicyStore::new(pool.clone())))
+    .with_priority_policy(Arc::new(postgres::PgPriorityPolicyStore::new(pool.clone())));
     let worker_leader_lease = Arc::new(redis::worker_lease::RedisWorkerLeaderLeasePort::new(
         credential_leases,
     ));

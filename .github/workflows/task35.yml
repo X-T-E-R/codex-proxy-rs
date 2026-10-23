@@ -1,0 +1,17 @@
+name: Task35 candidate verification
+
+on:
+  push:
+    branches: [task35/upgrade-20261023]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality.yml
+    with:
+      ref: ${{ github.sha }}
+      run_backend: true
+      run_frontend: false

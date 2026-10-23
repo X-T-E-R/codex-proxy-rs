@@ -421,14 +421,18 @@ async fn initialize_inner(
     auth.ensure_default_admin(config.default_password.expose())
         .await?;
 
-    let accounts = initialize_accounts(
-        store.accounts(),
-        store.account_runtime(),
-        store.settings(),
-        timezone,
-        registry.clone(),
-        snapshot.clone(),
-        probe.clone(),
+    let accounts: Arc<dyn AccountsService> = Arc::new(
+        DefaultAccountsService::new(
+            store.accounts(),
+            store.account_runtime(),
+            store.settings(),
+            timezone,
+            registry.clone(),
+            snapshot.clone(),
+            probe.clone(),
+        )
+        .with_quota_policy(store.quota_policy())
+        .with_priority_policy(store.priority_policy()),
     );
     let backup_ports = store.backup();
     let backups = Arc::new(DefaultBackupService::new(

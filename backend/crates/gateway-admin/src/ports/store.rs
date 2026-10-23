@@ -584,6 +584,9 @@ pub struct AdminStorePorts {
     plugin_state: Arc<dyn super::plugins::PluginStateStore>,
     plugin_resources: Arc<dyn super::plugin_resources::PluginResourceStore>,
     usage_data: Arc<dyn super::usage_data::UsageDataStore>,
+    quota_policy: Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>>,
+    priority_policy:
+        Option<Arc<dyn gateway_core::provider_ports::priority_policy::PriorityPolicyStore>>,
 }
 
 impl AdminStorePorts {
@@ -635,7 +638,41 @@ impl AdminStorePorts {
             plugin_state,
             plugin_resources,
             usage_data,
+            quota_policy: None,
+            priority_policy: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_quota_policy(
+        mut self,
+        store: Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>,
+    ) -> Self {
+        self.quota_policy = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn quota_policy(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>> {
+        self.quota_policy.clone()
+    }
+
+    #[must_use]
+    pub fn with_priority_policy(
+        mut self,
+        store: Arc<dyn gateway_core::provider_ports::priority_policy::PriorityPolicyStore>,
+    ) -> Self {
+        self.priority_policy = Some(store);
+        self
+    }
+
+    #[must_use]
+    pub fn priority_policy(
+        &self,
+    ) -> Option<Arc<dyn gateway_core::provider_ports::priority_policy::PriorityPolicyStore>> {
+        self.priority_policy.clone()
     }
 
     #[must_use]

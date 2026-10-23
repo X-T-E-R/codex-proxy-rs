@@ -573,40 +573,12 @@ impl Provider for CodexProvider {
                 UpstreamSendState::NotSent,
             ));
         };
-        // 请求设置先形成原生正文基线；attempt 的显式改写进入终端后不再次被覆盖
-        let mut operation = Operation::Generate(generate.clone());
-        if context.fast_mode() != gateway_core::account::FastMode::Default
-            && let Operation::Generate(generate) = &operation
-            && generate.protocol_payload().protocol() == PROVIDER_NAME
-        {
-            let mut request =
-                CodexResponsesRequest::from_body(generate.protocol_payload().body().clone());
-            let supports_priority = candidate.model_presentation().is_some_and(|model| {
-                model
-                    .service_tiers()
-                    .iter()
-                    .any(|tier| tier.id() == "priority")
-            });
-            if request.apply_fast_policy(context.fast_mode(), supports_priority) {
-                let body = serde_json::to_vec(request.body()).map_err(|_| {
-                    provider_error(
-                        ProviderErrorKind::InvalidRequest,
-                        UpstreamSendState::NotSent,
-                    )
-                })?;
-                operation = operation
-                    .replace_middleware_wire(PROVIDER_NAME, body.into())
-                    .map_err(|_| {
-                        provider_error(
-                            ProviderErrorKind::InvalidRequest,
-                            UpstreamSendState::NotSent,
-                        )
-                    })?;
-            }
-        }
-        let Operation::Generate(generate) = &operation else {
-            unreachable!("generate settings keep the operation kind")
-        };
+        let supports_priority = candidate.model_presentation().is_some_and(|model| {
+            model
+                .service_tiers()
+                .iter()
+                .any(|tier| tier.id() == "priority")
+        });
         let adapter = context.upstream_adapter(candidate.provider(), upstream_model)?;
         if adapter.is_none()
             && generate
@@ -683,13 +655,47 @@ impl Provider for CodexProvider {
         let provider_kind = ProviderKind::new(PROVIDER_NAME)
             .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
         let account_id = lease.account_id().clone();
-        let frozen_requirements = Operation::Generate(generate.clone()).capability_requirements();
+        let fast_mode = self
+            .quota
+            .resolve_priority(&account_id, context.fast_mode())
+            .await
+            .map_err(|_| {
+                provider_error(
+                    ProviderErrorKind::ProviderInfrastructureUnavailable,
+                    UpstreamSendState::NotSent,
+                )
+            })?;
+        // 选号后合并账号覆盖，仍在 middleware 之前形成唯一原生正文基线
+        let mut operation = Operation::Generate(generate.clone());
+        if fast_mode != gateway_core::account::FastMode::Default
+            && generate.protocol_payload().protocol() == PROVIDER_NAME
+        {
+            let mut request =
+                CodexResponsesRequest::from_body(generate.protocol_payload().body().clone());
+            if request.apply_fast_policy(fast_mode, supports_priority) {
+                let body = serde_json::to_vec(request.body()).map_err(|_| {
+                    provider_error(
+                        ProviderErrorKind::InvalidRequest,
+                        UpstreamSendState::NotSent,
+                    )
+                })?;
+                operation = operation
+                    .replace_middleware_wire(PROVIDER_NAME, body.into())
+                    .map_err(|_| {
+                        provider_error(
+                            ProviderErrorKind::InvalidRequest,
+                            UpstreamSendState::NotSent,
+                        )
+                    })?;
+            }
+        }
+        let frozen_requirements = operation.capability_requirements();
         let provider = Arc::clone(&self);
         let terminal_context = context.clone();
         let terminal_model = upstream_model.clone();
         context
             .execute_middleware(
-                Operation::Generate(generate.clone()),
+                operation,
                 provider_kind,
                 Some(upstream_model.as_str().to_owned()),
                 account_id,

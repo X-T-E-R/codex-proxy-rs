@@ -1,6 +1,8 @@
 //! Provider 运行时所需的存储合同，按能力组织端口与共享策略
 
 mod error;
+pub mod priority_policy;
+pub mod quota_policy;
 pub use error::{ProviderStoreError, ProviderStoreErrorKind};
 mod lease;
 pub use lease::{

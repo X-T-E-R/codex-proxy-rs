@@ -660,7 +660,15 @@ impl CodexCredentialSelector {
                 }
                 eligible.push(account);
             }
-            let accounts = eligible;
+            let mut accounts = eligible;
+            if !diagnostic {
+                let blocked = self
+                    .quota
+                    .policy_admission(&accounts)
+                    .await
+                    .map_err(|source| CredentialSelectionError::Store(ErrorSource::new(source)))?;
+                accounts.retain(|account| !blocked.contains(account.id().as_str()));
+            }
             if model_access_rejected > 0 && request.attempt.trace().is_enabled() {
                 request.attempt.trace().record(
                     "account.model_access",

@@ -45,6 +45,25 @@ pub struct CodexRateLimitResetCredits {
 pub struct CodexRateLimitResetCreditsConsumeResult {
     pub code: String,
     pub credit: Option<CodexRateLimitResetCredit>,
+    pub action_result: CodexResetActionResult,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexResetActionResult {
+    Confirmed,
+    Rejected,
+    Unknown,
+}
+
+impl CodexResetActionResult {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Rejected => "rejected",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -142,8 +161,17 @@ impl CodexBackendClient {
         let body = read_reset_credits_response(response).await?;
         let wire = serde_json::from_str::<ConsumeResultWire>(&body)
             .map_err(|_| invalid_response("invalid reset-credit consume response"))?;
+        let code = required_text(wire.code, MAX_IDENTIFIER_BYTES, "reset-credit result code")?;
+        let action_result = match code.as_str() {
+            "reset" => CodexResetActionResult::Confirmed,
+            "no_credit" | "nothing_to_reset" | "already_redeemed" => {
+                CodexResetActionResult::Rejected
+            }
+            _ => CodexResetActionResult::Unknown,
+        };
         Ok(CodexRateLimitResetCreditsConsumeResult {
-            code: required_text(wire.code, MAX_IDENTIFIER_BYTES, "reset-credit result code")?,
+            code,
+            action_result,
             credit: wire.credit.map(parse_credit).transpose()?,
         })
     }

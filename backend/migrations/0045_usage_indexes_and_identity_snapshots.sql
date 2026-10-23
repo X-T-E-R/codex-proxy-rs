@@ -32,7 +32,7 @@ from client_api_keys client_key
 where client_key.id = mr.client_api_key_ref
   and mr.request_observation_json #> '{request,clientApiKeyNameSnapshot}' is null
   and mr.started_at < (
-      select installed_on from _sqlx_migrations where version = 28 and success
+      select installed_on from _sqlx_migrations where version = 44 and success
   );
 
 update model_requests mr
@@ -47,7 +47,7 @@ where account.id = mr.provider_account_ref
   and account.plan_type is not null
   and mr.request_observation_json #> '{account,planTypeSnapshot}' is null
   and mr.started_at < (
-      select installed_on from _sqlx_migrations where version = 28 and success
+      select installed_on from _sqlx_migrations where version = 44 and success
   );
 
 update ops_events event
@@ -57,5 +57,5 @@ where account.id = event.provider_account_ref
   and account.plan_type is not null
   and event.provider_account_plan_type_snapshot is null
   and event.created_at < (
-      select installed_on from _sqlx_migrations where version = 28 and success
+      select installed_on from _sqlx_migrations where version = 44 and success
   );

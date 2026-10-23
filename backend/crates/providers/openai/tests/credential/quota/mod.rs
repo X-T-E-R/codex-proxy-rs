@@ -3,6 +3,7 @@
 mod capacity_freeze;
 mod credits;
 mod initial_sync;
+mod policy;
 mod recovery;
 mod refresh_timing;
 mod reset_credits;

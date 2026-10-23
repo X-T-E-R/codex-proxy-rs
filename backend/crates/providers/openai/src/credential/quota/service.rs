@@ -80,6 +80,9 @@ impl CodexCredentialQuotaService {
             freeze_policy_cache: Mutex::new(None),
             scheduling: CodexQuotaSchedulingProjection::default(),
             reset_consume_locks: ResetCreditLocks::default(),
+            quota_policy: None,
+            priority_policy: None,
+            policy_refreshes: Mutex::new(BTreeMap::new()),
             initial_sync_delays: Arc::new(|| {
                 crate::jitter::uniform_delay(
                     crate::jitter::random_u64(),
@@ -226,7 +229,10 @@ impl CodexCredentialQuotaService {
     }
 
     pub async fn synchronize(&self) -> Result<CodexQuotaSyncSummary, CodexCredentialQuotaError> {
-        self.synchronize_at(SystemTime::now()).await
+        let summary = self.synchronize_at(SystemTime::now()).await?;
+        self.synchronize_policy(&gateway_core::lifecycle::CancellationToken::new())
+            .await;
+        Ok(summary)
     }
 
     /// 按本轮调度时刻选择到期账号；实际 HTTP 观察与落库仍使用发生时刻
@@ -404,6 +410,7 @@ impl CodexCredentialQuotaService {
             return Ok(());
         }
         self.scheduling.observe(&snapshot);
+        self.observe_priority(&snapshot).await;
         if snapshot.quota().is_exhausted() {
             summary.exhausted += 1;
         } else {
@@ -651,6 +658,7 @@ impl CodexCredentialQuotaService {
             return Err(CodexCredentialQuotaError::RevisionConflict);
         }
         self.scheduling.observe(&snapshot);
+        self.observe_priority(&snapshot).await;
         Ok(snapshot)
     }
 

@@ -8,6 +8,8 @@
 mod document;
 pub(crate) mod evidence;
 mod passive;
+mod policy;
+mod priority;
 mod recovery;
 mod reset_credits;
 mod scheduling;
@@ -16,7 +18,7 @@ pub(crate) mod snapshot;
 mod warmup;
 
 pub use reset_credits::CodexResetCreditsError;
-use reset_credits::ResetCreditLocks;
+use reset_credits::{ResetCreditLocks, consume_reset_credit_once, map_reset_credit_attempt_error};
 use scheduling::CodexQuotaSchedulingProjection;
 
 pub use snapshot::{
@@ -181,6 +183,10 @@ pub struct CodexCredentialQuotaService {
     freeze_policy_cache: Mutex<Option<(ProviderFreezePolicy, Instant)>>,
     scheduling: CodexQuotaSchedulingProjection,
     reset_consume_locks: ResetCreditLocks,
+    quota_policy: Option<Arc<dyn gateway_core::provider_ports::quota_policy::QuotaPolicyStore>>,
+    policy_refreshes: Mutex<BTreeMap<ProviderAccountId, Instant>>,
+    priority_policy:
+        Option<Arc<dyn gateway_core::provider_ports::priority_policy::PriorityPolicyStore>>,
     /// 首查随机延迟采样器；测试注入固定值获得确定性节奏。
     initial_sync_delays: CodexInitialSyncDelays,
 }

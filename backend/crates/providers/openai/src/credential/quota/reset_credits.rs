@@ -87,6 +87,8 @@ pub enum CodexResetCreditsError {
     TransportUnavailable,
     #[error("Codex reset-credit consume result is unknown")]
     ConsumeResultUnknown,
+    #[error(transparent)]
+    Policy(gateway_core::provider_ports::quota_policy::QuotaPolicyError),
 }
 
 impl std::fmt::Debug for CodexResetCreditsError {
@@ -110,11 +112,12 @@ impl std::fmt::Debug for CodexResetCreditsError {
                 .finish(),
             Self::TransportUnavailable => formatter.write_str("TransportUnavailable"),
             Self::ConsumeResultUnknown => formatter.write_str("ConsumeResultUnknown"),
+            Self::Policy(error) => formatter.debug_tuple("Policy").field(error).finish(),
         }
     }
 }
 
-enum ResetCreditAttemptError {
+pub(super) enum ResetCreditAttemptError {
     InvalidCredential,
     Upstream(CodexClientError),
 }
@@ -154,9 +157,33 @@ impl CodexCredentialQuotaService {
         credit_id: Option<&str>,
         redeem_request_id: Uuid,
     ) -> Result<CodexRateLimitResetCreditsConsumeResult, CodexResetCreditsError> {
+        if let Some(result) = self
+            .terminal_manual_reset(account_id, credit_id, redeem_request_id)
+            .await?
+        {
+            return Ok(result);
+        }
         let entry = self.reset_consume_locks.entry(account_id);
         let _guard = entry.lock().await;
         let account = self.reset_credit_account(account_id).await?;
+        if self.quota_policy.is_some() {
+            return self
+                .perform_reset(
+                    gateway_core::provider_ports::quota_policy::ResetOperation {
+                        id: redeem_request_id.to_string(),
+                        account_id: account_id.as_str().to_owned(),
+                        credential_revision: account.revision().get(),
+                        credit_id: credit_id.map(str::to_owned),
+                        automatic: false,
+                        episode: None,
+                        trigger_percent: None,
+                        state: "pending".to_owned(),
+                        result_code: None,
+                    },
+                    &gateway_core::lifecycle::CancellationToken::new(),
+                )
+                .await;
+        }
         let client = CodexBackendClient::new(
             self.http.clone(),
             self.base_url.clone(),
@@ -228,7 +255,7 @@ async fn list_reset_credits_once(
         .map_err(ResetCreditAttemptError::Upstream)
 }
 
-async fn consume_reset_credit_once(
+pub(super) async fn consume_reset_credit_once(
     client: &CodexBackendClient,
     prepared: &PreparedCodexRuntimeCredential,
     request_id: &str,
@@ -257,7 +284,7 @@ async fn consume_reset_credit_once(
         .map_err(ResetCreditAttemptError::Upstream)
 }
 
-fn map_reset_credit_attempt_error(
+pub(super) fn map_reset_credit_attempt_error(
     error: ResetCreditAttemptError,
     consume: bool,
 ) -> CodexResetCreditsError {

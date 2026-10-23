@@ -66,6 +66,8 @@ mod credentials;
 mod handlers;
 mod import_tasks;
 mod presenter;
+mod priority_policy;
+mod quota_policy;
 mod wire;
 
 pub use credentials::*;

@@ -2033,6 +2033,8 @@ fn map_reset_credits_error(error: CodexResetCreditsError) -> ProviderAdminError 
     use CodexResetCreditsError as Error;
 
     match error {
+        Error::Policy(gateway_core::provider_ports::quota_policy::QuotaPolicyError::Unavailable) => provider_admin_error(ProviderAdminErrorKind::Unavailable),
+        Error::Policy(_) => provider_admin_error(ProviderAdminErrorKind::Conflict),
         Error::InvalidCredentialData => provider_admin_error(ProviderAdminErrorKind::Invalid),
         Error::NotFound => provider_admin_error(ProviderAdminErrorKind::NotFound),
         Error::Store { .. } | Error::TransportUnavailable => {

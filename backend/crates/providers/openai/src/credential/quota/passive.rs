@@ -101,6 +101,7 @@ impl CodexCredentialQuotaService {
             return Ok(false);
         }
         self.scheduling.observe(&snapshot);
+        self.observe_priority(&snapshot).await;
         Ok(true)
     }
 }
