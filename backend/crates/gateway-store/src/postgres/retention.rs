@@ -60,6 +60,7 @@ impl RetentionStore for PgRetentionRepository {
                  where ctid in (
                    select ctid from model_requests
                     where outcome <> 'running'
+                      and not exists (select 1 from upgrade_retention_protected_requests protected where protected.request_id=model_requests.id)
                       and completed_at < $1 - ($2 * interval '1 day')
                     order by completed_at
                     limit $3

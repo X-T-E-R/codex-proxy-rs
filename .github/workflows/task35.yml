@@ -15,3 +15,31 @@ jobs:
       ref: ${{ github.sha }}
       run_backend: true
       run_frontend: false
+  recovery-drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
+        env:
+          POSTGRES_DB: codex_proxy
+          POSTGRES_USER: codex_proxy
+          POSTGRES_PASSWORD: codex_proxy
+        options: >-
+          --health-cmd "pg_isready -U codex_proxy -d codex_proxy"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rehearse upgrade and independent recovery with synthetic facts
+        env:
+          CPR_DRILL_CONTAINER: ${{ job.services.postgres.id }}
+        run: python .github/scripts/task35-recovery-drill.py --repo . --container "$CPR_DRILL_CONTAINER" | tee "$RUNNER_TEMP/task35-recovery.json"
+      - name: Preserve synthetic recovery receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task35-recovery-${{ github.sha }}
+          path: ${{ runner.temp }}/task35-recovery.json
+          if-no-files-found: error

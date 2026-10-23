@@ -650,3 +650,37 @@ async fn timed_out_retention_batches_shrink_across_cycles_and_lock_contention() 
     assert_eq!(actual.requests.total_tokens, 120);
     database.close().await;
 }
+
+#[tokio::test]
+async fn upgrade_protected_failures_survive_automatic_retention() {
+    let Some(database) = TestDatabase::create("retention_upgrade_protection").await else {
+        return;
+    };
+    let now = Utc::now();
+    for id in ["protected", "expired_new", "expired_success"] {
+        seed(&database.pool, id, now - ChronoDuration::days(40), &[]).await;
+    }
+    sqlx::query("update model_requests set outcome='failed',client_status_code=503 where id in ('protected','expired_new')")
+        .execute(&database.pool).await.unwrap();
+    sqlx::query("insert into upgrade_retention_protected_requests(request_id) values('protected')")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let repository = PgRetentionRepository::new(database.pool.clone());
+    let deleted = repository
+        .purge_batch(
+            RetentionTarget::ModelRequests,
+            now,
+            repository.load_policy().await.unwrap(),
+            NonZeroU32::new(100).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2);
+    let retained: Vec<String> = sqlx::query_scalar("select id from model_requests order by id")
+        .fetch_all(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, ["protected"]);
+    database.close().await;
+}
