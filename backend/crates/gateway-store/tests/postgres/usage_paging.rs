@@ -647,3 +647,194 @@ async fn request_status_pages_share_one_request_timeline() {
     assert_eq!(errors.len(), 2);
     database.close().await;
 }
+
+#[tokio::test]
+#[ignore = "Explicit 52k-row / 1GiB synthetic query rehearsal"]
+async fn usage_scale_rehearsal_covers_pages_filters_details_and_error_summary() {
+    use gateway_admin::{
+        model::observability::{TimeRange, UsageRecordStatus},
+        ports::store::ObservabilityStore as _,
+    };
+    use gateway_core::time::DeploymentTimeZone;
+    use std::time::Instant;
+
+    let database = TestDatabase::create("usage_scale")
+        .await
+        .expect("scale rehearsal requires isolated PostgreSQL");
+    let start = Utc::now() - TimeDelta::days(7);
+    seed(&database.pool, "scale_seed", start, &[]).await;
+    // 合成大字段只扩大物理体积，不加入列表投影；禁止压缩避免重复夹具虚报规模
+    sqlx::query(
+        "alter table model_requests alter column provider_observation_json set storage external",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(r#"
+        with padding as materialized (
+          select jsonb_build_object('syntheticPadding',string_agg(md5(n::text),'')) payload
+          from generate_series(1,640)n
+        )
+        insert into model_requests select cloned.*
+        from model_requests original cross join generate_series(1,52000)n cross join padding
+        cross join lateral jsonb_populate_record(null::model_requests,to_jsonb(original)||jsonb_build_object(
+          'id','req_scale_'||lpad(n::text,5,'0'),
+          'started_at',$1::timestamptz+n*interval '10 seconds',
+          'completed_at',$1::timestamptz+n*interval '10 seconds'+interval '1 minute',
+          'recovery_lease_expires_at',$1::timestamptz+n*interval '10 seconds'+interval '2 minutes',
+          'downstream_committed_at',case when n%100=0 then null else $1::timestamptz+n*interval '10 seconds'+interval '1 minute' end,
+          'provider_kind','openai','provider_account_ref','acct_scale',
+          'attempt_count',case when n%200=0 then 0 else 1 end,
+          'upstream_send_state',case when n%200=0 then 'not_sent' else 'sent' end,
+          'upstream_transport',case when n%200=0 then null else 'http_sse' end,
+          'outcome',case when n%100=0 then 'failed' else 'succeeded' end,
+          'client_status_code',case when n%100=0 then 503 else 200 end,
+          'upstream_status_code',case when n%200=0 then null when n%100=0 then 503 else 200 end,
+          'error_kind',case when n%200=0 then 'provider_infrastructure_unavailable' when n%100=0 then 'upstream_error' else null end,
+          'provider_observation_json',padding.payload,
+          'request_observation_json',original.request_observation_json||jsonb_build_object('error',jsonb_build_object(
+            'providerErrorCode',case when n%200=0 then 'infrastructure_unavailable' when n%100=0 then 'server_overloaded' else null end))
+        )) cloned where original.id='scale_seed'
+    "#).bind(start).execute(&database.pool).await.unwrap();
+    sqlx::query("delete from model_requests where id='scale_seed'")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    sqlx::query("analyze model_requests")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let physical_bytes: i64 = sqlx::query_scalar("select pg_total_relation_size('model_requests')")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert!(
+        physical_bytes > 1_000_000_000,
+        "physical bytes: {physical_bytes}"
+    );
+    super::drain_analytics(&database.pool).await;
+    let range = ObservabilityRange::new(start, start + TimeDelta::days(7)).unwrap();
+    let repository = observability_repository(&database.pool);
+    let mut elapsed = serde_json::Map::new();
+    for (label, status, current_page, filter, expected_total) in [
+        (
+            "default_first_page",
+            UsageRecordStatus::Success,
+            1,
+            UsageRecordFilter::default(),
+            51_480,
+        ),
+        (
+            "all_first_page",
+            UsageRecordStatus::All,
+            1,
+            UsageRecordFilter::default(),
+            52_000,
+        ),
+        (
+            "failed_window",
+            UsageRecordStatus::Error,
+            1,
+            UsageRecordFilter::default(),
+            520,
+        ),
+        (
+            "deep_page_1040",
+            UsageRecordStatus::All,
+            1040,
+            UsageRecordFilter::default(),
+            52_000,
+        ),
+        (
+            "name_and_model",
+            UsageRecordStatus::All,
+            1,
+            UsageRecordFilter {
+                client_api_key_name: Some("历史".into()),
+                model_contains: Some("model_a".into()),
+                ..Default::default()
+            },
+            52_000,
+        ),
+        (
+            "request_id",
+            UsageRecordStatus::All,
+            1,
+            UsageRecordFilter {
+                request_id: Some("req_scale_00100".into()),
+                ..Default::default()
+            },
+            1,
+        ),
+    ] {
+        let began = Instant::now();
+        let page = repository
+            .list_usage_records(UsageRecordQuery {
+                status,
+                range,
+                filter,
+                current_page,
+                page_size: ObservabilityPageSize::new(50).unwrap(),
+            })
+            .await
+            .unwrap();
+        elapsed.insert(label.into(), serde_json::json!(began.elapsed().as_millis()));
+        assert_eq!(page.total, expected_total, "{label}");
+        assert_eq!(
+            page.items.len(),
+            usize::min(expected_total as usize, 50),
+            "{label}"
+        );
+        if current_page == 1040 {
+            assert_eq!(page.items.first().unwrap().id, "req_scale_00050");
+            assert_eq!(page.items.last().unwrap().id, "req_scale_00001");
+        }
+    }
+    let began = Instant::now();
+    let detail = repository
+        .usage_record_detail("req_scale_00100")
+        .await
+        .unwrap();
+    elapsed.insert(
+        "single_detail".into(),
+        serde_json::json!(began.elapsed().as_millis()),
+    );
+    assert_eq!(detail.request.id, "req_scale_00100");
+    let began = Instant::now();
+    let errors = repository
+        .list_ops_errors(OpsErrorQuery {
+            range,
+            filter: OpsErrorFilter::default(),
+            current_page: 1,
+            page_size: ObservabilityPageSize::new(50).unwrap(),
+        })
+        .await
+        .unwrap();
+    elapsed.insert(
+        "error_first_page".into(),
+        serde_json::json!(began.elapsed().as_millis()),
+    );
+    assert_eq!(errors.total, 520);
+    assert_eq!(errors.items.len(), 50);
+    let began = Instant::now();
+    let summary = super::admin_observability_store(&database.pool)
+        .server_error_summary(
+            TimeRange::new(range.start, range.end).unwrap(),
+            DeploymentTimeZone::default(),
+        )
+        .await
+        .unwrap();
+    elapsed.insert(
+        "server_family_summary".into(),
+        serde_json::json!(began.elapsed().as_millis()),
+    );
+    assert_eq!(summary.totals.retained_requests, 52_000);
+    assert_eq!(summary.totals.server_related_requests, 520);
+    assert_eq!(summary.totals.overloaded, 260);
+    assert_eq!(summary.totals.infrastructure503, 260);
+    eprintln!(
+        "TASK35_SCALE {}",
+        serde_json::json!({"rows":52_000,"model_requests_physical_bytes":physical_bytes,"milliseconds":elapsed,"data":"synthetic; not a production snapshot","source_commit":option_env!("GITHUB_SHA")})
+    );
+    database.close().await;
+}

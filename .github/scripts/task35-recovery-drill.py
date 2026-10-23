@@ -11,7 +11,9 @@ import uuid
 parser = argparse.ArgumentParser()
 parser.add_argument("--repo", type=Path, required=True)
 parser.add_argument("--container", required=True)
+parser.add_argument("--artifacts", type=Path, required=True)
 args = parser.parse_args()
+args.artifacts.mkdir(parents=True, exist_ok=True)
 migrations = sorted((args.repo / "backend/migrations").glob("*.sql"))
 prefix = "task35_" + uuid.uuid4().hex[:10]
 source, target, archive = prefix + "_source", prefix + "_recovery", prefix + "_archive"
@@ -19,16 +21,18 @@ command = ["docker", "exec", "-i", "--env", "PGPASSWORD=codex_proxy", args.conta
            "psql", "-X", "-U", "codex_proxy", "-d", "codex_proxy", "-A", "-t", "-v", "ON_ERROR_STOP=1"]
 
 
-def sql(text, schema=None):
-    result = subprocess.run(command, input=(f'SET search_path TO "{schema}",public;\n' if schema else "") + text,
+def sql(text, schema=None, database="codex_proxy"):
+    selected = command.copy()
+    selected[selected.index("-d") + 1] = database
+    result = subprocess.run(selected, input=(f'SET search_path TO "{schema}",public;\n' if schema else "") + text,
                             text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError(result.stderr)
     return "\n".join(line for line in result.stdout.splitlines() if line not in {"SET", "BEGIN", "COMMIT"})
 
 
-def query(text, schema=source):
-    return json.loads(sql("select coalesce(jsonb_agg(to_jsonb(q)),'[]'::jsonb) from (" + text + ") q;", schema).splitlines()[-1])
+def query(text, schema=source, database="codex_proxy"):
+    return json.loads(sql("select coalesce(jsonb_agg(to_jsonb(q)),'[]'::jsonb) from (" + text + ") q;", schema, database).splitlines()[-1])
 
 
 def apply(schema, files):
@@ -134,4 +138,23 @@ assert query("select sum(amount_usd)::text amount from client_key_charge_events"
 assert query("select id,protocol,endpoint from model_requests order by id", target) == [{"id":"req_after","protocol":"openai","endpoint":"/v1/responses"},{"id":"req_before","protocol":"openai","endpoint":"/v1/responses"}]
 assert query("select count(*) n from codex_reset_operations", target)[0]["n"] == 1
 assert query("select mode from codex_priority_accounts", archive)[0]["mode"] == "disabled"
-print(json.dumps({"source_commit":os.environ.get("GITHUB_SHA"),"source_schema":source,"recovery_schema":target,"archive_schema":archive,"migration_versions":[1,len(migrations)],"old_migration_versions":[1,32],"upgrade_seconds":round(upgrade_seconds,3),"recovery_table_counts":counts,"checks":["old failures protected","new request retained","credential revision 2 retained","quota policy revision 4 retained","ledger 0.30 retained","reset operation retained","old migration identity retained","all compatible fields equal via bidirectional EXCEPT ALL","new-only facts archived"]},indent=2))
+# 保存实际可独立还原的归档，再向另一数据库还原，不能把同库投影当作备份恢复
+recovery_database = prefix + "_restored"
+docker = ["docker", "exec", "-i", "--env", "PGPASSWORD=codex_proxy", args.container]
+dump = subprocess.run(docker + ["pg_dump", "-U", "codex_proxy", "-d", "codex_proxy", "-Fc", "--no-owner", "--schema", target, "--schema", archive], capture_output=True, check=True).stdout
+dump_path = args.artifacts / "synthetic-recovery.dump"
+dump_path.write_bytes(dump)
+sql(f'create database "{recovery_database}";')
+subprocess.run(docker + ["pg_restore", "-U", "codex_proxy", "-d", recovery_database, "--exit-on-error", "--no-owner"], input=dump, capture_output=True, check=True)
+restored_tables = {}
+for schema in [target, archive]:
+    rows = query("select tablename from pg_tables where schemaname=current_schema()", schema)
+    for row in rows:
+        table = row["tablename"]
+        expected = query(f'select * from "{table}"', schema)
+        restored = query(f'select * from "{table}"', schema, recovery_database)
+        assert sorted(expected, key=lambda v: json.dumps(v, sort_keys=True)) == sorted(restored, key=lambda v: json.dumps(v, sort_keys=True)), (schema, table)
+        restored_tables[schema + "." + table] = len(restored)
+receipt = {"source_commit":os.environ.get("GITHUB_SHA"),"source_schema":source,"recovery_schema":target,"archive_schema":archive,"restored_database":recovery_database,"dump_file":dump_path.name,"dump_bytes":len(dump),"restored_tables":restored_tables,"migration_versions":[1,len(migrations)],"old_migration_versions":[1,32],"upgrade_seconds":round(upgrade_seconds,3),"recovery_table_counts":counts,"checks":["old failures protected","new request retained","credential revision 2 retained","quota policy revision 4 retained","ledger 0.30 retained","reset operation retained","old migration identity retained","all compatible fields equal via bidirectional EXCEPT ALL","new-only facts archived","pg_dump custom archive restored into independent database","all restored old-compatible and new-only table values equal"]}
+(args.artifacts / "task35-recovery.json").write_text(json.dumps(receipt,indent=2),encoding="utf-8")
+print(json.dumps(receipt,indent=2))

@@ -55,7 +55,7 @@ with base as materialized (
     bool_or(f.legacy_message) legacy_message
   from base b join flags f on f.request_id=b.id group by b.id,b.started_at,b.client_status_code
 ), counts as (
-  select (started_at at time zone $3)::date::text day,
+  select (started_at at time zone $3)::date::text as "day",
     count(*) "retainedRequests",count(*) filter(where server_related) "serverRelatedRequests",
     count(*) filter(where terminal_related) "terminalServerRelatedRequests",
     count(*) filter(where overloaded) overloaded,count(*) filter(where status503) "status503",

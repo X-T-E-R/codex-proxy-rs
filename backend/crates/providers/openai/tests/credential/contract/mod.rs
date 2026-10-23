@@ -476,6 +476,39 @@ fn selector_uses_the_account_concurrency_override_for_the_redis_lease() {
 }
 
 #[test]
+fn selected_reload_accepts_observation_advance_rejected_by_strict_runtime_load() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let original = store.account("acct_primary").unwrap();
+    let observed_at = SystemTime::now();
+    block_on(store.apply_quota_access(QuotaAccessChange {
+        account_id: original.id().clone(),
+        expected_revision: original.revision(),
+        state: QuotaState::allowed(observed_at),
+    }))
+    .unwrap();
+    let selected = store.account("acct_primary").unwrap();
+    block_on(store.apply_quota_access(QuotaAccessChange {
+        account_id: selected.id().clone(),
+        expected_revision: selected.revision(),
+        state: QuotaState::allowed(observed_at + Duration::from_millis(1)),
+    }))
+    .unwrap();
+    let current = store.account("acct_primary").unwrap();
+    assert_eq!(selected.revision(), current.revision());
+    assert_ne!(selected, current);
+
+    // 严格读取保留原合同，选号读取只放行不改变访问结论的 quota 观测推进
+    let repository = store.repository();
+    assert!(matches!(
+        block_on(repository.load_runtime_credential(&selected)),
+        Err(provider_openai::credential::CredentialRepositoryError::RevisionConflict(_))
+    ));
+    let (reloaded, _) = block_on(repository.reload_selected_credential(&selected)).unwrap();
+    assert_eq!(reloaded, current);
+}
+
+#[test]
 fn selector_reloads_quota_snapshot_before_acquiring_the_only_lease() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_primary", "at-primary");

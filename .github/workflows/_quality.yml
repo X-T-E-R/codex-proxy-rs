@@ -171,6 +171,26 @@ jobs:
           done
           echo "$client_dir" >> "$GITHUB_PATH"
 
+      - name: Task35 synthetic query scale rehearsal
+        if: github.ref == 'refs/heads/task35/upgrade-20261023'
+        working-directory: backend
+        shell: bash
+        run: |
+          cargo nextest run \
+            --cargo-metadata "$RUNNER_TEMP/nextest-cargo-metadata.json" \
+            --binaries-metadata "$RUNNER_TEMP/nextest-binaries.json" \
+            --run-ignored only --success-output immediate --no-tests fail \
+            -E 'test(=postgres::usage_paging::usage_scale_rehearsal_covers_pages_filters_details_and_error_summary)' \
+            2>&1 | tee "$RUNNER_TEMP/task35-query-scale.log"
+
+      - name: Preserve Task35 query scale receipt
+        if: github.ref == 'refs/heads/task35/upgrade-20261023'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task35-query-scale-${{ github.sha }}
+          path: ${{ runner.temp }}/task35-query-scale.log
+          if-no-files-found: error
+
       - name: Rust tests
         working-directory: backend
         run: |

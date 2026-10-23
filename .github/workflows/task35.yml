@@ -37,10 +37,10 @@ jobs:
         shell: bash
         env:
           CPR_DRILL_CONTAINER: ${{ job.services.postgres.id }}
-        run: python .github/scripts/task35-recovery-drill.py --repo . --container "$CPR_DRILL_CONTAINER" | tee "$RUNNER_TEMP/task35-recovery.json"
+        run: python .github/scripts/task35-recovery-drill.py --repo . --container "$CPR_DRILL_CONTAINER" --artifacts "$RUNNER_TEMP/task35-recovery"
       - name: Preserve synthetic recovery receipt
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: task35-recovery-${{ github.sha }}
-          path: ${{ runner.temp }}/task35-recovery.json
+          path: ${{ runner.temp }}/task35-recovery/
           if-no-files-found: error
