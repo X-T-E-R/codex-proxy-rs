@@ -68,6 +68,22 @@ run(['docker','exec','--env','PGPASSWORD=codex_proxy',args.postgres,
      'psql','-X','-U','codex_proxy','-d',database,'-v','ON_ERROR_STOP=1',
      '-c',"alter role codex_proxy password '"+'a'*48+"';"])
 run(['docker','exec',args.redis,'redis-cli','CONFIG','SET','requirepass','b'*48])
+# 旧writer不识别52的保护表；先覆盖全部现存记录年龄并留7天恢复缓冲
+retention_fields = 'usage_retention_days,ops_event_retention_days,audit_retention_days'
+def retention():
+    return json.loads(sql(f'SET search_path TO "{schema}",public;select row_to_json(r) from (select {retention_fields} from runtime_settings)r;').splitlines()[-1])
+retention_before = retention()
+sql(f'''SET search_path TO "{schema}",public;
+update runtime_settings set
+ usage_retention_days=greatest(usage_retention_days,
+   (select ceil(extract(epoch from (now()-min(t)))/86400)::bigint+7 from
+     (select completed_at t from model_requests union all select coalesce(observed_at,sent_at) from request_turn_state_observations)ages)),
+ ops_event_retention_days=greatest(ops_event_retention_days,
+   (select ceil(extract(epoch from (now()-min(created_at)))/86400)::bigint+7 from ops_events)),
+ audit_retention_days=greatest(audit_retention_days,
+   (select ceil(extract(epoch from (now()-min(created_at)))/86400)::bigint+7 from admin_audit_events));''')
+receipt['old_binary_retention_safety'] = {'before':retention_before,'after':retention(),
+    'contract':'prestart widen retention to oldest retained row age plus 7 days; original settings remain in archive; release is a separate operator decision'}
 began = time.monotonic()
 health_status = None
 try:
