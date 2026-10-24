@@ -153,3 +153,15 @@ async fn execute(
     store.shutdown_command_line_writes().await?;
     result
 }
+
+/// 站点停止闸调用：JSON 走 stdin，认证由原配置加载器消费，绝不打印配置值
+pub async fn site_recovery_redis() -> Result<String, BootstrapError> {
+    use std::io::Read as _;
+    let mut input = Vec::new();
+    std::io::stdin()
+        .take(2 * 1024 * 1024 + 1)
+        .read_to_end(&mut input)
+        .map_err(|_| gateway_host::ConfigError::InvalidField("recovery input"))?;
+    let config = gateway_host::load_config::<GatewayConfig>()?;
+    Ok(gateway_store::redis::site_recovery_redis(&config.store, &input).await?)
+}

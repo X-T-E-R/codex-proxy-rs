@@ -6,7 +6,7 @@ mod plugins;
 mod server;
 mod startup;
 
-pub use command::{PluginCommand, plugin_command};
+pub use command::{PluginCommand, plugin_command, site_recovery_redis};
 pub use config::GatewayConfig;
 pub use server::run;
 

@@ -13,4 +13,5 @@ mod native_continuation;
 mod oauth_pending;
 mod provider_session_affinity;
 mod provider_session_exclusion;
+mod site_recovery;
 mod worker_lease;

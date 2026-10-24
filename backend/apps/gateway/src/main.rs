@@ -39,7 +39,7 @@ fn run() -> Result<ExitCode, Box<dyn Error + Send + Sync>> {
         Some("help" | "--help" | "-h") => {
             reject_extra_arguments(arguments)?;
             println!(
-                "Usage: codex-proxy-rs [serve]\n       codex-proxy-rs plugin <instance-id> <command> [options]\n\n  --help     Show help without loading configuration\n  --version  Show version\n  plugin --help  List enabled plugin commands without starting HTTP"
+                "Usage: codex-proxy-rs [serve]\n       codex-proxy-rs plugin <instance-id> <command> [options]\n\n  --help     Show help without loading configuration\n  --version  Show version\n  plugin --help  List enabled plugin commands without starting HTTP\n  site-recovery-redis  Read one typed recovery JSON from stdin using normal Redis configuration (no HTTP/PG)"
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -49,6 +49,12 @@ fn run() -> Result<ExitCode, Box<dyn Error + Send + Sync>> {
                 "{}",
                 option_env!("CPR_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
             );
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("site-recovery-redis") => {
+            reject_extra_arguments(arguments)?;
+            let output = runtime()?.block_on(codex_proxy_rs::bootstrap::site_recovery_redis())?;
+            io::stdout().lock().write_all(output.as_bytes())?;
             Ok(ExitCode::SUCCESS)
         }
         Some("plugin") => {
@@ -80,7 +86,7 @@ fn run() -> Result<ExitCode, Box<dyn Error + Send + Sync>> {
             io::stderr().lock().write_all(output.stderr.as_bytes())?;
             Ok(ExitCode::from(output.exit_code))
         }
-        Some(_) => Err(invalid_cli("unknown command; expected serve, plugin, or --help").into()),
+        Some(_) => Err(invalid_cli("unknown command; use --help to list commands").into()),
     }
 }
 

@@ -10,6 +10,9 @@ inputs:
   artifact-name:
     description: Unique diagnostics artifact name within the workflow run
     required: true
+  verify-site-recovery:
+    description: Exercise the single-deployment pre-start guard in the isolated stopped runtime
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -201,6 +204,14 @@ runs:
           echo "container logs contain a warning or error severity" >&2
           exit 1
         fi
+
+    - name: Verify stopped single-deployment recovery
+      if: inputs.verify-site-recovery == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m unittest discover -s deploy/tests -v
+        python .github/scripts/site-recovery-smoke.py | tee "$DIAGNOSTICS_DIR/site-recovery.json"
 
     - name: Collect container diagnostics
       if: always()

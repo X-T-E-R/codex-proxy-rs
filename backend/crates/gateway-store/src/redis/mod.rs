@@ -18,6 +18,7 @@ mod oauth_pending;
 mod provider_session_affinity;
 mod provider_session_exclusion;
 mod runtime_change;
+mod site_recovery;
 pub(crate) mod worker_lease;
 
 pub use admin_account_runtime::*;
@@ -34,6 +35,7 @@ pub use oauth_pending::*;
 pub use provider_session_affinity::*;
 pub use provider_session_exclusion::*;
 pub use runtime_change::*;
+pub use site_recovery::{SiteRecoveryRedis, site_recovery_redis};
 
 use crate::{StoreError, StoreResult, require_nonempty};
 

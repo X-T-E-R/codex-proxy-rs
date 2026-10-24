@@ -457,6 +457,27 @@ WebSocket 会话完成，进程退出时强制断开剩余连接。已入队的�
 Compose 的 `stop_grace_period` 为 75 秒，覆盖默认 30 秒后台收尾及进程清理余量。
 调大后台关闭预算时，也必须同步预留容器停止宽限期，否则 Docker 会在宽限期结束时 SIGKILL
 
+### 单部署 pre-start 恢复
+
+`deploy/site-recovery.py` 供站点启动器在旧容器确定退出后、下次启动前调用。
+它只适用于独占同一 PostgreSQL/Redis 的单部署：启动器须持有生命周期锁，禁止 Docker 自动重启，
+并用维护闸阻止其它入口同时启动；默认 Compose 不启用此入口。不能在多实例部署中根据本机旧容器退出终结请求
+
+启动器提供旧容器完整 ID、按该次 `StartedAt`/`FinishedAt` 分配的持久 receipt 路径，
+以及 `--pg-command-json` 和 `--redis-helper-command-json` 两个 JSON argv 数组。
+PG 使用既有 `psql` peer/服务认证；Redis 使用同一配置和候选镜像运行
+`codex-proxy-rs site-recovery-redis`，例如 Compose 的 `run --rm -T --no-deps`，而不是 `exec` 已停容器。
+认证值只能来自服务配置或继承环境，不放入 argv、receipt 或输出
+
+传 `--ack-single-deployment` 确认站点前提，先不带 `--apply` 准备 manifest；
+再次以相同 receipt 加 `--apply` 后，只按 ID、Key、开始时间和租约 expiry 的精确 CAS 终结 manifest 中的运行请求，
+再释放有关联元数据的账号普通/保留池槽及对应 Client 活跃槽。RPM、账本、会话绑定和配额重置不变；
+无法关联的槽保留原 TTL。此入口不重放请求，也不把送达未知的请求改成未发送
+
+仅退出码 0 且 stdout 单个 JSON 的 `phase` 为 `complete` 时，启动器才可再次检查旧代际并启动。
+认证、其它数据库 client、运行中容器或 CAS 失配都会拒绝；PG 提交后中断时保留同一 receipt 续作，
+不要删 receipt 后重新准备。`complete` 表示该 manifest 已处理，不表示所有无归属 Redis 槽已清空
+
 ## 本地开发
 
 源码环境、前后端启动与组件库联调见 [开发与源码联调](../docs/development.md)
