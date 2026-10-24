@@ -12,6 +12,7 @@ import {
 } from '@/api'
 import { useStablePagedQuery } from '@/composables/useStablePagedQuery'
 import { withMinimumDuration } from '@/utils/operation'
+import { useRunningPoll } from './useRunningPoll'
 
 interface UseUsageRecordsTableOptions {
   timeRangeParams: Readonly<Ref<UsageTimeRangeParams>>
@@ -193,6 +194,26 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     resetTable(asOf)
     return loadUsageRecords({ scope: 'table' })
   }
+
+  // 当前页只要还有进行中的记录就按固定间隔重取列表，全部转终态即停
+  const hasRunningRecords = computed(() => records.value.some(record => record.logicalOutcome === 'running'))
+  const runningPoll = useRunningPoll({
+    shouldRun: () => hasRunningRecords.value,
+    refresh: async () => {
+      // 用户主动刷新或翻页在飞时让位，避免轮询取消用户的请求或写回旧页数据
+      if (loading.value || refreshingList.value)
+        return
+      // 沿用当前窗口与筛选，只把屏上记录更新到最新状态
+      await table.execute(currentPage.value, { silent: true })
+    },
+  })
+
+  watch(hasRunningRecords, (running) => {
+    if (running)
+      runningPoll.start()
+    else
+      runningPoll.stop()
+  })
 
   function handlePageChange(nextPage: number) {
     if (filterChanged()) {
