@@ -328,8 +328,7 @@ fn high_priority_waiters_still_require_queueing_to_be_enabled() {
     });
 }
 
-/// 绑定会话的定时重查决定整轮重选的频率：单次等待最多 500ms 一次，
-/// 跨实例释放的容量最迟 500ms 被发现，而本地队列位置变化仍由 waker 立即完成
+/// 已在队首的绑定会话仍需按 500ms 周期重查，不能立即返回形成忙循环
 #[test]
 fn bound_session_recheck_waits_about_the_poll_interval() {
     block_on(async {
@@ -350,7 +349,7 @@ fn bound_session_recheck_waits_about_the_poll_interval() {
         waiting.wait(&["account"]).await.unwrap();
         let elapsed = started.elapsed();
         assert!(
-            elapsed >= Duration::from_millis(450),
+            elapsed >= Duration::from_millis(500),
             "periodic recheck must not spin: {elapsed:?}"
         );
         assert!(
@@ -361,21 +360,88 @@ fn bound_session_recheck_waits_about_the_poll_interval() {
     });
 }
 
-/// 放宽定时重查不能拖慢本进程内的队首交接
+/// 真实周期重查路径必须在本地交接后的下一次 poll 完成，不依赖计时精度
 #[test]
-fn releasing_the_head_wakes_the_next_waiter_well_before_the_poll_interval() {
+fn periodic_capacity_wait_wakes_when_the_local_head_is_released() {
+    use std::future::Future as _;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::{Context, Poll, Wake};
+
+    #[derive(Default)]
+    struct WakeFlag(AtomicBool);
+    impl Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     block_on(async {
         let queue = ConcurrencyWaitQueue::default();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let head = queue.enqueue(&["account"], 2, deadline).unwrap();
-        let next = queue.enqueue(&["account"], 2, deadline).unwrap();
-        let started = Instant::now();
-        drop(head);
-        next.turn().await.unwrap();
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(400),
-            "waker handover must not wait for the poll interval: {elapsed:?}"
+        let head = queue
+            .enqueue(&["account"], 2, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let budget = ConcurrencyWaitBudget::default();
+        let mut next = CapacityWait::new(
+            &queue,
+            ConcurrencyQueuePolicy {
+                max_waiting: 2,
+                timeout: Duration::from_secs(5),
+            },
+            None,
+            &budget,
+        )
+        .with_periodic_recheck(true);
+        {
+            let wake = Arc::new(WakeFlag::default());
+            let waker = std::task::Waker::from(Arc::clone(&wake));
+            let mut context = Context::from_waker(&waker);
+            let mut waiting = std::pin::pin!(next.wait(&["account"]));
+            assert!(waiting.as_mut().poll(&mut context).is_pending());
+            drop(head);
+            assert!(wake.0.load(Ordering::SeqCst), "本地交接必须实际唤醒等待者");
+            assert_eq!(waiting.as_mut().poll(&mut context), Poll::Ready(Ok(())));
+        }
+        assert!(next.can_try(&"account"));
+        // 已在队首但仍无容量时必须等待下一个周期，不能因 turn() 就绪而空转
+        assert!(next.wait(&["account"]).now_or_never().is_none());
+        drop(next);
+        assert!(!queue.has_waiters(&"account"), "取消释放等待位置");
+    });
+}
+
+/// 排队预算短于重查周期时仍按原截止失败，不能等满 500ms 或取得后序账号资格
+#[test]
+fn periodic_capacity_wait_preserves_a_shorter_queue_deadline() {
+    block_on(async {
+        let queue = ConcurrencyWaitQueue::default();
+        let head = queue
+            .enqueue(&["account"], 2, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        let budget = ConcurrencyWaitBudget::default();
+        let mut waiting = CapacityWait::new(
+            &queue,
+            ConcurrencyQueuePolicy {
+                max_waiting: 2,
+                timeout: Duration::from_millis(20),
+            },
+            None,
+            &budget,
+        )
+        .with_periodic_recheck(true);
+        assert_eq!(
+            waiting.wait(&["account"]).await,
+            Err(QueueRejection::Timeout)
         );
+        assert!(!waiting.can_try(&"account"));
+        drop(waiting);
+        assert!(queue.has_waiters(&"account"));
+        drop(head);
+        assert!(!queue.has_waiters(&"account"));
     });
 }

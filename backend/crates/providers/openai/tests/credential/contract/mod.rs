@@ -61,6 +61,10 @@ fn contract_account_scope() -> Arc<FrozenAccountScope> {
     let provider = ProviderKind::new("openai").expect("provider");
     let accounts = [
         "acct_available",
+        "acct_cancel_affinity",
+        "acct_dead_admit",
+        "acct_dead_affinity",
+        "acct_failed_affinity",
         "acct_fallback",
         "acct_fallback_signal",
         "acct_first",
@@ -965,12 +969,11 @@ fn contract_request_url() -> Url {
     Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL")
 }
 
-// 生产 07:38–07:42 的 89 条未发送基础设施失败来自 100ms 会话亲和预算：
-// 2 vCPU 高 PSI 下健康 Redis 往返被调度推迟到 100ms 以上就会被判成存储不可用
+// 存储结果健康但调度往返超过 100ms 时，仍须完成绑定而不是提前判成不可用
 #[tokio::test]
 async fn selector_should_survive_a_slow_but_healthy_affinity_lookup() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_slow_affinity", "at-slow-affinity");
+    create_account(&store, "acct_first", "at-slow-affinity");
     let affinity = Arc::new(MemorySessionAffinity::with_load_delay(
         Duration::from_millis(150),
     ));
@@ -1162,24 +1165,22 @@ async fn cancelling_selection_drops_a_slow_affinity_lookup() {
     let request_attempt = attempt_with_cancellation(cancellation.clone());
     let request_url = contract_request_url();
 
-    let selection = selector.select(&SelectCodexCredential {
+    let request = SelectCodexCredential {
         upstream_model: "gpt-5.4",
         request_url: &request_url,
         attempt: &request_attempt,
         session_affinity_key: Some(&key),
-    });
-    let trigger = cancellation.clone();
-    let cancelling = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        trigger.cancel();
-    });
-
-    let error = selection
-        .await
-        .expect_err("cancelled selection must not wait for the budget");
-    cancelling.await.expect("cancellation trigger");
-
-    assert!(matches!(error, CredentialSelectionError::Cancelled));
+    };
+    let mut selection = std::pin::pin!(selector.select(&request));
+    assert!(futures::poll!(&mut selection).is_pending());
+    cancellation.cancel();
+    assert!(
+        matches!(
+            futures::poll!(&mut selection),
+            std::task::Poll::Ready(Err(CredentialSelectionError::Cancelled))
+        ),
+        "cancellation must complete on the next poll, without waiting for the budget"
+    );
     assert_eq!(affinity.binding_count(), 0);
 }
 

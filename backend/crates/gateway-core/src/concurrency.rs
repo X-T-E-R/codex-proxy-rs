@@ -359,11 +359,23 @@ impl<'a, K: Clone + Eq + Hash> CapacityWait<'a, K> {
         }
         if let Some(ticket) = &self.ticket {
             if self.periodic_recheck {
-                Delay::new(
+                let recheck = Delay::new(
                     BOUND_SESSION_RECHECK_INTERVAL
                         .min(ticket.deadline.saturating_duration_since(Instant::now())),
                 )
-                .await;
+                .fuse();
+                if ticket.is_head() {
+                    // 已在队首但无容量时只定时重查，不能因 turn() 立即完成而空转
+                    recheck.await;
+                } else {
+                    // 非队首同时监听本地交接与外部绑定变化，取消时直接释放两个 future
+                    let turn = ticket.turn().fuse();
+                    pin_mut!(recheck, turn);
+                    select_biased! {
+                        result = turn => result?,
+                        () = recheck => {},
+                    }
+                }
                 if Instant::now() >= ticket.deadline {
                     return Err(QueueRejection::Timeout);
                 }
