@@ -154,6 +154,64 @@ impl OtherRequestOutcome {
     }
 }
 
+/// 请求错误筛选使用的稳定错误分类
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UsageErrorType {
+    Overloaded,
+    Status503,
+    RateLimited,
+    UpstreamUnavailable,
+    Timeout,
+    NoAvailableProvider,
+    CapacityUnavailable,
+    ProviderInfrastructureUnavailable,
+    Unauthorized,
+    ContinuationRecoveryRequired,
+    InvalidRequest,
+    ProcessInterrupted,
+}
+
+impl UsageErrorType {
+    /// 解析稳定错误分类值
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "overloaded" => Some(Self::Overloaded),
+            "status_503" => Some(Self::Status503),
+            "rate_limited" => Some(Self::RateLimited),
+            "upstream_unavailable" => Some(Self::UpstreamUnavailable),
+            "timeout" => Some(Self::Timeout),
+            "no_available_provider" => Some(Self::NoAvailableProvider),
+            "capacity_unavailable" => Some(Self::CapacityUnavailable),
+            "provider_infrastructure_unavailable" => Some(Self::ProviderInfrastructureUnavailable),
+            "unauthorized" => Some(Self::Unauthorized),
+            "continuation_recovery_required" => Some(Self::ContinuationRecoveryRequired),
+            "invalid_request" => Some(Self::InvalidRequest),
+            "process_interrupted" => Some(Self::ProcessInterrupted),
+            _ => None,
+        }
+    }
+
+    /// 返回稳定错误分类值
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Overloaded => "overloaded",
+            Self::Status503 => "status_503",
+            Self::RateLimited => "rate_limited",
+            Self::UpstreamUnavailable => "upstream_unavailable",
+            Self::Timeout => "timeout",
+            Self::NoAvailableProvider => "no_available_provider",
+            Self::CapacityUnavailable => "capacity_unavailable",
+            Self::ProviderInfrastructureUnavailable => "provider_infrastructure_unavailable",
+            Self::Unauthorized => "unauthorized",
+            Self::ContinuationRecoveryRequired => "continuation_recovery_required",
+            Self::InvalidRequest => "invalid_request",
+            Self::ProcessInterrupted => "process_interrupted",
+        }
+    }
+}
+
 /// 用量记录过滤条件
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct UsageFilter {
@@ -173,6 +231,8 @@ pub struct UsageFilter {
     pub response_id: Option<String>,
     pub upstream_request_id: Option<String>,
     pub search: Option<String>,
+    pub error: Option<String>,
+    pub error_types: Vec<UsageErrorType>,
 }
 
 /// 请求列表的结果筛选，不改变汇总和计量口径

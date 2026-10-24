@@ -22,7 +22,7 @@ impl ObservabilityRange {
     }
 }
 
-pub use gateway_admin::model::observability::ObservabilityPageSize;
+pub use gateway_admin::model::observability::{ObservabilityPageSize, UsageErrorType};
 
 pub(crate) fn observability_page_offset(
     current_page: u32,
@@ -55,6 +55,8 @@ pub struct UsageRecordFilter {
     pub response_id: Option<String>,
     pub upstream_request_id: Option<String>,
     pub search: Option<String>,
+    pub error: Option<String>,
+    pub error_types: Vec<UsageErrorType>,
 }
 
 impl UsageRecordFilter {
@@ -88,6 +90,7 @@ impl UsageRecordFilter {
             validate_optional_text(value, MAX_FILTER_BYTES, field)?;
         }
         validate_optional_text(self.search.as_deref(), MAX_SEARCH_BYTES, "search filter")?;
+        validate_optional_text(self.error.as_deref(), MAX_SEARCH_BYTES, "error filter")?;
         if self
             .status_code
             .is_some_and(|status| !(100..=599).contains(&status))

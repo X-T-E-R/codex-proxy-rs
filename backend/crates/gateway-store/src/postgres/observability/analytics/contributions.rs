@@ -37,6 +37,8 @@ impl AnalyticsSnapshot<'_> {
             || filter.status_code.is_some()
             || filter.outcome.is_some()
             || filter.search.is_some()
+            || filter.error.is_some()
+            || !filter.error_types.is_empty()
             || filter.model_contains.is_some()
             || filter.client_api_key_name.is_some()
             || filter.provider_account_name.is_some()

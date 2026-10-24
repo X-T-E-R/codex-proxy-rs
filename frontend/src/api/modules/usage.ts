@@ -80,6 +80,23 @@ export interface UsageRecordMetadata {
 
 export type UsageRecordStatus = 'success' | 'error' | 'all'
 
+export const USAGE_ERROR_TYPES = [
+  'overloaded',
+  'status_503',
+  'rate_limited',
+  'upstream_unavailable',
+  'timeout',
+  'no_available_provider',
+  'capacity_unavailable',
+  'provider_infrastructure_unavailable',
+  'unauthorized',
+  'continuation_recovery_required',
+  'invalid_request',
+  'process_interrupted',
+] as const
+
+export type UsageErrorType = (typeof USAGE_ERROR_TYPES)[number]
+
 export interface UsageListRecord {
   logicalOutcome: string
   errorCode: string | null
@@ -388,6 +405,8 @@ type UsagePageQuery = UsageRangeQuery & PageQuery & {
   upstreamRequestId?: string
   responseId?: string
   search?: string
+  error?: string
+  errorTypes?: string
   statusCode?: number
   clientApiKeyName?: string
   accountName?: string

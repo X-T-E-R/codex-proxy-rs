@@ -2064,12 +2064,20 @@ Dashboard 的 `accountUsage[]` 由后端提供 `usageWindow`、`metricLabel`、`
 Dashboard 默认 `period=today`，用量、诊断和错误查询默认 `period=7d`，范围参数遵循[页面时间合同](#页面时间合同)。
 Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚点
 
-请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountName`、`model`、`status`，
-以及 `requestId`、`upstreamRequestId`、`responseId` 精确定位、`search` 前缀搜索和 `statusCode` 筛选。
-汇总和洞察只接受时间范围与 `provider`；诊断另接受 `dimension`、`model` 和 `statusCode`。
+请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountName`、`model`、`error`、`errorTypes`、`status`，
+以及 `requestId`、`upstreamRequestId`、`responseId` 精确定位、`search` 搜索和 `statusCode` 筛选
+
+`error` 按错误码、错误分类、错误消息、状态码或常见中英文错误词（如 `过载`、`overloaded`）匹配请求终态及保留的中间尝试事件，
+最多 512 字节且不允许控制字符，首尾空白忽略，空值不参与筛选。
+`search` 对模型、账号和 Key 名称保留前缀搜索，同时支持上述错误搜索。
+`errorTypes` 接受逗号分隔的错误类型枚举（`overloaded`、`status_503`、`rate_limited`、`upstream_unavailable`、`timeout`、`no_available_provider`、`capacity_unavailable`、`provider_infrastructure_unavailable`、`unauthorized`、`continuation_recovery_required`、`invalid_request`、`process_interrupted`），
+忽略空项和重复项，未知值返回 `400`。多选之间为 OR，与其他筛选条件为 AND
+
+汇总和洞察只接受时间范围与 `provider`，诊断另接受 `dimension`、`model` 和 `statusCode`。
 各接口拒绝未知参数，明细筛选不改变顶部统计范围
 
-请求列表的 `status` 可取 `success`、`error`、`all`，默认 `success`；带上述定位、搜索或状态码筛选且未显式指定 `status` 时默认 `all`，避免漏掉失败记录。未知值返回 `400`。
+请求列表的 `status` 可取 `success`、`error`、`all`，未知值返回 `400`。
+未显式指定时，带精确定位、`search` 或 `statusCode` 的查询默认 `all`，否则带非空 `error` 或 `errorTypes` 的查询默认 `error`，其余默认 `success`。
 `success` 沿用成功用量记录范围，`error` 包含最终 `failed`、`incomplete` 的请求，
 `all` 合并成功用量记录及全部非成功请求，包括执行中和已取消请求。每个请求只返回一行，
 重试中间错误不改变请求最终分类；`logicalOutcome` 保留真实结果。状态筛选只影响明细列表，

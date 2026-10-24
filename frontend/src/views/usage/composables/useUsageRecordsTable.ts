@@ -1,6 +1,6 @@
 import type { Ref } from 'vue'
 import type { UsageTimeRangeParams } from './useUsageTimeRange'
-import type { UsageRecordStatus } from '@/api'
+import type { UsageErrorType, UsageRecordStatus } from '@/api'
 import type { AnalyticsMetadata } from '@/api/modules/analytics'
 
 import { computed, onMounted, onScopeDispose, shallowRef, watch } from 'vue'
@@ -21,7 +21,7 @@ interface UseUsageRecordsTableOptions {
 }
 
 type UsageLoadScope = 'all' | 'table'
-export type UsageRecordFilterField = 'key' | 'account' | 'model' | 'requestId' | 'upstreamRequestId' | 'responseId'
+export type UsageRecordFilterField = 'key' | 'account' | 'model' | 'error' | 'requestId' | 'upstreamRequestId' | 'responseId'
 // 精确 ID 定位不携带 status，后端据此同时查成功与失败
 export function isUsageLocatorField(field: UsageRecordFilterField): boolean {
   return field === 'requestId' || field === 'upstreamRequestId' || field === 'responseId'
@@ -38,8 +38,10 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   const insights = shallowRef(emptyInsights())
   const filterField = shallowRef<UsageRecordFilterField>('key')
   const filterValue = shallowRef('')
+  const errorTypes = shallowRef<UsageErrorType[]>([])
   const filterParams = computed(() => {
     const value = filterValue.value.trim() || undefined
+    const selectedErrorTypes = errorTypes.value.length > 0 ? errorTypes.value.join(',') : undefined
     return {
       requestId: filterField.value === 'requestId' ? value : undefined,
       upstreamRequestId: filterField.value === 'upstreamRequestId' ? value : undefined,
@@ -47,6 +49,8 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
       clientApiKeyName: filterField.value === 'key' ? value : undefined,
       accountName: filterField.value === 'account' ? value : undefined,
       model: filterField.value === 'model' ? value : undefined,
+      error: filterField.value === 'error' ? value : undefined,
+      errorTypes: selectedErrorTypes,
     }
   })
   const providerQuery = shallowRef('')
@@ -90,6 +94,8 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
       || tableParams.clientApiKeyName !== filter.clientApiKeyName
       || tableParams.accountName !== filter.accountName
       || tableParams.model !== filter.model
+      || tableParams.error !== filter.error
+      || tableParams.errorTypes !== filter.errorTypes
   }
 
   function resetTable(asOf?: number) {
@@ -272,6 +278,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
     pageSize,
     filterField,
     filterValue,
+    errorTypes,
     providerQuery,
     usagePagination,
     loading,

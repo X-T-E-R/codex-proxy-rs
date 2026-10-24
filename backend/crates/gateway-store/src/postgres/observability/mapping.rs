@@ -33,6 +33,8 @@ pub(crate) fn store_usage_filter(filter: admin_observability::UsageFilter) -> Us
         response_id: filter.response_id,
         upstream_request_id: filter.upstream_request_id,
         search: filter.search,
+        error: filter.error,
+        error_types: filter.error_types,
     }
 }
 

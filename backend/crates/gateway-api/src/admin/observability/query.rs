@@ -1,11 +1,14 @@
 //! 查询 wire 类型、校验与领域命令映射
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 /// 观测列表默认页大小
 pub const DEFAULT_PAGE_SIZE: u16 = 50;
 /// 观测列表允许的最大页大小
 pub const MAX_PAGE_SIZE: u16 = DomainPageSize::MAX;
+const MAX_ERROR_BYTES: usize = 512;
 
 /// Dashboard 查询参数
 #[derive(Clone, Default, Deserialize)]
@@ -33,6 +36,8 @@ pub struct UsageQuery {
     pub upstream_request_id: Option<String>,
     pub response_id: Option<String>,
     pub search: Option<String>,
+    pub error: Option<String>,
+    pub error_types: Option<String>,
     pub status_code: Option<i64>,
     pub client_api_key_name: Option<String>,
     pub account_name: Option<String>,
@@ -284,12 +289,48 @@ pub(crate) fn dashboard_today_range(
     crate::time::query_range(start, end, period, as_of, timezone, "today")
 }
 
+fn parse_error(value: Option<&str>) -> Result<Option<String>, WireValidationError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.len() > MAX_ERROR_BYTES || value.chars().any(char::is_control) {
+        return Err(WireValidationError::new("error"));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_owned()))
+    }
+}
+
+fn parse_error_types(
+    value: Option<&str>,
+) -> Result<Vec<domain::UsageErrorType>, WireValidationError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let mut error_types = BTreeSet::new();
+    for token in value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let error_type = domain::UsageErrorType::parse(token)
+            .ok_or_else(|| WireValidationError::new("errorTypes"))?;
+        error_types.insert(error_type);
+    }
+    Ok(error_types.into_iter().collect())
+}
+
 pub(crate) fn usage_filter(query: &UsageQuery) -> Result<domain::UsageFilter, WireValidationError> {
     Ok(domain::UsageFilter {
         request_id: non_empty(query.request_id.clone()),
         upstream_request_id: non_empty(query.upstream_request_id.clone()),
         response_id: non_empty(query.response_id.clone()),
         search: non_empty(query.search.clone()),
+        error: parse_error(query.error.as_deref())?,
+        error_types: parse_error_types(query.error_types.as_deref())?,
         status_code: parse_status(query.status_code)?,
         client_api_key_name: non_empty(query.client_api_key_name.clone()),
         provider_account_name: non_empty(query.account_name.clone()),
@@ -312,9 +353,11 @@ pub(crate) fn usage_command(
         || filter.response_id.is_some()
         || filter.search.is_some()
         || filter.status_code.is_some();
+    let has_error_filter = filter.error.is_some() || !filter.error_types.is_empty();
     Ok(domain::UsageQuery {
         status: match query.status.as_deref() {
             None if locating => domain::UsageRecordStatus::All,
+            None if has_error_filter => domain::UsageRecordStatus::Error,
             None | Some("success") => domain::UsageRecordStatus::Success,
             Some("error") => domain::UsageRecordStatus::Error,
             Some("all") => domain::UsageRecordStatus::All,

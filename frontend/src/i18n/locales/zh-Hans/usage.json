@@ -136,6 +136,22 @@
     },
     "filters": {
       "error": "错误",
+      "errorType": "错误类型",
+      "errorTypePlaceholder": "筛选错误类型",
+      "errorTypes": {
+        "overloaded": "服务过载",
+        "status503": "503 响应",
+        "rateLimited": "限流与配额耗尽",
+        "upstreamUnavailable": "上游服务不可用",
+        "timeout": "请求超时",
+        "noAvailableProvider": "无可用账号或渠道",
+        "capacityUnavailable": "并发与容量受限",
+        "providerInfrastructureUnavailable": "基础设施不可用",
+        "unauthorized": "认证与权限失败",
+        "continuationRecoveryRequired": "续接状态失效",
+        "invalidRequest": "请求无效或超限",
+        "processInterrupted": "异常中断或内部错误"
+      },
       "requestDetailType": "请求明细类型",
       "label": "使用记录筛选与操作",
       "refreshUsageHistory": "刷新使用记录",

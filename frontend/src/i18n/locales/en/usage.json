@@ -136,6 +136,22 @@
     },
     "filters": {
       "error": "Error",
+      "errorType": "Error type",
+      "errorTypePlaceholder": "Filter error types",
+      "errorTypes": {
+        "overloaded": "Server overloaded",
+        "status503": "503 responses",
+        "rateLimited": "Rate limit and quota",
+        "upstreamUnavailable": "Upstream unavailable",
+        "timeout": "Request timeout",
+        "noAvailableProvider": "No available account or provider",
+        "capacityUnavailable": "Concurrency and capacity limit",
+        "providerInfrastructureUnavailable": "Infrastructure unavailable",
+        "unauthorized": "Authentication and permission",
+        "continuationRecoveryRequired": "Continuation recovery required",
+        "invalidRequest": "Invalid or oversized request",
+        "processInterrupted": "Interrupted or internal error"
+      },
       "requestDetailType": "Request detail type",
       "label": "Usage record filters and actions",
       "refreshUsageHistory": "Refresh usage history",

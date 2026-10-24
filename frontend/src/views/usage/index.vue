@@ -37,6 +37,7 @@ const { timeRange, timeRangeParams, disabledDate, refreshTimeRangeEnd, latestTim
 const {
   filterField,
   filterValue,
+  errorTypes,
   providerQuery,
   usagePagination,
   loading,
@@ -77,6 +78,14 @@ watch(timeRange, () => {
 watch(filterField, (field) => {
   if (isUsageLocatorField(field) && recordView.value !== 'all')
     recordView.value = 'all'
+  else if (field === 'error' && recordView.value === 'success')
+    recordView.value = 'error'
+})
+
+// 选择错误类型筛选时自动从仅成功切到错误视图，展示错误列与错误摘要
+watch(errorTypes, (types) => {
+  if (types.length > 0 && recordView.value === 'success')
+    recordView.value = 'error'
 })
 </script>
 
@@ -137,6 +146,7 @@ watch(filterField, (field) => {
           <UsageFilters
             v-model:field="filterField"
             v-model:value="filterValue"
+            v-model:error-types="errorTypes"
             :loading="loading"
             :refreshing="refreshingList"
             @refresh="refreshUsage"

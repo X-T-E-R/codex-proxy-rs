@@ -136,6 +136,22 @@
     },
     "filters": {
       "error": "錯誤",
+      "errorType": "錯誤類型",
+      "errorTypePlaceholder": "篩選錯誤類型",
+      "errorTypes": {
+        "overloaded": "服務過載",
+        "status503": "503 響應",
+        "rateLimited": "限流與配額耗盡",
+        "upstreamUnavailable": "上游服務不可用",
+        "timeout": "請求超時",
+        "noAvailableProvider": "無可用賬號或渠道",
+        "capacityUnavailable": "併發與容量受限",
+        "providerInfrastructureUnavailable": "基礎設施不可用",
+        "unauthorized": "認證與權限失敗",
+        "continuationRecoveryRequired": "續接狀態失效",
+        "invalidRequest": "請求無效或超限",
+        "processInterrupted": "異常中斷或內部錯誤"
+      },
       "requestDetailType": "請求明細類型",
       "label": "使用記錄篩選與操作",
       "refreshUsageHistory": "刷新使用記錄",

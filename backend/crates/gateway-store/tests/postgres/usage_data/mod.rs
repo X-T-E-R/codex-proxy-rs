@@ -281,6 +281,21 @@ async fn aggregate_import_and_signed_correction_survive_native_rebuild_without_s
             .await
             .unwrap();
         assert_eq!(filtered.requests.request_count, 81);
+        // 聚合贡献没有逐请求错误事实，不能因为原生明细未命中而补入无关统计
+        for filter in [
+            NativeFilter {
+                error: Some("过载".into()),
+                ..Default::default()
+            },
+            NativeFilter {
+                error_types: vec![gateway_admin::model::observability::UsageErrorType::Overloaded],
+                ..Default::default()
+            },
+        ] {
+            let filtered = repo.usage_summary(range, filter).await.unwrap();
+            assert_eq!(filtered.requests.request_count, 0);
+            assert_eq!(filtered.requests.total_tokens, 0);
+        }
         use gateway_admin::{
             model::{accounts::AccountUsageWindowQuery, observability::TimeRange},
             ports::store::AccountStore,

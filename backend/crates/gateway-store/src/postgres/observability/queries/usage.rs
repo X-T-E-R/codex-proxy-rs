@@ -1,6 +1,7 @@
 //! Usage 明细、诊断与过滤查询族
 
 use super::super::*;
+use super::{literal_contains_pattern, literal_prefix_pattern, usage_errors};
 use serde_json::Value;
 
 const MODEL_DIAGNOSTIC_DIMENSION_SQL: &str =
@@ -118,23 +119,24 @@ pub(crate) fn push_usage_filter(
         query
             .push(format!(" or {alias}.client_api_key_name_snapshot ilike "))
             .push_bind(pattern)
-            .push(" escape '\\'");
+            .push(" escape '\\' or ");
+        usage_errors::push_error_keyword(query, value, alias);
         query.push(")");
     }
-}
-
-fn literal_contains_pattern(value: &str) -> String {
-    format!("%{}", literal_prefix_pattern(value))
-}
-
-pub(crate) fn literal_prefix_pattern(value: &str) -> String {
-    format!(
-        "{}%",
-        value
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_")
-    )
+    if let Some(value) = &filter.error {
+        query.push(" and ");
+        usage_errors::push_error_keyword(query, value, alias);
+    }
+    if !filter.error_types.is_empty() {
+        query.push(" and (");
+        for (index, error_type) in filter.error_types.iter().enumerate() {
+            if index > 0 {
+                query.push(" or ");
+            }
+            usage_errors::push_error_type(query, *error_type, alias);
+        }
+        query.push(")");
+    }
 }
 
 pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
