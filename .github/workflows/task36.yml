@@ -4,6 +4,11 @@ on:
   push:
     branches: [task36/cyber-regression-20261023]
   workflow_dispatch:
+    inputs:
+      source:
+        description: Full 40-character product source commit to validate and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,14 +17,16 @@ jobs:
   quality:
     uses: ./.github/workflows/_quality.yml
     with:
-      ref: ${{ github.sha }}
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source || github.sha }}
       run_backend: true
       run_frontend: true
   candidate-image:
-    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[task36-image]')
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[task36-image]'))
     needs: [quality]
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      TASK36_SOURCE: ${{ github.event_name == 'workflow_dispatch' && inputs.source || github.sha }}
     permissions:
       contents: read
       packages: write
@@ -28,15 +35,21 @@ jobs:
       - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.TASK36_SOURCE }}
+      - name: Verify exact product source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TASK36_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$TASK36_SOURCE"
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Define immutable candidate identity
         shell: bash
         run: |
           {
-            echo "CPR_IMAGE=codex-proxy-rs:task36-${GITHUB_SHA}"
-            echo "TASK36_IMAGE=ghcr.io/x-t-e-r/codex-proxy-rs:task36-sha-${GITHUB_SHA}"
+            echo "CPR_IMAGE=codex-proxy-rs:task36-${TASK36_SOURCE}"
+            echo "TASK36_IMAGE=ghcr.io/x-t-e-r/codex-proxy-rs:task36-sha-${TASK36_SOURCE}"
             echo "TASK36_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_ENV"
       - name: Build full runtime including frontend
@@ -48,10 +61,10 @@ jobs:
           load: true
           tags: ${{ env.CPR_IMAGE }}
           labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ env.TASK36_SOURCE }}
             org.opencontainers.image.source=https://github.com/X-T-E-R/codex-proxy-rs
           build-args: |
-            CPR_GIT_SHA=${{ github.sha }}
+            CPR_GIT_SHA=${{ env.TASK36_SOURCE }}
             CPR_BUILD_TIME=${{ env.TASK36_BUILD_TIME }}
             CPR_BUILD_TYPE=release
           cache-from: type=gha,scope=task35-runtime
@@ -64,7 +77,7 @@ jobs:
         with:
           image: ${{ env.CPR_IMAGE }}
           platform: linux/amd64
-          artifact-name: task36-container-${{ github.sha }}
+          artifact-name: task36-container-${{ env.TASK36_SOURCE }}
           verify-site-recovery: 'true'
       - name: Login to self-fork registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -79,13 +92,13 @@ jobs:
           docker push "$TASK36_IMAGE"
           docker image inspect --format '{{index .RepoDigests 0}}' "$TASK36_IMAGE" > "$RUNNER_TEMP/task36-image.txt"
           {
-            echo "Source: $GITHUB_SHA"
+            echo "Source: $TASK36_SOURCE"
             echo "Image: $(<"$RUNNER_TEMP/task36-image.txt")"
             echo "Tag: $TASK36_IMAGE"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve image identity
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: task36-image-${{ github.sha }}
+          name: task36-image-${{ env.TASK36_SOURCE }}
           path: ${{ runner.temp }}/task36-image.txt
           if-no-files-found: error
