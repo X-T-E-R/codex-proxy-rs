@@ -84,6 +84,8 @@ with tempfile.TemporaryDirectory() as directory:
     insert into model_request_leases select id,now()+interval '1 hour' from model_requests where id like 'req_ci_recovery_%';
     """)
     before_ledger = sql('select count(*) from client_api_key_charge_events;')
+    before_migrations = sql('select jsonb_agg(jsonb_build_array(version,success) order by version) from _sqlx_migrations;')
+    before_send = sql("select jsonb_agg(jsonb_build_array(id,attempt_count,upstream_send_state) order by id) from model_requests where id like 'req_ci_recovery_%';")
     client = 'key_ci_recovery'
     request = 'req_ci_recovery_unsent'
     other = 'req_ci_unattributed'
@@ -161,5 +163,8 @@ with tempfile.TemporaryDirectory() as directory:
     assert all(os.environ[name] not in Path(args.receipt).read_text()
         for name in ['CI_POSTGRES_PASSWORD', 'CI_REDIS_PASSWORD'])
     checks.append('host CLI single complete JSON and credential-free receipt/argv')
+    assert before_migrations == sql('select jsonb_agg(jsonb_build_array(version,success) order by version) from _sqlx_migrations;')
+    assert before_send == sql("select jsonb_agg(jsonb_build_array(id,attempt_count,upstream_send_state) order by id) from model_requests where id like 'req_ci_recovery_%';")
+    checks.append('migration ledger and real not-sent/sent attempt facts unchanged')
 
 print(json.dumps({'checks': checks, 'count': len(checks)}, indent=2))
