@@ -774,6 +774,9 @@ impl ProviderLeasePort for TestLeaseCoordinator {
 #[derive(Default)]
 pub(crate) struct MemorySessionAffinity {
     initial_claim_barrier: Option<Arc<tokio::sync::Barrier>>,
+    load_delay: Option<Duration>,
+    compare_delay: Option<Duration>,
+    fail_load: bool,
     aliases: Mutex<BTreeMap<(String, String), gateway_core::provider_ports::ProviderSessionAlias>>,
     bindings:
         Mutex<BTreeMap<(String, String), gateway_core::provider_ports::ProviderSessionBinding>>,
@@ -787,6 +790,36 @@ impl MemorySessionAffinity {
         Self {
             initial_claim_barrier: Some(Arc::new(tokio::sync::Barrier::new(participants))),
             ..Self::default()
+        }
+    }
+
+    /// 模拟健康但被调度推迟的存储往返，验证预算不能把延迟当成不可用
+    pub(crate) fn with_load_delay(delay: Duration) -> Self {
+        Self {
+            load_delay: Some(delay),
+            ..Self::default()
+        }
+    }
+
+    /// 只推迟原子认领，验证超时诊断指向具体操作
+    pub(crate) fn with_compare_delay(delay: Duration) -> Self {
+        Self {
+            compare_delay: Some(delay),
+            ..Self::default()
+        }
+    }
+
+    /// 存储自身不可用，必须保持原始分类而不是被改写成超时
+    pub(crate) fn with_load_failure() -> Self {
+        Self {
+            fail_load: true,
+            ..Self::default()
+        }
+    }
+
+    async fn delay(&self, delay: Option<Duration>) {
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
         }
     }
 
@@ -853,6 +886,14 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         Result<Option<gateway_core::provider_ports::ProviderSessionBinding>, ProviderStoreError>,
     > {
         Box::pin(async move {
+            if self.fail_load {
+                return Err(gateway_core::provider_ports::ProviderStoreError::caused_by(
+                    gateway_core::provider_ports::ProviderStoreErrorKind::Unavailable,
+                    "load provider session binding",
+                    std::io::Error::new(std::io::ErrorKind::ConnectionReset, "PRIVATE_REDIS_CAUSE"),
+                ));
+            }
+            self.delay(self.load_delay).await;
             self.lookups
                 .lock()
                 .expect("lookups")
@@ -881,6 +922,7 @@ impl ProviderSessionAffinityPort for MemorySessionAffinity {
         Result<Option<gateway_core::provider_ports::ProviderSessionBinding>, ProviderStoreError>,
     > {
         Box::pin(async move {
+            self.delay(self.compare_delay).await;
             // 让并发首请求都读到空绑定，再验证发送前的原子认领冲突
             if expected.is_none()
                 && let Some(barrier) = &self.initial_claim_barrier

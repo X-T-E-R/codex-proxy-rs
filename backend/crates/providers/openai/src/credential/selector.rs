@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -21,6 +22,7 @@ use gateway_core::provider_ports::{
     ProviderConcurrencyPool, ProviderLeaseAcquisition, ProviderLeaseGuard, ProviderLeasePort,
     ProviderLeaseRequest, ProviderSchedulingLeaseRequest, ProviderSessionAffinityKey,
     ProviderSessionAffinityPort, ProviderSessionBinding, ProviderStoreError,
+    ProviderStoreErrorKind,
 };
 use gateway_core::routing::ProviderKind;
 use secrecy::ExposeSecret;
@@ -45,7 +47,10 @@ const CLOUDFLARE_CHALLENGE_BACKOFF: [Duration; 4] = [
     Duration::from_secs(120),
 ];
 const CLOUDFLARE_PATH_BLOCK_THRESHOLD: u32 = 3;
-const SESSION_AFFINITY_TIMEOUT: Duration = Duration::from_millis(100);
+// 会话亲和只做单键读或 Lua CAS，Redis 客户端自身已按 500ms 响应超时和 1s 连接超时收口。
+// 这层预算只兜住重连等待与运行时停顿，不是延迟 SLO：过紧会把调度停顿当成存储不可用，
+// 让已绑定会话在发送前失败
+const SESSION_AFFINITY_BUDGET: Duration = Duration::from_secs(2);
 const MAX_ACCOUNT_SNAPSHOT_RETRIES: u32 = 3;
 const COOLDOWN_READ_CONCURRENCY: usize = 128;
 
@@ -1053,14 +1058,12 @@ impl CodexCredentialSelector {
             }
             alias = existing.alias_record();
         }
-        let applied = tokio::time::timeout(
-            SESSION_AFFINITY_TIMEOUT,
+        let applied = affinity_call(
+            "bind session alias",
             self.session_affinity
                 .bind_alias(&self.provider_kind, turn, &alias, session_ttl),
         )
-        .await
-        .map_err(binding_store_error)?
-        .map_err(binding_store_error)?;
+        .await?;
         if !applied {
             return Err(CredentialSelectionError::SessionBound(Box::new(
                 CredentialSelectionError::NoEligibleCredential,
@@ -1073,13 +1076,11 @@ impl CodexCredentialSelector {
         &self,
         turn: &ProviderSessionAffinityKey,
     ) -> Result<Option<CodexSessionAffinity>, CredentialSelectionError> {
-        tokio::time::timeout(
-            SESSION_AFFINITY_TIMEOUT,
+        affinity_call(
+            "load session alias",
             self.session_affinity.load_alias(&self.provider_kind, turn),
         )
         .await
-        .map_err(binding_store_error)?
-        .map_err(binding_store_error)
         .map(|alias| alias.map(|alias| CodexSessionAffinity::from_turn_alias(turn.clone(), alias)))
     }
 
@@ -1087,13 +1088,11 @@ impl CodexCredentialSelector {
         &self,
         key: &ProviderSessionAffinityKey,
     ) -> Result<Option<ProviderSessionBinding>, CredentialSelectionError> {
-        tokio::time::timeout(
-            SESSION_AFFINITY_TIMEOUT,
+        affinity_call(
+            "load provider session binding",
             self.session_affinity.load(&self.provider_kind, key),
         )
         .await
-        .map_err(binding_store_error)?
-        .map_err(binding_store_error)
     }
 
     async fn admit_session(
@@ -1103,8 +1102,8 @@ impl CodexCredentialSelector {
         account: &ProviderAccountId,
         session_ttl: Duration,
     ) -> Result<bool, CredentialSelectionError> {
-        tokio::time::timeout(
-            SESSION_AFFINITY_TIMEOUT,
+        affinity_call(
+            "admit provider session binding",
             self.session_affinity.compare_and_bind(
                 &self.provider_kind,
                 key,
@@ -1114,9 +1113,7 @@ impl CodexCredentialSelector {
             ),
         )
         .await
-        .map_err(binding_store_error)?
         .map(|binding| binding.is_some())
-        .map_err(binding_store_error)
     }
 
     pub async fn record_failure(
@@ -1436,6 +1433,31 @@ impl CodexCredentialSelector {
         self.repository.compare_and_swap_data(account, data).await?;
         Ok(())
     }
+}
+
+/// 亲和存储操作共用一个预算，超时也必须带具体操作名；
+/// 否则诊断链只剩底层的 `deadline has elapsed`，无法区分读取绑定与原子认领
+async fn affinity_call<T>(
+    operation: &'static str,
+    call: impl Future<Output = Result<T, ProviderStoreError>>,
+) -> Result<T, CredentialSelectionError> {
+    match tokio::time::timeout(SESSION_AFFINITY_BUDGET, call).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(source)) => Err(binding_store_error(source)),
+        Err(_) => Err(binding_store_error(ProviderStoreError::caused_by(
+            ProviderStoreErrorKind::Unavailable,
+            operation,
+            AffinityBudgetElapsed {
+                budget_ms: SESSION_AFFINITY_BUDGET.as_millis(),
+            },
+        ))),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("timed out after {budget_ms}ms")]
+struct AffinityBudgetElapsed {
+    budget_ms: u128,
 }
 
 fn binding_store_error(

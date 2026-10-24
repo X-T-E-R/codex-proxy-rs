@@ -934,6 +934,255 @@ async fn selector_should_reuse_and_renew_the_account_bound_to_the_same_session()
     );
 }
 
+fn attempt_with_cancellation(cancellation: CancellationToken) -> AttemptContext {
+    AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_codex_contract").expect("request id"),
+            ClientApiKeyId::new("key_codex_contract").expect("client key id"),
+        ),
+        NonZeroU32::new(1).expect("attempt"),
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        None,
+        cancellation,
+    )
+}
+
+fn selection_failure_chain(error: &CredentialSelectionError) -> Vec<String> {
+    use std::error::Error as _;
+    let mut messages = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(current) = source {
+        messages.push(current.to_string());
+        source = current.source();
+    }
+    messages
+}
+
+fn contract_request_url() -> Url {
+    Url::parse("https://chatgpt.com/backend-api/codex/responses").expect("request URL")
+}
+
+// 生产 07:38–07:42 的 89 条未发送基础设施失败来自 100ms 会话亲和预算：
+// 2 vCPU 高 PSI 下健康 Redis 往返被调度推迟到 100ms 以上就会被判成存储不可用
+#[tokio::test]
+async fn selector_should_survive_a_slow_but_healthy_affinity_lookup() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_slow_affinity", "at-slow-affinity");
+    let affinity = Arc::new(MemorySessionAffinity::with_load_delay(
+        Duration::from_millis(150),
+    ));
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let provider = ProviderKind::new("openai").expect("provider");
+    let key = ProviderSessionAffinityKey::try_new("slow-affinity").expect("affinity key");
+    let request_attempt = attempt(BTreeSet::new());
+    let request_url = contract_request_url();
+
+    let selected = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect("slow but healthy affinity must not fail the session");
+
+    assert_eq!(
+        affinity.lookup_keys(),
+        vec!["slow-affinity".to_owned()],
+        "one selection reads the binding once"
+    );
+    assert_eq!(affinity.binding_count(), 1);
+    assert_eq!(
+        affinity.load(&provider, &key).await.expect("load affinity"),
+        Some(selected.account_id().clone())
+    );
+}
+
+#[tokio::test]
+async fn selector_should_name_the_affinity_lookup_when_it_exceeds_the_budget() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_dead_affinity", "at-dead-affinity");
+    let affinity = Arc::new(MemorySessionAffinity::with_load_delay(
+        Duration::from_millis(2_500),
+    ));
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let key = ProviderSessionAffinityKey::try_new("dead-affinity").expect("affinity key");
+    let request_attempt = attempt(BTreeSet::new());
+    let request_url = contract_request_url();
+
+    let error = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect_err("an unreadable binding must fail closed");
+
+    let CredentialSelectionError::SessionBound(inner) = &error else {
+        panic!("session binding failure must stay wrapped");
+    };
+    assert!(matches!(inner.as_ref(), CredentialSelectionError::Store(_)));
+    let chain = selection_failure_chain(&error);
+    assert!(
+        chain
+            .iter()
+            .any(|message| message.contains("load provider session binding")),
+        "diagnostic must name the operation: {chain:?}"
+    );
+    assert!(
+        chain
+            .iter()
+            .any(|message| message.contains("timed out after 2000ms")),
+        "diagnostic must carry the budget: {chain:?}"
+    );
+    assert!(
+        !chain
+            .iter()
+            .any(|message| message.contains("deadline has elapsed")),
+        "the opaque timer message must not be the only cause: {chain:?}"
+    );
+    assert_eq!(
+        affinity.binding_count(),
+        0,
+        "no binding may be claimed from an unreadable snapshot"
+    );
+}
+
+#[tokio::test]
+async fn selector_should_name_the_affinity_admission_when_it_exceeds_the_budget() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_dead_admit", "at-dead-admit");
+    let affinity = Arc::new(MemorySessionAffinity::with_compare_delay(
+        Duration::from_millis(2_500),
+    ));
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let key = ProviderSessionAffinityKey::try_new("dead-admit").expect("affinity key");
+    let request_attempt = attempt(BTreeSet::new());
+    let request_url = contract_request_url();
+
+    let error = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect_err("an unclaimed session must fail closed before sending");
+
+    let chain = selection_failure_chain(&error);
+    assert!(
+        chain
+            .iter()
+            .any(|message| message.contains("admit provider session binding")),
+        "diagnostic must name the admission operation: {chain:?}"
+    );
+    assert!(
+        chain
+            .iter()
+            .any(|message| message.contains("timed out after 2000ms")),
+        "diagnostic must carry the budget: {chain:?}"
+    );
+    assert_eq!(affinity.binding_count(), 0);
+    assert!(affinity.renewal_ttls().is_empty());
+}
+
+#[tokio::test]
+async fn selector_should_keep_real_affinity_unavailability_distinct_from_a_deadline() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_failed_affinity", "at-failed-affinity");
+    let affinity = Arc::new(MemorySessionAffinity::with_load_failure());
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let key = ProviderSessionAffinityKey::try_new("failed-affinity").expect("affinity key");
+    let request_attempt = attempt(BTreeSet::new());
+    let request_url = contract_request_url();
+
+    let error = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &request_url,
+            attempt: &request_attempt,
+            session_affinity_key: Some(&key),
+        })
+        .await
+        .expect_err("store unavailability must fail closed");
+
+    let chain = selection_failure_chain(&error);
+    assert!(
+        chain
+            .iter()
+            .any(|message| message.contains("load provider session binding failed: Unavailable")),
+        "real unavailability keeps the store classification: {chain:?}"
+    );
+    assert!(
+        !chain
+            .iter()
+            .any(|message| message.contains("timed out after")),
+        "a store failure must not be relabelled as a budget timeout: {chain:?}"
+    );
+    assert_eq!(affinity.binding_count(), 0);
+}
+
+#[tokio::test]
+async fn cancelling_selection_drops_a_slow_affinity_lookup() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_cancel_affinity", "at-cancel-affinity");
+    let affinity = Arc::new(MemorySessionAffinity::with_load_delay(Duration::from_secs(
+        30,
+    )));
+    let selector = selector_with_affinity(
+        &store,
+        Arc::new(TestLeaseCoordinator::default()),
+        Arc::clone(&affinity),
+    );
+    let key = ProviderSessionAffinityKey::try_new("cancel-affinity").expect("affinity key");
+    let cancellation = CancellationToken::new();
+    let request_attempt = attempt_with_cancellation(cancellation.clone());
+    let request_url = contract_request_url();
+
+    let selection = selector.select(&SelectCodexCredential {
+        upstream_model: "gpt-5.4",
+        request_url: &request_url,
+        attempt: &request_attempt,
+        session_affinity_key: Some(&key),
+    });
+    let trigger = cancellation.clone();
+    let cancelling = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        trigger.cancel();
+    });
+
+    let error = selection
+        .await
+        .expect_err("cancelled selection must not wait for the budget");
+    cancelling.await.expect("cancellation trigger");
+
+    assert!(matches!(error, CredentialSelectionError::Cancelled));
+    assert_eq!(affinity.binding_count(), 0);
+}
+
 #[tokio::test]
 async fn selector_should_replace_a_busy_affinity_binding_after_the_fallback_succeeds() {
     let store = Arc::new(MemoryAccountStore::default());
