@@ -327,3 +327,55 @@ fn high_priority_waiters_still_require_queueing_to_be_enabled() {
         assert!(!queue.has_waiters(&"a"));
     });
 }
+
+/// 绑定会话的定时重查决定整轮重选的频率：单次等待最多 500ms 一次，
+/// 跨实例释放的容量最迟 500ms 被发现，而本地队列位置变化仍由 waker 立即完成
+#[test]
+fn bound_session_recheck_waits_about_the_poll_interval() {
+    block_on(async {
+        let queue = ConcurrencyWaitQueue::<&str>::default();
+        let policy = ConcurrencyQueuePolicy {
+            max_waiting: 1,
+            timeout: Duration::from_secs(5),
+        };
+        let budget = ConcurrencyWaitBudget::default();
+        let mut waiting = CapacityWait::new(
+            &queue,
+            policy,
+            SystemTime::now() + Duration::from_secs(5),
+            &budget,
+        )
+        .with_periodic_recheck(true);
+        let started = Instant::now();
+        waiting.wait(&["account"]).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(450),
+            "periodic recheck must not spin: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "periodic recheck must stay bounded: {elapsed:?}"
+        );
+        assert!(waiting.can_try(&"account"));
+    });
+}
+
+/// 放宽定时重查不能拖慢本进程内的队首交接
+#[test]
+fn releasing_the_head_wakes_the_next_waiter_well_before_the_poll_interval() {
+    block_on(async {
+        let queue = ConcurrencyWaitQueue::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let head = queue.enqueue(&["account"], 2, deadline).unwrap();
+        let next = queue.enqueue(&["account"], 2, deadline).unwrap();
+        let started = Instant::now();
+        drop(head);
+        next.turn().await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(400),
+            "waker handover must not wait for the poll interval: {elapsed:?}"
+        );
+    });
+}

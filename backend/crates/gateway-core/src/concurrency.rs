@@ -11,6 +11,9 @@ use futures_timer::Delay;
 
 const MAX_TOTAL_WAITING: usize = 1_024;
 const CAPACITY_RECHECK_INTERVAL: Duration = Duration::from_millis(100);
+/// 绑定会话每次定时重查都会整轮重选（PG 账号、配额、Redis 冷却与租约）；
+/// 跨实例空位和会话迁移的发现上限放宽到 500ms，本队列内的位置变化仍由 waker 立即唤醒
+const BOUND_SESSION_RECHECK_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ConcurrencyQueuePolicy {
@@ -357,7 +360,7 @@ impl<'a, K: Clone + Eq + Hash> CapacityWait<'a, K> {
         if let Some(ticket) = &self.ticket {
             if self.periodic_recheck {
                 Delay::new(
-                    CAPACITY_RECHECK_INTERVAL
+                    BOUND_SESSION_RECHECK_INTERVAL
                         .min(ticket.deadline.saturating_duration_since(Instant::now())),
                 )
                 .await;
