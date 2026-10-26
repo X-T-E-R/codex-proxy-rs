@@ -32,6 +32,10 @@ struct RuntimeFiles {
 }
 
 impl ReleaseFiles {
+    pub(crate) const fn has_runtime(&self) -> bool {
+        self.runtime.is_some()
+    }
+
     pub(crate) fn installed(config: &SystemUpdateConfig) -> Result<Self, OperationError> {
         Self::read(
             &config.executable_path()?,

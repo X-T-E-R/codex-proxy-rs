@@ -153,7 +153,7 @@ impl UpdateTempDir {
 
 impl Drop for UpdateTempDir {
     fn drop(&mut self) {
-        if let Err(error) = super::swap::remove_dir_all(&self.path)
+        if let Err(error) = fs::remove_dir_all(&self.path)
             && error.kind() != io::ErrorKind::NotFound
         {
             tracing::warn!(path = %self.path.display(), error = %error, "清理系统更新临时目录失败");
@@ -356,7 +356,9 @@ pub(crate) fn reconcile_installation(
 ) -> Result<SystemUpdateStatus, OperationError> {
     let path = &config.update_state_file;
     let mut state = read_persisted(path)?;
-    let installed = ReleaseFiles::installed(config)?;
+    let installed = ReleaseFiles::installed(config).map_err(|_| {
+        conflict("安装文件不完整，请停止服务，使用完整镜像或独立发布自动化恢复并重启")
+    })?;
     let need_restart = &installed != running;
     if need_restart
         && (state.current_files.as_ref() != Some(&installed) || state.current_version.is_none())

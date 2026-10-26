@@ -34,6 +34,7 @@ use super::swap::{replace_release_files, rollback_official_plugins_dir, rollback
 use super::{OperationError, SystemUpdateConfig, conflict, internal, invalid, upstream};
 
 const MAX_OFFICIAL_PLUGIN_MANIFEST_SIZE: u64 = 256 * 1024;
+const BUNDLE_LIVE_UPDATE_UNSUPPORTED: &str = "含 OpenAI harness 的发行文件不能在服务运行期间在线交换，请使用完整镜像或独立发布自动化整体部署并重启服务";
 
 /// gateway-admin 消费的真实进程/文件系统操作实现
 #[derive(Clone)]
@@ -101,6 +102,15 @@ impl ProcessSystemOperations {
         let status = self.reconcile_installation()?;
         if status.need_restart {
             return Err(conflict("更新已完成，请先重启服务"));
+        }
+        if self
+            .running_files
+            .as_ref()
+            .as_ref()
+            .map_err(Clone::clone)?
+            .has_runtime()
+        {
+            return Err(conflict(BUNDLE_LIVE_UPDATE_UNSUPPORTED));
         }
         let operation_id = operation_id("update");
         let mut operation = UpdateOperation::start(
@@ -257,6 +267,9 @@ impl ProcessSystemOperations {
         self.events
             .info(Some(operation_id), Some("extract"), "正在解压更新包");
         let extracted = extract_release(&archive_path, temp.path())?;
+        if extracted.has_runtime_bundle {
+            return Err(conflict(BUNDLE_LIVE_UPDATE_UNSUPPORTED));
+        }
         self.events
             .success(Some(operation_id), Some("extract"), "更新包解压完成");
         let release_manifest = read_release_manifest(&extracted.official_plugins_dir)?;
@@ -332,7 +345,9 @@ impl ProcessSystemOperations {
     }
 
     fn reconcile_installation(&self) -> Result<SystemUpdateStatus, OperationError> {
-        let running_files = self.running_files.as_ref().as_ref().map_err(Clone::clone)?;
+        let running_files = self.running_files.as_ref().as_ref().map_err(|_| {
+            conflict("安装文件不完整，请停止服务，使用完整镜像或独立发布自动化恢复并重启")
+        })?;
         reconcile_installation(&self.config, running_files)
     }
 }
@@ -362,6 +377,25 @@ impl SystemOperations for ProcessSystemOperations {
         channel: Option<UpdateChannel>,
     ) -> Result<SystemUpdateDetail, OperationError> {
         let channel = self.resolve_channel(channel)?;
+        match self.running_files.as_ref().as_ref() {
+            Ok(files) if files.has_runtime() => {
+                return Ok(base_update_detail(
+                    &self.config,
+                    channel,
+                    Some(BUNDLE_LIVE_UPDATE_UNSUPPORTED.to_owned()),
+                    None,
+                ));
+            }
+            Err(_) => {
+                return Ok(base_update_detail(
+                    &self.config,
+                    channel,
+                    Some("安装文件不完整，请使用完整镜像或独立发布自动化恢复并重启服务".to_owned()),
+                    None,
+                ));
+            }
+            Ok(_) => {}
+        }
         match self
             .release_cache
             .detail(&self.config, refresh, channel)
@@ -436,6 +470,16 @@ impl SystemOperations for ProcessSystemOperations {
             .reconcile_installation()?
             .previous_version
             .ok_or_else(|| conflict("没有可用于回滚的上一版本"))?;
+        if self
+            .running_files
+            .as_ref()
+            .as_ref()
+            .map_err(Clone::clone)?
+            .has_runtime()
+            || ReleaseFiles::backup(&self.config)?.has_runtime()
+        {
+            return Err(conflict(BUNDLE_LIVE_UPDATE_UNSUPPORTED));
+        }
         let release_manifest =
             read_release_manifest(&rollback_official_plugins_dir(&self.config)?)?;
         let plugin_revision = preflight
