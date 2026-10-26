@@ -746,7 +746,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `GET` | `/api/admin/accounts/models/catalog` | `accountId` | 读取指定账号的完整 Codex 原生模型目录，返回 `{ modelCount, observedAt, catalog }` |
 | `POST` | `/api/admin/accounts/models/refresh` | `{ accountId }` | 强制拉取最新模型并覆盖 cache |
 | `GET` | `/api/admin/accounts/connection-test` | `accountId`、`modelId`、`prompt?` | 通过 SSE 返回实时连接测试事件，不作为业务 Responses 用量记录 |
-| `POST` | `/api/admin/accounts/oauth/start` | `{ provider, name, accountId?, outboundProxyId?, outboundProxyUrl? }` | 为支持登录的 Provider 创建 flow；`accountId` 表示重新授权 |
+| `POST` | `/api/admin/accounts/oauth/start` | `{ provider, name, accountId?, outboundProxyId?, outboundProxyUrl?, harness? }` | OpenAI 新建账号可选 `codex`、`opencode`、`pi`，省略走旧 Codex；xAI 和带 `accountId` 的重授权不接受 `harness` |
 | `POST` | `/api/admin/accounts/oauth/complete` | `{ provider, flowId, callbackUrl, settings? }` | 消费 OAuth callback；首次授权可附带账号设置，重新授权保留原设置 |
 
 ### 查询与账号字段
@@ -1117,7 +1117,7 @@ OAuth start 使用：
 客户端不得提交 `credentialRevision`、旧 token 身份或其他并发控制字段。complete 请求也不重复提交
 `accountId`，后端通过 `flowId` 中保存的目标绑定完成授权
 
-OpenAI 授权可以带 `authorizationMethod`。省略或 `codex` 仍走既有 Codex Desktop PKCE，回调只认 `code` 和 `state`，身份仍从 Codex JWT 投影。`opencode` 与 `pi` 是两条独立授权：账号认证种类分别是 `chatgpt_token_sharing` 和 `pi_openai`，各自保存 `client_id`、`oauth_scope` 和 token。重新授权不要提交 `authorizationMethod`；服务端读取该账号现有种类并写入 pending。同一主体可以同时存在 Codex、OpenCode 和 pi 三个账号，账号 ID 互不借用，新流程不解析 Codex JWT 的 `chatgpt_account_id`。
+OpenAI 新建授权可以带 `harness`，值为 `codex`、`opencode` 或 `pi`。省略或 `codex` 仍走既有 Codex Desktop PKCE，回调只认 `code` 和 `state`，身份仍从 Codex JWT 投影。`opencode` 与 `pi` 是两条独立授权：账号认证种类分别是 `chatgpt_token_sharing` 和 `pi_openai`，各自保存 `client_id`、`oauth_scope` 和 token。重新授权只提交目标 `accountId`，不提交 `harness`；服务端读取该账号现有种类并写入 pending。同一主体可以同时存在 Codex、OpenCode 和 pi 三个账号，账号 ID 互不借用，新流程不解析 Codex JWT 的 `chatgpt_account_id`。
 
 这两条授权的回调由管理员把浏览器最终地址粘贴到既有 complete 接口，不要求 CPR 监听回环端口。pending 固定本次 `redirect_uri`、安装级 `host_id` 和重新授权时的 client ID；complete 同时核对 state 与回调的 origin/path。安装级 host/device ID 持久保存在运行数据目录，账号之间共用；`installation_id` 按账号生成，重新授权保持不变。token 请求走该账号的出站代理，支持 `http`、`https`、`socks5` 和 `socks5h`。刷新只使用该账号自己的 client ID 和 refresh token。额度、资料、订阅、头像和重置卡仍只对认证种类 `oauth` 打开。
 

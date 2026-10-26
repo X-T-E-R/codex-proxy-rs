@@ -649,7 +649,7 @@ CPR_PI_SOURCE="$PWD/openai-harness/sources/pi" \
 归档内 `runtime-manifest.json` 记录 Node、Node 许可证及 worker 封口清单的摘要；
 `openai-harness/bundle-manifest.json` 记录锁定源码、worker 与依赖文件。
 更换归档版本时保持这组目录同版，不要只替换二进制。
-管理端在线更新的 Node/worker 同组替换与回滚须由对应版本的系统更新模块支持，否则使用完整归档或镜像手动升级
+含 Node 与 OpenAI harness 的发行包使用完整镜像或独立发布自动化整体部署并重启；管理端在文件交换前拒绝这类归档的在线更新，已安装 harness 的实例也不接受在线更新或回滚。若安装目录中的 Node 与 harness 文件不完整，停止服务后整体恢复发行目录，再重启服务
 
 升级后通过管理端版本接口或容器 image digest 确认运行实例的版本和 revision
 
