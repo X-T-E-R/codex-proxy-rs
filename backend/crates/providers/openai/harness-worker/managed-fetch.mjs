@@ -118,7 +118,7 @@ function openChannel(id, callId) {
   };
 }
 
-async function exchange(method, url, headers, body, signal, callId) {
+async function exchange(method, url, headers, body, signal, callId, requestId) {
   const id = takeId();
   const channel = openChannel(id, callId);
   let detached = false;
@@ -145,6 +145,7 @@ async function exchange(method, url, headers, body, signal, callId) {
       headers,
       body_base64: Buffer.from(body).toString("base64"),
       call_id: callId,
+      request_id: requestId,
     });
     const head = await channel.head;
     const stream = new ReadableStream({
@@ -152,7 +153,7 @@ async function exchange(method, url, headers, body, signal, callId) {
         const chunk = await channel.pull();
         if (chunk.bytes.length > 0) {
           controller.enqueue(new Uint8Array(chunk.bytes));
-          await writeJson(CREDIT, id, { bytes: chunk.bytes.length, call_id: callId });
+          await writeJson(CREDIT, id, { bytes: chunk.bytes.length, call_id: callId, request_id: requestId });
         }
         if (chunk.fin) {
           controller.close();
@@ -199,7 +200,7 @@ export function headerEntries(input) {
   return headers;
 }
 
-export async function managedFetch(url, init = {}, callId = 0) {
+export async function managedFetch(url, init = {}, callId = 0, requestId = "") {
   const method = init.method ?? "GET";
   const headers = headerEntries(init.headers);
   let body = new Uint8Array();
@@ -208,5 +209,5 @@ export async function managedFetch(url, init = {}, callId = 0) {
     else if (init.body instanceof Uint8Array) body = init.body;
     else body = new Uint8Array(await new Response(init.body).arrayBuffer());
   }
-  return exchange(method, String(url), headers, body, init.signal, callId);
+  return exchange(method, String(url), headers, body, init.signal, callId, requestId);
 }

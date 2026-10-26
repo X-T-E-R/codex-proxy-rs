@@ -30,17 +30,20 @@ export async function runPi(input, emit, signal, callId) {
   if (input.instructions) messages.push({ role: "system", content: input.instructions, timestamp: 1 });
   messages.push({ role: "user", content: input.prompt, timestamp: 2 });
   const serviceTier = text(input.service_tier);
+  const requestId = text(input.request_id);
+  const sessionId = text(input.session_id);
+  if (!sessionId || !requestId) throw new Error("missing session or request id");
   const headers = downstreamHeaders(input.downstream_headers);
   // apiKey 是账号访问令牌，不能省，也不能换成 unused 或下游 Authorization
   // 源码在 ChatGPT 省略字段之后仍写入 serviceTier；无档位时不传，避免空字符串进正文
   const stream = responses.stream(model, { messages }, {
     apiKey: input.bearer,
-    sessionId: input.session_id,
+    sessionId,
     ...(serviceTier !== undefined ? { serviceTier } : {}),
     ...(input.max_output_tokens != null ? { maxTokens: input.max_output_tokens } : {}),
     ...(input.temperature != null ? { temperature: input.temperature } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
-    fetch: (url, init) => managedFetch(url, init, callId),
+    fetch: (url, init) => managedFetch(url, init, callId, requestId),
     signal,
     maxRetries: 0,
   });

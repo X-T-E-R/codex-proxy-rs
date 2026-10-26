@@ -121,13 +121,13 @@ class EventWindow {
     }
   }
 
-  async acquire(signal, callId) {
+  async acquire(signal, callId, requestId) {
     if (signal?.aborted) throw new Error("cancelled");
     if (this.remaining > 0) {
       this.remaining -= 1;
       return;
     }
-    await writeJson(EVENT_WAIT, callId, {});
+    await writeJson(EVENT_WAIT, callId, { request_id: requestId });
     if (signal?.aborted) throw new Error("cancelled");
     if (this.remaining > 0) {
       this.remaining -= 1;
@@ -187,7 +187,7 @@ for (;;) {
 async function handleCall(id, payload, controller, gate, secret) {
   let events = 0;
   const emit = async (event) => {
-    await gate.acquire(controller.signal, id);
+    await gate.acquire(controller.signal, id, payload.request_id);
     events += 1;
     await writeJson(EVENT, id, event);
   };
@@ -196,15 +196,20 @@ async function handleCall(id, payload, controller, gate, secret) {
     else if (payload.harness === "pi") await runPi(payload, emit, controller.signal, id);
     else throw new Error("unknown harness");
     if (controller.signal.aborted) {
-      await writeJson(FAILURE, id, { cancelled: true, message: "cancelled" });
+      await writeJson(FAILURE, id, {
+        cancelled: true,
+        message: "cancelled",
+        request_id: payload.request_id,
+      });
       return;
     }
-    await writeJson(RESULT, id, { ok: true, events });
+    await writeJson(RESULT, id, { ok: true, events, request_id: payload.request_id });
   } catch (error) {
     const cancelled = controller.signal.aborted || String(error?.message || error) === "cancelled";
     await writeJson(FAILURE, id, {
       cancelled,
       message: cancelled ? "cancelled" : redact(secret, error).slice(0, 1500),
+      request_id: payload.request_id,
     });
   }
 }

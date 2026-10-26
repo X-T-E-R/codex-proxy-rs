@@ -154,6 +154,7 @@ impl HarnessSession {
         }
         if call.model.is_empty()
             || call.session_id.is_empty()
+            || trimmed(Some(call.request_id.as_str())).is_none()
             || call.prompt.is_empty()
             || call.bearer.expose_secret().is_empty()
             || !(1..=1_048_576).contains(&call.body_window)
@@ -380,8 +381,9 @@ async fn drive(
     let temperature = call.temperature.and_then(json_temperature);
     let service_tier = trimmed(call.service_tier.as_deref());
     let session_affinity_id = trimmed(call.identity.session_affinity_id.as_deref());
-    let thread_id = trimmed(call.identity.thread_id.as_deref());
-    let client_request_id = trimmed(call.identity.client_request_id.as_deref());
+    let Some(request_id) = trimmed(Some(call.request_id.as_str())) else {
+        return Err(HarnessError::Protocol);
+    };
     let pi = matches!(call.harness, ResponsesHarness::Pi);
     let source_headers = exchange::SourceHeaders {
         pi,
@@ -392,14 +394,8 @@ async fn drive(
                 .clone()
                 .unwrap_or_else(|| call.session_id.clone())
         },
-        thread_id: thread_id.clone().unwrap_or_else(|| call.session_id.clone()),
-        client_request_id: if pi {
-            call.session_id.clone()
-        } else {
-            client_request_id
-                .clone()
-                .unwrap_or_else(|| call.session_id.clone())
-        },
+        thread_id: call.session_id.clone(),
+        client_request_id: call.session_id.clone(),
     };
     let payload = protocol::CallPayload {
         harness: match call.harness {
@@ -409,6 +405,7 @@ async fn drive(
         model: &call.model,
         base_url: &call.base_url,
         session_id: &call.session_id,
+        request_id: &request_id,
         bearer: call.bearer.expose_secret(),
         prompt: &call.prompt,
         instructions: call.instructions.as_deref(),
@@ -416,8 +413,6 @@ async fn drive(
         temperature,
         service_tier: service_tier.as_deref(),
         session_affinity_id: session_affinity_id.as_deref(),
-        thread_id: thread_id.as_deref(),
-        client_request_id: client_request_id.as_deref(),
         downstream_headers: &call.downstream_headers,
         event_window: call.event_window,
     };
@@ -449,7 +444,7 @@ async fn drive(
         match frame.kind {
             protocol::HTTP_REQUEST => {
                 let parsed: HttpRequest = protocol::from_json(&frame.payload)?;
-                if parsed.call_id != call_id {
+                if parsed.call_id != call_id || parsed.request_id != request_id {
                     let _ = reject_http(&stdin, frame.id).await;
                     continue;
                 }
@@ -476,7 +471,7 @@ async fn drive(
             }
             protocol::CREDIT => {
                 let credit: protocol::Credit = protocol::from_json(&frame.payload)?;
-                if credit.call_id == call_id {
+                if credit.call_id == call_id && credit.request_id == request_id {
                     window.credit(credit.bytes);
                 }
             }
@@ -521,7 +516,11 @@ async fn drive(
                 .await?;
             }
             protocol::EVENT_WAIT => {
-                if frame.id == call_id {
+                if frame.id != call_id {
+                    continue;
+                }
+                let wait: protocol::EventWait = protocol::from_json(&frame.payload)?;
+                if wait.request_id == request_id {
                     state.event_waits.fetch_add(1, Ordering::SeqCst);
                 }
             }
@@ -529,7 +528,8 @@ async fn drive(
                 if frame.id != call_id {
                     continue;
                 }
-                if !request_seen {
+                let result: protocol::WorkerResult = protocol::from_json(&frame.payload)?;
+                if result.request_id != request_id || !request_seen {
                     return Err(HarnessError::Protocol);
                 }
                 finish_http(state).await;
@@ -547,6 +547,9 @@ async fn drive(
                     return Err(HarnessError::RemoteDial);
                 }
                 let failure: protocol::WorkerFailure = protocol::from_json(&frame.payload)?;
+                if failure.request_id != request_id {
+                    return Err(HarnessError::Protocol);
+                }
                 if failure.cancelled || user_cancel.is_cancelled() || local_cancel.is_cancelled() {
                     return Err(HarnessError::Cancelled);
                 }

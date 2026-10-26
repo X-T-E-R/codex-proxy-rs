@@ -65,10 +65,12 @@ export async function runOpenCode(input, emit, signal, callId) {
   if (input.max_output_tokens != null) generation.maxTokens = input.max_output_tokens;
   if (input.temperature != null) generation.temperature = input.temperature;
   const sessionId = text(input.session_id);
+  const requestId = text(input.request_id);
   const serviceTier = text(input.service_tier);
-  // 档位只经 providerOptions 交给协议；身份头缺省沿用 session_id，不另造 UUID
+  if (!sessionId || !requestId) throw new Error("missing session or request id");
+  // request id 只进入 LLMRequest.id；session-id 用 affinity，thread 和 client request 重复当前会话
   const request = llm.request({
-    id: "req_bridge",
+    id: requestId,
     model,
     ...(input.instructions ? { system: input.instructions } : {}),
     prompt: input.prompt,
@@ -78,8 +80,8 @@ export async function runOpenCode(input, emit, signal, callId) {
       headers: {
         ...downstreamHeaders(input.downstream_headers),
         "session-id": text(input.session_affinity_id) ?? sessionId,
-        "thread-id": text(input.thread_id) ?? sessionId,
-        "x-client-request-id": text(input.client_request_id) ?? sessionId,
+        "thread-id": sessionId,
+        "x-client-request-id": sessionId,
       },
     },
   });
@@ -103,6 +105,7 @@ export async function runOpenCode(input, emit, signal, callId) {
               signal,
             },
             callId,
+            requestId,
           ),
         );
         return HttpClientResponse.fromWeb(httpRequest, response);

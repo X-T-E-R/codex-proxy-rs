@@ -65,29 +65,36 @@ pub enum ResponsesHarness {
     Pi,
 }
 
-/// 下游原请求的会话身份
+/// 当前会话上可跨 step 重复的身份
 ///
-/// OpenCode 写成 `session-id`、`thread-id`、`x-client-request-id`
-/// 缺省字段沿用 `ResponsesCall::session_id`，不另造 UUID
-/// pi 只消费 `session_id`：源码同时写 `session_id`、`x-client-request-id` 和 `prompt_cache_key`
+/// `session_affinity_id` 是 parent 或 fork affinity，只给 OpenCode 的 `session-id`
+/// 缺省时 `session-id` 沿用 `ResponsesCall::session_id`
+/// `thread-id`、`x-client-request-id` 和 pi 的 `session_id` 都使用当前会话 ID，不在这里另造
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResponsesRequestIdentity {
     pub session_affinity_id: Option<String>,
-    pub thread_id: Option<String>,
-    pub client_request_id: Option<String>,
 }
 
 pub struct ResponsesCall {
     pub harness: ResponsesHarness,
     pub model: String,
     pub base_url: String,
+    /// 当前会话 ID
+    /// OpenCode 用它写 `thread-id` 和 `x-client-request-id`，pi 用它写 `session_id`、`x-client-request-id` 和 `prompt_cache_key`
+    /// 同一次会话的后续 step 重复这个值
     pub session_id: String,
+    /// CPR Core 这一次执行或 attempt 的请求 ID
+    /// 只关联进程帧，并作为 OpenCode `LLMRequest.id`
+    /// 不写入上游头，也不代替会话、affinity 或账号身份
+    pub request_id: String,
     /// 选账号后已经决定的有效档位
     /// 空白与缺省都不传给源库，源库因此不会补写 `service_tier`
     /// 非空值进入 OpenCode `providerOptions.serviceTier` 与 pi `options.serviceTier`
     pub service_tier: Option<String>,
     pub identity: ResponsesRequestIdentity,
-    /// 选定账号的访问令牌，pi 原样当作 `apiKey`
+    /// 这一次调用选定账号的访问令牌，pi 原样当作 `apiKey`
+    /// 令牌只属于这次调用，不把另一账号的 host、client 或线程身份带进来
+    /// 桥不从令牌推导原生 account ID，也不保存 OAuth client ID 或安装 host ID
     /// `provider` 为 openai、`base_url` 精确为 `https://api.openai.com/v1` 且令牌不以 `sk-` 开头时，源码走 ChatGPT 分支
     /// 桥不改写成 `unused`，也不改用下游 `Authorization`
     pub bearer: SecretString,

@@ -57,6 +57,8 @@ pub(crate) struct HttpRequest {
     pub(crate) body_base64: String,
     #[serde(default)]
     pub(crate) call_id: u32,
+    #[serde(default)]
+    pub(crate) request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,12 +66,28 @@ pub(crate) struct Credit {
     pub(crate) bytes: usize,
     #[serde(default)]
     pub(crate) call_id: u32,
+    #[serde(default)]
+    pub(crate) request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct WorkerResult {
+    #[serde(default)]
+    pub(crate) request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct EventWait {
+    #[serde(default)]
+    pub(crate) request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorkerFailure {
     pub(crate) cancelled: bool,
     pub(crate) message: String,
+    #[serde(default)]
+    pub(crate) request_id: String,
 }
 
 #[derive(Serialize)]
@@ -78,6 +96,7 @@ pub(crate) struct CallPayload<'a> {
     pub(crate) model: &'a str,
     pub(crate) base_url: &'a str,
     pub(crate) session_id: &'a str,
+    pub(crate) request_id: &'a str,
     pub(crate) bearer: &'a str,
     pub(crate) prompt: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,10 +109,6 @@ pub(crate) struct CallPayload<'a> {
     pub(crate) service_tier: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) session_affinity_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) thread_id: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) client_request_id: Option<&'a str>,
     pub(crate) downstream_headers: &'a [(String, String)],
     pub(crate) event_window: usize,
 }

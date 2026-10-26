@@ -1,5 +1,5 @@
 //! 固定上游源码的离线请求、SSE 解析、取消和进程回收
-//! 有效 `service_tier` 与原请求会话身份也在这里对照两边真实请求
+//! 有效 `service_tier`、本次 request ID 与会话身份也在这里对照两边真实请求
 //! 超时隔离、失败后的同会话重试、事件窗口、发送核对和源码清单也在这里
 
 use std::{
@@ -32,6 +32,7 @@ use tokio::{
 const TOKEN: &str = "bridge-sentinel-token";
 const TOKEN_PI: &str = "bridge-sentinel-token-b";
 const SESSION: &str = "ses_harness_bridge";
+const REQUEST: &str = "req_harness_bridge";
 const MODEL: &str = "gpt-4.1-mini";
 const PROMPT: &str = "Say hello.";
 const INSTRUCTIONS: &str = "You are concise.";
@@ -380,6 +381,17 @@ fn json_body(body: &[u8]) -> Value {
     serde_json::from_slice(body).expect("json body")
 }
 
+fn json_body_text(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).into_owned()
+}
+
+fn assert_attempt_stays_off_the_wire(headers: &[(String, String)], request_id: &str) {
+    for (name, value) in headers {
+        assert_ne!(value, request_id, "{name}");
+        assert_ne!(name.to_ascii_lowercase(), "x-request-id");
+    }
+}
+
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
         .iter()
@@ -405,6 +417,7 @@ fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
         model: MODEL.to_owned(),
         base_url: "https://api.openai.com/v1".to_owned(),
         session_id: SESSION.to_owned(),
+        request_id: REQUEST.to_owned(),
         bearer: SecretString::from(token.to_owned()),
         prompt: PROMPT.to_owned(),
         instructions: Some(INSTRUCTIONS.to_owned()),
@@ -606,15 +619,15 @@ async fn service_tier_and_request_identity_follow_both_sources() {
     let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
     let identity = ResponsesRequestIdentity {
         session_affinity_id: Some("ses_parent_affinity".to_owned()),
-        thread_id: Some("thr_original_thread".to_owned()),
-        client_request_id: Some("req_original_client".to_owned()),
     };
     for tier in ["priority", "flex"] {
+        let opencode_request = format!("req_oc_{tier}");
         let opencode_result = call_with(
             &session,
             ResponsesHarness::OpenCode,
             TOKEN,
             Some(tier),
+            &opencode_request,
             identity.clone(),
         )
         .await;
@@ -628,20 +641,24 @@ async fn service_tier_and_request_identity_follow_both_sources() {
         );
         assert_eq!(
             header(&opencode_result.request.headers, "thread-id"),
-            Some("thr_original_thread")
+            Some(SESSION)
         );
         assert_eq!(
             header(&opencode_result.request.headers, "x-client-request-id"),
-            Some("req_original_client")
+            Some(SESSION)
         );
+        assert_attempt_stays_off_the_wire(&opencode_result.request.headers, &opencode_request);
+        assert!(!json_body_text(&opencode_result.request.body).contains(&opencode_request));
         assert!(header(&opencode_result.request.headers, "openai-beta").is_none());
         assert_clean(&session, TOKEN);
 
+        let pi_request = format!("req_pi_{tier}");
         let pi_result = call_with(
             &session,
             ResponsesHarness::Pi,
             TOKEN_PI,
             Some(tier),
+            &pi_request,
             identity.clone(),
         )
         .await;
@@ -663,6 +680,8 @@ async fn service_tier_and_request_identity_follow_both_sources() {
         assert!(header(&pi_result.request.headers, "session-id").is_none());
         let user_agent = header(&pi_result.request.headers, "user-agent").unwrap_or("");
         assert!(user_agent.starts_with("pi/1.4.0 ("), "{user_agent}");
+        assert_attempt_stays_off_the_wire(&pi_result.request.headers, &pi_request);
+        assert!(!json_body_text(&pi_result.request.body).contains(&pi_request));
         assert_clean(&session, TOKEN_PI);
     }
 
@@ -671,16 +690,24 @@ async fn service_tier_and_request_identity_follow_both_sources() {
         ResponsesHarness::OpenCode,
         TOKEN,
         Some("  "),
+        "req_oc_blank",
         ResponsesRequestIdentity::default(),
     )
     .await;
     assert!(json_body(&blank.request.body).get("service_tier").is_none());
     assert_eq!(header(&blank.request.headers, "session-id"), Some(SESSION));
+    assert_eq!(header(&blank.request.headers, "thread-id"), Some(SESSION));
+    assert_eq!(
+        header(&blank.request.headers, "x-client-request-id"),
+        Some(SESSION)
+    );
+    assert_attempt_stays_off_the_wire(&blank.request.headers, "req_oc_blank");
     let blank_pi = call_with(
         &session,
         ResponsesHarness::Pi,
         TOKEN_PI,
         Some("  "),
+        "req_pi_blank",
         identity,
     )
     .await;
@@ -712,10 +739,12 @@ async fn call_with(
     harness: ResponsesHarness,
     token: &str,
     service_tier: Option<&str>,
+    request_id: &str,
     identity: ResponsesRequestIdentity,
 ) -> ParsedResponses {
     let mut call = sample_call(harness, token);
     call.service_tier = service_tier.map(str::to_owned);
+    call.request_id = request_id.to_owned();
     call.identity = identity;
     expect_call(
         session,
@@ -791,12 +820,132 @@ fn sha256_files(paths: &[PathBuf]) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn same_session_calls_keep_attempt_and_account_apart() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let mut missing = sample_call(ResponsesHarness::OpenCode, TOKEN);
+    missing.request_id = "  ".to_owned();
+    let rejected = session
+        .open_responses(missing, &CancellationToken::new())
+        .await;
+    assert!(
+        matches!(rejected, Err(HarnessError::Protocol)),
+        "blank request id started a call"
+    );
+    assert!(origin.recorded.lock().expect("records").is_empty());
+
+    let identity = ResponsesRequestIdentity {
+        session_affinity_id: Some("ses_parent_affinity".to_owned()),
+    };
+    let mut first = sample_call(ResponsesHarness::OpenCode, TOKEN);
+    first.request_id = "req_attempt_a".to_owned();
+    first.prompt = "prompt-a".to_owned();
+    first.identity = identity.clone();
+    let parsed_a = complete(&session, first).await;
+    assert_account_token(&parsed_a.request.headers, TOKEN);
+    assert_eq!(
+        header(&parsed_a.request.headers, "session-id"),
+        Some("ses_parent_affinity")
+    );
+    assert_eq!(
+        header(&parsed_a.request.headers, "thread-id"),
+        Some(SESSION)
+    );
+    assert_eq!(
+        header(&parsed_a.request.headers, "x-client-request-id"),
+        Some(SESSION)
+    );
+    assert!(json_body_text(&parsed_a.request.body).contains("prompt-a"));
+    assert!(!json_body_text(&parsed_a.request.body).contains("prompt-b"));
+    assert_attempt_stays_off_the_wire(&parsed_a.request.headers, "req_attempt_a");
+
+    let mut second = sample_call(ResponsesHarness::OpenCode, TOKEN_PI);
+    second.request_id = "req_attempt_b".to_owned();
+    second.prompt = "prompt-b".to_owned();
+    second.identity = identity;
+    let parsed_b = complete(&session, second).await;
+    assert_account_token(&parsed_b.request.headers, TOKEN_PI);
+    assert_eq!(
+        header(&parsed_b.request.headers, "session-id"),
+        Some("ses_parent_affinity")
+    );
+    assert_eq!(
+        header(&parsed_b.request.headers, "thread-id"),
+        Some(SESSION)
+    );
+    assert_eq!(
+        header(&parsed_b.request.headers, "x-client-request-id"),
+        Some(SESSION)
+    );
+    assert!(json_body_text(&parsed_b.request.body).contains("prompt-b"));
+    assert!(!json_body_text(&parsed_b.request.body).contains("prompt-a"));
+    assert_attempt_stays_off_the_wire(&parsed_b.request.headers, "req_attempt_a");
+    assert_attempt_stays_off_the_wire(&parsed_b.request.headers, "req_attempt_b");
+
+    let mut third = sample_call(ResponsesHarness::Pi, TOKEN);
+    third.request_id = "req_attempt_c".to_owned();
+    third.prompt = "prompt-c".to_owned();
+    let parsed_c = complete(&session, third).await;
+    assert_account_token(&parsed_c.request.headers, TOKEN);
+    assert_eq!(
+        header(&parsed_c.request.headers, "session_id"),
+        Some(SESSION)
+    );
+    assert_eq!(
+        header(&parsed_c.request.headers, "x-client-request-id"),
+        Some(SESSION)
+    );
+    assert_eq!(
+        json_body(&parsed_c.request.body)["prompt_cache_key"].as_str(),
+        Some(SESSION)
+    );
+    assert!(json_body_text(&parsed_c.request.body).contains("prompt-c"));
+    assert!(!json_body_text(&parsed_c.request.body).contains("prompt-b"));
+    assert_attempt_stays_off_the_wire(&parsed_c.request.headers, "req_attempt_a");
+    assert_attempt_stays_off_the_wire(&parsed_c.request.headers, "req_attempt_c");
+
+    let records = origin.recorded.lock().expect("records").clone();
+    assert_eq!(records.len(), 3, "records={}", records.len());
+    let bearer_a = format!("Bearer {TOKEN}");
+    let bearer_b = format!("Bearer {TOKEN_PI}");
+    assert_eq!(
+        header(&records[0].headers, "authorization"),
+        Some(bearer_a.as_str())
+    );
+    assert_eq!(
+        header(&records[1].headers, "authorization"),
+        Some(bearer_b.as_str())
+    );
+    assert_eq!(
+        header(&records[2].headers, "authorization"),
+        Some(bearer_a.as_str())
+    );
+    assert!(json_body_text(&records[0].body).contains("prompt-a"));
+    assert!(json_body_text(&records[1].body).contains("prompt-b"));
+    assert!(!json_body_text(&records[1].body).contains("prompt-a"));
+    assert!(json_body_text(&records[2].body).contains("prompt-c"));
+    assert!(!json_body_text(&records[2].body).contains("prompt-b"));
+    for record in &records {
+        assert_attempt_stays_off_the_wire(&record.headers, "req_attempt_a");
+        assert_attempt_stays_off_the_wire(&record.headers, "req_attempt_b");
+        assert_attempt_stays_off_the_wire(&record.headers, "req_attempt_c");
+        assert!(!json_body_text(&record.body).contains("req_attempt_"));
+        assert!(!json_body_text(&record.body).contains("req_bridge"));
+    }
+    assert_clean(&session, TOKEN);
+    assert_clean(&session, TOKEN_PI);
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn timeout_isolates_the_call_before_the_next_request() {
     let (opencode, pi) = checkouts();
     let origin = Origin::serve(OriginMode::HoldFirst).await;
     let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
     let mut first = sample_call(ResponsesHarness::Pi, TOKEN);
     first.prompt = "prompt-a".to_owned();
+    first.request_id = "req_attempt_a".to_owned();
     first.timeout = Duration::from_secs(5);
     let mut stream = session
         .open_responses(first, &CancellationToken::new())
@@ -830,6 +979,7 @@ async fn timeout_isolates_the_call_before_the_next_request() {
     {
         let mut second = sample_call(ResponsesHarness::Pi, TOKEN_PI);
         second.prompt = "prompt-b".to_owned();
+        second.request_id = "req_attempt_b".to_owned();
         let cancel_second = CancellationToken::new();
         let second_call = drive_call(&session, second, &cancel_second);
         tokio::pin!(second_call);
@@ -883,6 +1033,14 @@ async fn timeout_isolates_the_call_before_the_next_request() {
             header(&records[1].headers, "authorization"),
             Some(bearer_b.as_str())
         );
+        assert_eq!(header(&records[0].headers, "session_id"), Some(SESSION));
+        assert_eq!(header(&records[1].headers, "session_id"), Some(SESSION));
+        assert_attempt_stays_off_the_wire(&records[0].headers, "req_attempt_a");
+        assert_attempt_stays_off_the_wire(&records[0].headers, "req_attempt_b");
+        assert_attempt_stays_off_the_wire(&records[1].headers, "req_attempt_a");
+        assert_attempt_stays_off_the_wire(&records[1].headers, "req_attempt_b");
+        assert_attempt_stays_off_the_wire(&parsed.request.headers, "req_attempt_a");
+        assert_attempt_stays_off_the_wire(&parsed.request.headers, "req_attempt_b");
         assert_clean(&session, TOKEN);
         assert_clean(&session, TOKEN_PI);
     }
