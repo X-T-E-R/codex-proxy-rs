@@ -1,6 +1,7 @@
 """固定源码与封装漂移必须被打包脚本拒绝"""
 
 import io
+import json
 from pathlib import Path
 import tarfile
 import tempfile
@@ -35,7 +36,6 @@ class SnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "openai-harness"
             assemble.verify(root / "sources")
-            import json
             dependencies = json.loads((assemble.WORKER / "package.json").read_text(encoding="utf-8"))["dependencies"]
             worker = root / "worker"
             worker.mkdir()
@@ -45,6 +45,11 @@ class SnapshotTests(unittest.TestCase):
                 installed = worker / "node_modules" / package / "package.json"
                 installed.parent.mkdir(parents=True)
                 installed.write_text(json.dumps({"version": version}))
+            jose = worker / "node_modules/jose/package.json"
+            jose.unlink()
+            with self.assertRaisesRegex(AssertionError, "missing locked worker dependency: jose"):
+                assemble.seal_bundle(root)
+            jose.write_text(json.dumps({"version": dependencies["jose"]}))
             assemble.seal_bundle(root)
             assemble.verify_bundle(root)
             (root / "sources/opencode/packages/core/src/plugin/provider/chatgpt.ts").write_text("changed")
