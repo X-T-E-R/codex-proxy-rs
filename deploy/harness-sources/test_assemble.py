@@ -32,6 +32,18 @@ class SnapshotTests(unittest.TestCase):
             finally:
                 assemble.SNAPSHOT = original
 
+    def test_rejects_published_pi_model_data_drift(self):
+        original = assemble.PI_PUBLISHED_DATA
+        with tempfile.TemporaryDirectory() as temp:
+            changed = Path(temp) / "openai.json"
+            changed.write_bytes(original.read_bytes() + b"\n")
+            try:
+                assemble.PI_PUBLISHED_DATA = changed
+                with self.assertRaisesRegex(AssertionError, "published pi model data drift"):
+                    assemble.expected_files()
+            finally:
+                assemble.PI_PUBLISHED_DATA = original
+
     def test_rejects_bundle_drift(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "openai-harness"

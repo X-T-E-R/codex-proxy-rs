@@ -2,6 +2,7 @@
 """生成并验证可离线部署的固定 OpenAI harness 源码快照"""
 
 import argparse
+import base64
 import gzip
 import hashlib
 import io
@@ -10,6 +11,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import tarfile
+from urllib.request import urlopen
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -20,14 +22,24 @@ COMMITS = {
     "opencode": "ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17",
     "pi": "f9daca3480732d0042b1df3a6e27221f597a620d",
 }
-# OAuth 在 Responses 清单之外增加自身上游源码，数据面仍独占 source-manifest.json
-OAUTH = {
+# 发行包 @earendil-works/pi-ai@1.4.0 的 provenance 指向 Git commit 4a080252；
+# 模型目录 wrapper、model-catalog 与 LICENSE 在固定源码 f9daca3 中字节相同
+PI_DATA = ("pi", "packages/ai/src/providers/data/openai.json")
+PI_PUBLISHED_DATA = HERE / "pi-openai-1.4.0.json"
+PI_PUBLISHED_SHA256 = "cf5e119eb05f47bbf1dbad179de6a07b904bf7673e96691be72ab0b1fe40a781"
+PI_PACKAGE_INTEGRITY = "hQM/C4+1w8rHYACzDDf+0vQMnEnpzIop1tptIERVgR3ZeT/hHSzBNG8PaWPgxWQjqSeKCyBZSyp8uTT6eKK1pQ=="
+PI_PACKAGE_URL = "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.4.0.tgz"
+# OAuth 与模型目录在 Responses 清单之外增加上游源码，数据面仍独占 source-manifest.json
+ADDITIONAL = {
     ("opencode", "LICENSE"): "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b",
     ("opencode", "packages/core/src/plugin/provider/chatgpt.ts"): "27f84a6177a6e01b5a1fc15dbcd39510a1d239779034533a548162e979425064",
     ("pi", "LICENSE"): "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48",
     ("pi", "packages/ai/src/auth/oauth/openai-chatgpt.ts"): "ad9dbdd7ffa52fcbaff1d1be2d0ba97b643476aaf8930e6dd67147bf35c837de",
     ("pi", "packages/ai/src/auth/oauth/pkce.ts"): "33835111577490103dbb7509b7687db1643691d7b425845428f3cbeb873fe9cf",
     ("pi", "packages/ai/src/utils/oauth-page.ts"): "a5c0f7ddd7a1a803c8fbaf65adaffb6a7710a70a75b5559a749ba811942fab40",
+    ("pi", "packages/ai/src/providers/openai.models.ts"): "178182f4c2ac6ea1c984aa54c015cd78d8eb7ca654d4a0817d745da380ddd231",
+    ("pi", "packages/ai/src/model-catalog.ts"): "567b559600439eac5e6c341658bb45b149c5e8a22e34624a54ad5a06f5a92885",
+    PI_DATA: PI_PUBLISHED_SHA256,
 }
 
 
@@ -37,8 +49,9 @@ def expected_files():
         assert manifest[f"{root}_commit"] == commit, f"{root} commit drift"
     entries = {(entry["root"], entry["path"]): entry["sha256"] for entry in manifest["files"]}
     assert len(entries) == len(manifest["files"]) == 158, "source manifest duplicates or changed without snapshot review"
-    assert not (entries.keys() & OAUTH.keys()), "OAuth source duplicate"
-    entries.update(OAUTH)
+    assert not (entries.keys() & ADDITIONAL.keys()), "additional source duplicate"
+    entries.update(ADDITIONAL)
+    assert hashlib.sha256(PI_PUBLISHED_DATA.read_bytes()).hexdigest() == PI_PUBLISHED_SHA256, "published pi model data drift"
     for (root, relative), sha in entries.items():
         path = PurePosixPath(relative)
         assert root in COMMITS and not path.is_absolute() and ".." not in path.parts
@@ -48,7 +61,7 @@ def expected_files():
 
 def verified_bytes(entries, checkouts):
     for (root, relative), sha in sorted(entries.items()):
-        source = checkouts[root] / relative
+        source = PI_PUBLISHED_DATA if (root, relative) == PI_DATA else checkouts[root] / relative
         assert source.is_file() and not source.is_symlink(), f"missing or linked source: {source}"
         data = source.read_bytes()
         assert hashlib.sha256(data).hexdigest() == sha, f"pinned source drift: {root}/{relative}"
@@ -132,14 +145,32 @@ def verify_bundle(destination):
     print(f"Verified harness bundle with {len(manifest['files'])} files")
 
 
+def fetch_pi_data():
+    # 只在维护固定源码快照时下载一次；发行构建始终消费仓库内的已校验字节
+    with urlopen(PI_PACKAGE_URL, timeout=60) as response:
+        package_bytes = response.read()
+    integrity = base64.b64encode(hashlib.sha512(package_bytes).digest()).decode("ascii")
+    assert integrity == PI_PACKAGE_INTEGRITY, "pi 1.4.0 published package integrity drift"
+    with tarfile.open(fileobj=io.BytesIO(package_bytes), mode="r:gz") as archive:
+        package = json.loads(archive.extractfile("package/package.json").read())
+        assert package["name"] == "@earendil-works/pi-ai" and package["version"] == "1.4.0" and package["license"] == "MIT"
+        data = archive.extractfile("package/dist/providers/data/openai.json").read()
+    assert hashlib.sha256(data).hexdigest() == PI_PUBLISHED_SHA256, "pi 1.4.0 OpenAI catalog drift"
+    json.loads(data)
+    PI_PUBLISHED_DATA.write_bytes(data)
+    print("Pinned pi 1.4.0 published OpenAI model catalog")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["snapshot", "verify", "assemble", "seal", "verify-bundle"])
+    parser.add_argument("command", choices=["fetch-pi-data", "snapshot", "verify", "assemble", "seal", "verify-bundle"])
     parser.add_argument("--opencode", type=Path, help="fixed OpenCode checkout, snapshot command only")
     parser.add_argument("--pi", type=Path, help="fixed pi checkout, snapshot command only")
     parser.add_argument("--output", type=Path, help="output openai-harness directory, assemble command only")
     args = parser.parse_args()
-    if args.command == "snapshot":
+    if args.command == "fetch-pi-data":
+        fetch_pi_data()
+    elif args.command == "snapshot":
         assert args.opencode and args.pi, "snapshot requires both upstream checkouts"
         create({"opencode": args.opencode, "pi": args.pi})
     elif args.command == "verify":

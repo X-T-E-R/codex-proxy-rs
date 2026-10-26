@@ -130,7 +130,25 @@ async function responsesSmoke(harness) {
   }
 }
 
+function catalogSmoke() {
+  const source = pathToFileURL(path.join(env.CPR_PI_SOURCE, "packages/ai/src/providers/openai.models.ts")).href;
+  const script = `import { OPENAI_MODELS, OPENAI_CLASSIFIER_MODELS } from ${JSON.stringify(source)};
+console.log(JSON.stringify({ chat: Object.keys(OPENAI_MODELS).length, classifier: Object.keys(OPENAI_CLASSIFIER_MODELS).length,
+  model: OPENAI_MODELS["gpt-5.6-terra"], decision: OPENAI_CLASSIFIER_MODELS["gpt-6-luna"] }));`;
+  const result = spawnSync(node, ["--experimental-transform-types", "--import", pathToFileURL(path.join(worker, "register.mjs")).href, "--input-type=module", "--eval", script], {
+    env, encoding: "utf8", timeout: 30000,
+  });
+  assert.equal(result.status, 0, `pi catalog import failed: ${result.stderr}`);
+  const catalog = JSON.parse(result.stdout);
+  assert.equal(catalog.chat, 42);
+  assert.equal(catalog.classifier, 1);
+  assert.equal(catalog.model?.id, "gpt-5.6-terra");
+  assert.equal(catalog.model?.provider, "openai");
+  assert.equal(catalog.decision?.id, "gpt-6-luna");
+}
+
 try {
+  catalogSmoke();
   for (const harness of ["opencode", "pi"]) {
     await oauthSmoke(harness);
     if (process.argv[4] !== "--oauth-only") await responsesSmoke(harness);

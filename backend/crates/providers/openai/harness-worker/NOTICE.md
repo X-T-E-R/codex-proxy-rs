@@ -2,13 +2,18 @@
 
 This directory is the Provider-owned Node worker. Runtime bundles include exactly the
 pinned source files it executes, plus the required upstream license texts. The source
-snapshot is checked against `source-manifest.json` and the OAuth source hashes in
-`deploy/harness-sources/assemble.py`.
+snapshot is checked against `source-manifest.json` and the extra OAuth/catalog
+hashes in `deploy/harness-sources/assemble.py`.
 
-| Source | Commit | License | Copyright |
+| Source | Revision | License | Copyright |
 | --- | --- | --- | --- |
 | OpenCode `packages/ai`, `packages/schema`, `packages/core/src/plugin/provider/chatgpt.ts` | `ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17` | MIT | Copyright (c) 2025 opencode |
 | pi `packages/ai`, `packages/telemetry` | `f9daca3480732d0042b1df3a6e27221f597a620d` | MIT | Copyright (c) 2025 Mario Zechner |
+| pi `packages/ai/src/providers/data/openai.json` | Published `@earendil-works/pi-ai@1.4.0`, provenance commit `4a080252f06caf63a525d7873c5d94d3c23887e0` | MIT | Copyright (c) 2025 Mario Zechner |
+
+The published version's source `openai.models.ts`, `model-catalog.ts` and
+`LICENSE` match the pinned checkout byte-for-byte. The published catalog is
+stored in the source snapshot; packaging never fetches the live models.dev API.
 
 Runtime packages installed from `package-lock.json`:
 
