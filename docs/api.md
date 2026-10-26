@@ -2067,9 +2067,11 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountName`、`model`、`error`、`errorTypes`、`status`，
 以及 `requestId`、`upstreamRequestId`、`responseId` 精确定位、`search` 搜索和 `statusCode` 筛选
 
-`error` 按错误码、错误分类、错误消息、状态码或常见中英文错误词（如 `过载`、`overloaded`）匹配请求终态及保留的中间尝试事件，
+`error` 按错误码、错误分类、错误消息、受控错误详情、状态码或常见中英文错误词（如 `过载`、`overloaded`）匹配请求终态及保留的中间尝试事件，
 最多 512 字节且不允许控制字符，首尾空白忽略，空值不参与筛选。
 `search` 对模型、账号和 Key 名称保留前缀搜索，同时支持上述错误搜索。
+ASCII 标识符只按完整别名扩展分类，具体原码如 `turn_rate_limit_exceeded` 按字面量包含匹配，不泛化为全部限流或配额错误；
+自然语言短语可命中常见错误词，例如“服务过载错误”匹配过载类
 `errorTypes` 接受逗号分隔的错误类型枚举（`overloaded`、`status_503`、`rate_limited`、`upstream_unavailable`、`timeout`、`no_available_provider`、`capacity_unavailable`、`provider_infrastructure_unavailable`、`unauthorized`、`continuation_recovery_required`、`invalid_request`、`process_interrupted`），
 忽略空项和重复项，未知值返回 `400`。多选之间为 OR，与其他筛选条件为 AND
 
@@ -2077,13 +2079,21 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 各接口拒绝未知参数，明细筛选不改变顶部统计范围
 
 请求列表的 `status` 可取 `success`、`error`、`all`，未知值返回 `400`。
-未显式指定时，带精确定位、`search` 或 `statusCode` 的查询默认 `all`，否则带非空 `error` 或 `errorTypes` 的查询默认 `error`，其余默认 `success`。
-`success` 沿用成功用量记录范围，`error` 包含最终 `failed`、`incomplete` 的请求，
-`all` 合并成功用量记录及全部非成功请求，包括执行中和已取消请求。每个请求只返回一行，
-重试中间错误不改变请求最终分类；`logicalOutcome` 保留真实结果。状态筛选只影响明细列表，
-不改变顶部统计，独立运维事件仍通过 `/api/admin/operations/errors` 查询
+未显式指定时，带精确定位、`search`、`statusCode`、非空 `error` 或 `errorTypes` 的查询默认 `all`，其余默认 `success`。
+`success` 沿用成功用量记录范围，`error` 包含最终 `failed`、`incomplete` 的请求。
+`all` 的基本范围合并成功用量记录及全部非成功请求，包括执行中和已取消请求。
+`all` 带 `error` 或 `errorTypes` 时，也纳入匹配错误的成功预热或恢复请求；`search` 的错误匹配同样覆盖这些保留记录，
+名称前缀匹配仍沿用基本范围。显式 `success` 或 `error` 不放宽该状态的范围。
+每个请求只返回一行，中间错误不改变最终分类；`logicalOutcome` 保留真实结果。
+状态筛选只影响明细列表，不改变顶部统计，独立运维事件仍通过 `/api/admin/operations/errors` 查询
 
-请求列表的 `errorCode` / `errorMessage` 提供最终请求的错误码与错误信息，未记录时为 `null`
+请求列表的 `errorCode` / `errorMessage` 和详情的 `errorCode` / `errorKind` 保留请求终态，未记录时为 `null`。
+列表的 `matchedError` 为命中当前错误搜索或类型筛选的错误；未命中或未使用这些条件时为 `null`。
+它包含 `source`（`terminal` 或 `attempt`）、`attemptIndex`、`errorCode`、`errorKind` 和 `errorMessage`，优先返回匹配的终态，否则返回最近匹配的保留尝试。
+错误条件可命中重试后成功的请求，中间错误不覆盖终态字段或最终 `logicalOutcome`；完整尝试信息见请求详情
+
+请求列表和详情的 `upstreamSendState` 保留存储的发送事实：`sent` 表示已发送，`not_sent` 表示确认未发送，
+`ambiguous` 表示无法确认；缺失或未知值显示为未知。该字段不由 HTTP 状态码或尝试次数推算，`sent` 也不表示上游执行成功
 
 诊断 `dimension` 可取 `model`、`account`、
 `apiKey`、`provider`、`transport`、`failureClass`、`status`。诊断按请求量降序返回最多 100 项，
@@ -2121,22 +2131,25 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 请求明细的 `clientApiKeyName`、`accountName` 按字面量包含匹配请求保存的历史名称快照，区分大小写，
 不解析为 ID，也不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
 
-请求列表的 `search` 按字面量前缀匹配模型、Key/账号引用和已存账号名称/邮箱快照，Key 名称匹配不区分大小写。
-运维错误列表同样使用字面量前缀搜索，另接受 `requestId`、`upstreamRequestId`、`responseId` 精确定位。
-两者均不支持密钥值搜索；请求详情通过 `/api/admin/usage/records/detail?id=...` 查询
+请求列表与运维错误列表的 `search` 按字面量前缀匹配模型、Key/账号引用和已存账号名称/邮箱快照，Key 名称匹配不区分大小写，
+同时匹配错误码、分类、消息、受控详情及上述中英文错误词。运维错误列表的错误匹配以该行来源为准，不替换为请求的其他尝试。
+运维错误列表另接受 `requestId`、`upstreamRequestId`、`responseId` 精确定位；两者均不支持密钥值搜索。
+请求详情通过 `/api/admin/usage/records/detail?id=...` 查询
 
 ### 服务端错误族摘要
 
-`GET /api/admin/errors/summary` 接受 `period`、`asOf` 或 `startTime/endTime`，默认 7 天，单次最长 31 天。
-返回 `fromInclusive/toExclusive`、部署 `timezone` 和 `timeBasis:"started_at"`，请求按开始时间落日桶
+`GET /api/admin/errors/summary` 接受时间范围（`period`、`asOf` 或 `startTime/endTime`）与可选 `provider`，默认 7 天，单次最长 31 天。
+返回 `fromInclusive/toExclusive`、部署 `timezone`、`provider` 和 `timeBasis:"started_at"`，请求按开始时间落日桶；`provider:null` 表示全部平台。
+摘要不应用列表的模型、账号、Key 名称或错误词等局部筛选
 
 `totals` 与 `daily[]` 使用同一组字段：`retainedRequests`、`serverRelatedRequests`、`terminalServerRelatedRequests`、
 `overloaded`、`status503`、`otherServerPrefix`、`other5xx`、`upstream503`、`infrastructure503`、`noProvider503`、
 `unclassified503`、`client200Errors`、`legacyMessageMatches`；日桶另含 `day`
 
 `serverRelatedRequests` 对请求终态和仍保留的中间错误事件取请求 ID 去重集合，纳入 overloaded、server 前缀和 5xx，
-包括 client200 的流内失败；`terminalServerRelatedRequests` 仅看终态。分类读取已存 code、受控错误结构和旧错误消息，
-不扫描请求正文。子项可能重叠，不相加；本地基础设施或无可用账号的 503 不标成上游过载
+包括重试后成功的请求及 client200 的流内失败；`terminalServerRelatedRequests` 仅看终态。分类读取已存 code、受控错误结构和旧错误消息，
+不扫描请求正文。子项可能重叠，不相加；本地基础设施或无可用账号的 503 不标成上游过载。
+核对 `overloaded` 明细时，沿用摘要的时间范围与 `provider`，请求列表使用 `status=all&errorTypes=overloaded`，不附加局部筛选
 
 `attempts` 返回 `observed/serverRelated/overloaded/status503`，按请求和 attempt 去重，不重复累计相同的末次事件，
 `coverage:"observed_only"` 表示并非完整尝试账本。`source:"retained_records"` 及窗内
@@ -2158,9 +2171,9 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 
 汇总与洞察中的请求数与 outcome 分布覆盖筛选范围内全部请求；token、缓存、延迟与成本聚合仅统计
 已完整交付客户端的成功推理响应。OpenAI 的 `generate: false` 连接与上下文准备记录归类为
-`requestKind: "prewarm"`，不进入用量列表、账号用量或额度预测的 Token / 费用覆盖统计，但仍可按
-请求 ID 读取审计详情，响应中的额度观测仍可用于预测配对。此分类以实际 `generate` 字段为准，
-不能仅凭客户端的同名 metadata 或输出 Token 为零排除普通推理；其他 Provider 不套用该规则
+`requestKind: "prewarm"`，不进入普通用量列表、账号用量或额度预测的 Token / 费用覆盖统计；仍可按请求 ID 读取审计详情，
+也可在 `status=all` 的错误探索中按上述规则查询，响应中的额度观测仍可用于预测配对。
+此分类以实际 `generate` 字段为准，不能仅凭客户端的同名 metadata 或输出 Token 为零排除普通推理；其他 Provider 不套用该规则
 
 `latencyMs` 从模型执行会话开始计到终结，包含账号选择、重试及流交付等待，不包含此前的入口解析、路由和准入。
 `firstTokenLatencyMs` 与它使用同一计时起点，首字边界由 Provider 协议定义。
