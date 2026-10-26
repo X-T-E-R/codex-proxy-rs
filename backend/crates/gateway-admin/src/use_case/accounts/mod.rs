@@ -50,8 +50,6 @@ use super::{
     validate_prepared_rotation,
 };
 
-const CONNECTION_TEST_INPUT: &str = "Reply with exactly OK.";
-
 /// 统一账号页消费的服务
 #[async_trait]
 pub trait AccountsService: Send + Sync {
@@ -251,6 +249,16 @@ pub trait AccountsService: Send + Sync {
         &self,
         account_id: ProviderAccountId,
         upstream_model: UpstreamModelId,
+    ) -> Result<AccountConnectionTestEventStream, AdminError> {
+        self.test_connection_with_prompt(account_id, upstream_model, None)
+            .await
+    }
+
+    async fn test_connection_with_prompt(
+        &self,
+        account_id: ProviderAccountId,
+        upstream_model: UpstreamModelId,
+        prompt: Option<String>,
     ) -> Result<AccountConnectionTestEventStream, AdminError>;
 }
 
@@ -1296,16 +1304,18 @@ impl AccountsService for DefaultAccountsService {
             .map_err(|error| map_provider_error(error, "provider model catalog document"))
     }
 
-    async fn test_connection(
+    async fn test_connection_with_prompt(
         &self,
         account_id: ProviderAccountId,
         upstream_model: UpstreamModelId,
+        prompt: Option<String>,
     ) -> Result<AccountConnectionTestEventStream, AdminError> {
+        let input = crate::model::accounts::connection_test_prompt(prompt.as_deref())?;
         let (stored, provider) = self.provider_for_account(&account_id).await?;
         let account = stored.account;
         let model = upstream_model.as_str().to_owned();
         let operation = provider
-            .connection_test_operation(&upstream_model, CONNECTION_TEST_INPUT)
+            .connection_test_operation(&upstream_model, &input)
             .await
             .map_err(|error| map_provider_error(error, "provider connection test"))?;
         let initial = vec![
@@ -1314,7 +1324,7 @@ impl AccountsService for DefaultAccountsService {
             },
             AccountConnectionTestEvent::Request {
                 model,
-                input_text: CONNECTION_TEST_INPUT.to_owned(),
+                input_text: input,
                 stream: true,
                 store: false,
             },

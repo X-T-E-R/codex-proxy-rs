@@ -1338,6 +1338,89 @@ fn provider_registry_should_reject_duplicate_kind() {
 }
 
 #[tokio::test]
+async fn connection_test_uses_default_or_custom_prompt_in_both_events_and_provider_operation() {
+    #[derive(Default)]
+    struct CapturingProbe(Mutex<Vec<AccountProbeRequest>>);
+
+    impl AccountProbe for CapturingProbe {
+        fn probe(
+            &self,
+            request: AccountProbeRequest,
+            _: Option<Arc<gateway_core::routing::RuntimeSnapshot>>,
+        ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
+            self.0.lock().unwrap().push(request);
+            Box::pin(async {
+                Ok(AccountProbeResult {
+                    text: vec!["fixture result".into()],
+                })
+            })
+        }
+    }
+
+    let probe = Arc::new(CapturingProbe::default());
+    let services = accounts_service_with_probe(
+        FakeProviderAdmin::new("openai", events()),
+        FakeAccountStore::new("openai", events()),
+        probe.clone(),
+    )
+    .await;
+    for (prompt, expected) in [
+        (None, "不搜索互联网，直接告诉我日本首相是谁"),
+        (
+            Some("  自定义测试\n只回答姓名  ".to_owned()),
+            "自定义测试\n只回答姓名",
+        ),
+    ] {
+        let events = services
+            .accounts()
+            .test_connection_with_prompt(
+                ProviderAccountId::new("acct_test").unwrap(),
+                gateway_core::routing::UpstreamModelId::new("gpt-5.4").unwrap(),
+                prompt,
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(&events[1], AccountConnectionTestEvent::Request { input_text, .. } if input_text == expected)
+        );
+        let captured = probe.0.lock().unwrap();
+        let Operation::Generate(operation) = &captured.last().unwrap().operation else {
+            panic!("generate probe")
+        };
+        assert_eq!(operation.protocol_payload().body()["input"], expected);
+        assert!(matches!(
+            events.last(),
+            Some(AccountConnectionTestEvent::Completed)
+        ));
+    }
+    for prompt in [
+        "".to_owned(),
+        " \n ".to_owned(),
+        "bad\u{0085}control".to_owned(),
+        "中".repeat(1366),
+    ] {
+        assert!(
+            services
+                .accounts()
+                .test_connection_with_prompt(
+                    ProviderAccountId::new("acct_test").unwrap(),
+                    gateway_core::routing::UpstreamModelId::new("gpt-5.4").unwrap(),
+                    Some(prompt),
+                )
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(
+        probe.0.lock().unwrap().len(),
+        2,
+        "invalid text must not invoke the provider"
+    );
+}
+
+#[tokio::test]
 async fn connection_test_should_probe_unavailable_account() {
     let provider = FakeProviderAdmin::new("xai", events());
     let mut account = account_record("xai");

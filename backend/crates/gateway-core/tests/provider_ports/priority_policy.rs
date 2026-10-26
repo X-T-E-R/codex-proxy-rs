@@ -31,31 +31,42 @@ fn explicit_account_off_overrides_global_on_but_cannot_bypass_group_prohibition(
 }
 
 #[test]
-fn only_fresh_same_identity_window_generation_with_low_new_usage_confirms_reset() {
+fn fresh_window_generation_confirms_reset_even_after_new_usage_accumulates() {
     let previous = observation(100, 1, 200, 75.0);
-    assert!(confirmed_reset(&previous, &observation(210, 1, 500, 0.0)));
+    for next in [
+        observation(210, 1, 500, 0.0),
+        observation(210, 1, 500, 7.0),
+        observation(210, 1, 500, 80.0),
+        observation(150, 1, 500, 7.0),
+    ] {
+        assert!(confirmed_reset(&previous, &next), "{next:?}");
+    }
     assert!(
-        confirmed_reset(&previous, &observation(150, 1, 500, 1.0)),
-        "explicit early reset may advance generation"
+        confirmed_reset(
+            &observation(100, 1, 200, 0.0),
+            &observation(210, 1, 500, 8.0)
+        ),
+        "the observed old boundary also confirms a reset from an idle baseline"
     );
+}
+
+#[test]
+fn stale_identity_usage_drop_without_generation_or_boundary_correction_does_not_reset() {
+    let previous = observation(100, 1, 200, 75.0);
     for next in [
         observation(99, 1, 500, 0.0),
         observation(100, 1, 500, 0.0),
         observation(210, 2, 500, 0.0),
         observation(210, 1, 200, 0.0),
         observation(210, 1, 202, 0.0),
-        observation(210, 1, 500, 75.0),
+        observation(150, 1, 500, 75.0),
+        observation(150, 1, 500, 80.0),
         observation(210, 1, 500, f64::NAN),
+        observation(210, 1, 500, 101.0),
+        observation(210, 1, 500, -1.0),
     ] {
         assert!(!confirmed_reset(&previous, &next), "{next:?}");
     }
-    assert!(
-        !confirmed_reset(
-            &observation(100, 1, 200, 0.0),
-            &observation(210, 1, 500, 0.0)
-        ),
-        "a low first baseline is not evidence of reset"
-    );
     let mut unrelated = observation(210, 1, 500, 0.0);
     unrelated.windows[0].key = "codex:604800".to_owned();
     assert!(!confirmed_reset(&previous, &unrelated));

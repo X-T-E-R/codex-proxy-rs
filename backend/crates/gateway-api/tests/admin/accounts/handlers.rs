@@ -476,3 +476,122 @@ async fn concurrency_details_require_admin_validate_paging_and_report_lease_time
         }
     }
 }
+
+#[tokio::test]
+async fn connection_test_http_passes_custom_prompt_to_the_probe_and_sse() {
+    use futures::future::BoxFuture;
+    use gateway_core::engine::probe::{
+        AccountProbe, AccountProbeError, AccountProbeRequest, AccountProbeResult,
+    };
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct CapturingProbe(Mutex<Vec<AccountProbeRequest>>);
+    impl AccountProbe for CapturingProbe {
+        fn probe(
+            &self,
+            request: AccountProbeRequest,
+            _: Option<Arc<gateway_core::routing::RuntimeSnapshot>>,
+        ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
+            self.0.lock().unwrap().push(request);
+            Box::pin(async {
+                Ok(AccountProbeResult {
+                    text: vec!["fixture result".into()],
+                })
+            })
+        }
+    }
+    let probe = Arc::new(CapturingProbe::default());
+    let fixture = AdminTestFixture::with_account_probe(probe.clone()).await;
+    fixture.auth.insert_session("valid-session");
+    let now = chrono::Utc::now();
+    *fixture.account.lock().unwrap() = Some(account_page_item(
+        gateway_core::account::AccountStatusFacts {
+            enabled: true,
+            credential_state: gateway_core::account::CredentialState::Ready,
+            access_token_expires_at: None,
+            quota: gateway_core::account::QuotaState::unknown(),
+            cooldown: None,
+            last_error_reason: None,
+            last_error_message: None,
+        },
+        now,
+        "oauth",
+    ));
+    let id = fixture
+        .account
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .account
+        .id
+        .clone();
+    let router = admin::accounts::router::<AdminTestState>().with_state(fixture.state());
+    for (prompt, expected) in [
+        (None, "不搜索互联网，直接告诉我日本首相是谁"),
+        (Some("  自定义测试\n只回答姓名  "), "自定义测试\n只回答姓名"),
+    ] {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("accountId", &id)
+            .append_pair("modelId", "gpt-5.4");
+        if let Some(prompt) = prompt {
+            query.append_pair("prompt", prompt);
+        }
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/admin/accounts/connection-test?{}",
+                        query.finish()
+                    ))
+                    .header("x-request-id", "req_custom_connection_prompt")
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), 32768)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let events: Vec<serde_json::Value> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events[1]["payload"]["input"][0]["content"][0]["text"],
+            expected
+        );
+        let requests = probe.0.lock().unwrap();
+        let gateway_core::operation::Operation::Generate(operation) =
+            &requests.last().unwrap().operation
+        else {
+            panic!("generate probe")
+        };
+        assert_eq!(operation.protocol_payload().body()["input"], expected);
+    }
+    let response = router
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/admin/accounts/connection-test?accountId={id}&modelId=gpt-5.4&prompt="
+                ))
+                .header("x-request-id", "req_invalid_connection_prompt")
+                .header(header::COOKIE, "cpr_session=valid-session")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(probe.0.lock().unwrap().len(), 2);
+}

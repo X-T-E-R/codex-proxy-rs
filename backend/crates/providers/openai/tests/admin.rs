@@ -1006,7 +1006,7 @@ async fn openai_admin_provider_projects_cached_quota_models_and_canonical_export
     let operation = admin
         .connection_test_operation(
             &UpstreamModelId::new("gpt-5.4").expect("upstream model"),
-            "Reply with exactly OK.",
+            "自定义测试\n只回答姓名",
         )
         .await
         .expect("connection test operation");
@@ -1015,6 +1015,10 @@ async fn openai_admin_provider_projects_cached_quota_models_and_canonical_export
     };
     let encoded = provider_openai::encode_generate_request(&request, "gpt-5.4", None)
         .expect("official OpenAI request");
+    assert_eq!(
+        encoded.body()["input"][0]["content"][0]["text"],
+        "自定义测试\n只回答姓名"
+    );
     assert_eq!(
         encoded.body().get("model").and_then(Value::as_str),
         Some("gpt-5.4")

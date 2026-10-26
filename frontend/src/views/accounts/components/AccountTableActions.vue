@@ -3,10 +3,11 @@ import type { Account } from '@/api'
 
 import { ZIconButton, ZMenuItem, ZPopover } from '@codex-proxy/ui'
 
-import { Download, KeyRound, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
+import { Download, KeyRound, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw, Trash2, Wifi, Zap } from '@lucide/vue'
 
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { isOpenAiOAuthAccount } from '../utils/upstreamApiKey'
 
 const props = defineProps<{
   account: Account
@@ -27,6 +28,7 @@ const emit = defineEmits<{
   reauthorize: [account: Account]
   downloadModelCatalog: [account: Account]
   toggleScheduling: [account: Account]
+  priority: [account: Account]
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
@@ -115,6 +117,15 @@ const credentialEligible = computed(() => props.account.authenticationKind === '
               <Download class="size-3.5 text-cp-text-quaternary" />
             </template>
             {{ t('accounts.actions.downloadModelCatalog') }}
+          </ZMenuItem>
+          <ZMenuItem
+            v-if="isOpenAiOAuthAccount(account)"
+            @click.stop="(close(), emit('priority', account))"
+          >
+            <template #icon>
+              <Zap class="size-3.5 text-cp-text-quaternary" />
+            </template>
+            {{ t('accounts.priority.title') }}
           </ZMenuItem>
           <ZMenuItem
             :loading="recovering"

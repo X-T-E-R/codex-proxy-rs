@@ -168,7 +168,7 @@ async fn global_auto_off_inheritance_overrides_and_reconfiguration_are_per_accou
     let mut reset = baseline.clone();
     reset.observed_at += Duration::seconds(1);
     reset.windows[0].reset_at += Duration::hours(5);
-    reset.windows[0].used_percent = 1.0;
+    reset.windows[0].used_percent = 7.0;
     store.observe("inherited", reset.clone()).await.unwrap();
     store.observe("off", reset.clone()).await.unwrap();
     assert_eq!(

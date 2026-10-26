@@ -18,6 +18,22 @@ pub use gateway_core::account::{
     QuotaState, resolve_account_status,
 };
 
+/// 连接测试只接受当前调用的短文本，不持久化为账号或模型配置
+pub fn connection_test_prompt(prompt: Option<&str>) -> Result<String, super::AdminError> {
+    let prompt = prompt
+        .unwrap_or("不搜索互联网，直接告诉我日本首相是谁")
+        .trim();
+    if prompt.is_empty()
+        || prompt.len() > 4096
+        || prompt
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+    {
+        return Err(super::AdminError::invalid("测试语句须为 1–4096 字节的文本"));
+    }
+    Ok(prompt.to_owned())
+}
+
 /// 账号可用的管理操作
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAccountCapabilities {

@@ -17,6 +17,18 @@ interface ConnectionTestRun {
   resolve: () => void
 }
 
+export const DEFAULT_CONNECTION_TEST_PROMPT = '不搜索互联网，直接告诉我日本首相是谁'
+const CONNECTION_TEST_PROMPT_MAX_BYTES = 4096
+
+function hasForbiddenConnectionTestPromptControlCharacters(value: string) {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    if ((codePoint <= 0x1F && codePoint !== 0x09 && codePoint !== 0x0A && codePoint !== 0x0D) || (codePoint >= 0x7F && codePoint <= 0x9F))
+      return true
+  }
+  return false
+}
+
 type ConnectionTestStatus = 'idle' | 'running' | 'success' | 'error'
 type ConnectionTestLogTone = 'normal' | 'info' | 'success' | 'danger'
 
@@ -171,6 +183,17 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
   const loadingConnectionTestModels = computed(() => modelsRequest.loading.value && modelsRequestMode.value === 'load')
   const refreshingConnectionTestModels = computed(() => modelsRequest.loading.value && modelsRequestMode.value === 'refresh')
   const connectionTestSelectedModel = shallowRef('')
+  const connectionTestPrompt = shallowRef(DEFAULT_CONNECTION_TEST_PROMPT)
+  const connectionTestPromptError = computed(() => {
+    const prompt = connectionTestPrompt.value.trim()
+    if (!prompt)
+      return t('accounts.connectionTest.errors.promptRequired')
+    if (new TextEncoder().encode(prompt).byteLength > CONNECTION_TEST_PROMPT_MAX_BYTES)
+      return t('accounts.connectionTest.errors.promptTooLong')
+    if (hasForbiddenConnectionTestPromptControlCharacters(prompt))
+      return t('accounts.connectionTest.errors.promptControlCharacters')
+    return ''
+  })
   const connectionTestModelOptions = ref<ConnectionTestModelOption[]>([])
   const connectionTestStreamUrl = shallowRef<string>()
   const {
@@ -232,6 +255,7 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
     abortConnectionTest()
     testingAccount.value = account
     connectionTestSelectedModel.value = ''
+    connectionTestPrompt.value = DEFAULT_CONNECTION_TEST_PROMPT
     connectionTestModelOptions.value = []
     showConnectionTestModal.value = true
     resetConnectionTest()
@@ -470,6 +494,10 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
   async function handleTestConnection(account = testingAccount.value) {
     if (!account?.id)
       return
+    if (connectionTestPromptError.value) {
+      connectionTestError.value = connectionTestPromptError.value
+      return
+    }
     if (!connectionTestSelectedModel.value) {
       connectionTestError.value = t('accounts.connectionTest.errors.modelRequired')
       return
@@ -499,6 +527,7 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
             const params = new URLSearchParams({
               accountId: account.id,
               modelId: connectionTestSelectedModel.value,
+              prompt: connectionTestPrompt.value.trim(),
             })
             connectionTestStreamUrl.value
               = `${API_BASE_URL}/api/admin/accounts/connection-test?${params}`
@@ -562,6 +591,8 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
     loadingConnectionTestModels,
     refreshingConnectionTestModels,
     connectionTestSelectedModel,
+    connectionTestPrompt,
+    connectionTestPromptError,
     connectionTestModelOptions,
     connectionTestStatusView,
     openConnectionTest,

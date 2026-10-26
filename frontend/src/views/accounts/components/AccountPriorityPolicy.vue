@@ -9,7 +9,15 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAccountPriorityPolicy } from '../composables/useAccountPriorityPolicy'
 
-const props = defineProps<{ account: Account }>()
+const props = withDefaults(
+  defineProps<{
+    account: Account
+    embedded?: boolean
+  }>(),
+  {
+    embedded: false,
+  },
+)
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -79,16 +87,20 @@ const statusTone = computed(() => {
 </script>
 
 <template>
-  <section
-    class="rounded-lg bg-cp-bg-container p-4 shadow-cp-tertiary lg:col-span-2"
+  <component
+    :is="embedded ? 'div' : 'section'"
+    :class="embedded ? 'grid gap-3' : 'rounded-lg bg-cp-bg-container p-4 shadow-cp-tertiary lg:col-span-2'"
     :aria-label="t('accounts.priority.title')"
   >
     <div class="flex flex-wrap items-start gap-3">
       <div class="min-w-0">
         <div class="flex items-center gap-1">
-          <h3 class="m-0 text-cp-lg font-heavy text-cp-text">
+          <h3 v-if="!embedded" class="m-0 text-cp-lg font-heavy text-cp-text">
             {{ t('accounts.priority.title') }}
           </h3>
+          <span v-else class="text-cp-sm font-heavy text-cp-text-quaternary">
+            {{ t('accounts.priority.policySettings') }}
+          </span>
           <ZPopover class="-my-1" trigger="hover-click" placement="top-start">
             <template #reference="{ open }">
               <ZIconButton
@@ -127,9 +139,9 @@ const statusTone = computed(() => {
       </div>
     </div>
 
-    <div v-if="loading && !policy" class="mt-3 grid gap-4 sm:grid-cols-[16rem_16rem]" role="status" aria-busy="true">
+    <div v-if="loading && !policy" class="mt-3 grid gap-4 sm:grid-cols-[minmax(0,16rem)_minmax(0,16rem)]" role="status" aria-busy="true">
       <span class="sr-only">{{ t('common.status.loading') }}</span>
-      <div v-for="field in 2" :key="field" class="grid w-64 gap-1.5">
+      <div v-for="field in 2" :key="field" class="grid min-w-0 gap-1.5">
         <ZSkeleton shape="text" class="w-14" />
         <ZSkeleton class="h-cp-control w-full" />
       </div>
@@ -155,8 +167,8 @@ const statusTone = computed(() => {
       <p v-if="conflict" role="status" class="m-0 mt-2 text-cp-xs font-emphasis text-cp-warning">
         {{ t('accounts.priority.conflict') }}
       </p>
-      <div class="mt-3 grid gap-4 sm:grid-cols-[16rem_16rem_auto] sm:items-end">
-        <div class="grid w-64 gap-1.5">
+      <div class="mt-3 grid gap-4 sm:grid-cols-[minmax(0,16rem)_minmax(0,16rem)_auto] sm:items-end">
+        <div class="grid min-w-0 gap-1.5">
           <span class="text-[10px] font-bold text-cp-text-quaternary">
             {{ t('accounts.priority.modeLabel') }}
           </span>
@@ -168,7 +180,7 @@ const statusTone = computed(() => {
             :disabled="saving"
           />
         </div>
-        <div class="grid w-64 gap-1.5">
+        <div class="grid min-w-0 gap-1.5">
           <span class="text-[10px] font-bold text-cp-text-quaternary">
             {{ t('accounts.priority.autoOff') }}
           </span>
@@ -203,5 +215,5 @@ const statusTone = computed(() => {
         {{ statusText }}
       </p>
     </template>
-  </section>
+  </component>
 </template>

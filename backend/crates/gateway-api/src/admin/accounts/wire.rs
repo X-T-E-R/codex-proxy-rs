@@ -689,6 +689,7 @@ impl AccountRefreshRequest {
 pub struct AccountTestQuery {
     pub account_id: String,
     pub model_id: String,
+    pub prompt: Option<String>,
 }
 
 impl AccountTestQuery {
@@ -697,17 +698,20 @@ impl AccountTestQuery {
         if self.model_id.trim().is_empty() || self.model_id.chars().any(char::is_control) {
             return Err(WireValidationError::new("modelId"));
         }
+        gateway_admin::model::accounts::connection_test_prompt(self.prompt.as_deref())
+            .map_err(|_| WireValidationError::new("prompt"))?;
         Ok(())
     }
 
     pub(super) fn into_command(
         self,
-    ) -> Result<(ProviderAccountId, UpstreamModelId), WireValidationError> {
+    ) -> Result<(ProviderAccountId, UpstreamModelId, Option<String>), WireValidationError> {
         self.validate()?;
         Ok((
             ProviderAccountId::new(self.account_id)
                 .map_err(|_| WireValidationError::new("accountId"))?,
             UpstreamModelId::new(self.model_id).map_err(|_| WireValidationError::new("modelId"))?,
+            self.prompt,
         ))
     }
 }

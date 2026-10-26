@@ -58,6 +58,8 @@
       "duration": "響應耗時",
       "title": "測試連接",
       "description": "驗證賬號憑據、身份綁定與上游模型端點是否可用",
+      "prompt": "測試語句",
+      "promptDescription": "隨本次測試請求發送",
       "model": "測試模型",
       "refreshModels": "刷新上游模型",
       "loadingModels": "加載模型中",
@@ -94,7 +96,10 @@
         "browserUnsupported": "當前瀏覽器不支持連接測試",
         "missingCompletion": "測試連接未返回完成事件",
         "invalidResponse": "測試響應解析失敗",
-        "disconnected": "測試連接已斷開"
+        "disconnected": "測試連接已斷開",
+        "promptRequired": "請輸入測試語句",
+        "promptTooLong": "測試語句不能超過 4096 字節",
+        "promptControlCharacters": "測試語句只允許換行和制表符控制字符"
       },
       "stages": {
         "gateway": "網關校驗",
@@ -532,14 +537,16 @@
         "label": "快速模式自動關閉規則",
         "baseline": "開啓後先記錄一次可靠配額，確認出現新的配額代次後才會關閉快速模式，修改配置會重新綁定觀察",
         "inherit": "自動關閉跟隨全局時使用全局默認值，也可為這個賬號單獨開啓或關閉",
-        "percent": "配額按已用比例記錄，0 到 1 表示 0% 到 100%，不是剩餘額度"
+        "percent": "窗口代次推進且有額度重置證據後自動關閉"
       },
       "refresh": "刷新快速模式狀態",
       "save": "保存快速模式",
       "undo": "撤銷快速模式更改",
       "saved": "快速模式設置已保存",
       "loadFailed": "快速模式設置加載失敗",
-      "conflict": "設置已被其他管理員更新，最新值已載入，請確認後重新保存"
+      "conflict": "設置已被其他管理員更新，最新值已載入，請確認後重新保存",
+      "modalDescription": "為該賬號配置快速模式檔位與配額重置自動關閉規則",
+      "policySettings": "策略設置"
     },
     "quotaForecast": {
       "tokenCapacity": "Token 容量",

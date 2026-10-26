@@ -65,7 +65,7 @@ pub struct PriorityQuotaObservation {
     pub windows: Vec<PriorityResetWindow>,
 }
 
-/// 只有同身份、严格更新的观测跨越已绑定窗口边界，才确认新代次
+/// 同身份的新观测中，窗口边界推进且已到旧边界或已用量下降，才确认重置
 #[must_use]
 pub fn confirmed_reset(
     previous: &PriorityQuotaObservation,
@@ -77,10 +77,14 @@ pub fn confirmed_reset(
             next.windows.iter().any(|new| {
                 old.key == new.key
                     && old.used_percent.is_finite()
-                    && old.used_percent > 1.0
+                    && (0.0..=100.0).contains(&old.used_percent)
                     && new.used_percent.is_finite()
-                    && (0.0..=1.0).contains(&new.used_percent)
+                    && (0.0..=100.0).contains(&new.used_percent)
                     && new.reset_at > old.reset_at + chrono::Duration::seconds(2)
+                    // 轮询可能在重置后已有用量才到达，不能要求恰好捕获 0/1%
+                    // 提前重置则同时要求用量下降，避免把单独的边界修正当成重置
+                    && (next.observed_at >= old.reset_at
+                        || new.used_percent < old.used_percent)
             })
         })
 }

@@ -23,6 +23,7 @@ import AccountEditModal from './components/AccountEditModal.vue'
 import AccountFilters from './components/AccountFilters.vue'
 import AccountIdentityCell from './components/AccountIdentityCell.vue'
 import AccountOverviewCards from './components/AccountOverviewCards.vue'
+import AccountPriorityModal from './components/AccountPriorityModal.vue'
 import AccountPriorityPolicy from './components/AccountPriorityPolicy.vue'
 import AccountQuotaPolicy from './components/AccountQuotaPolicy.vue'
 import AccountTableActions from './components/AccountTableActions.vue'
@@ -44,6 +45,13 @@ const showConcurrency = shallowRef(false)
 function openConcurrency(account: Account) {
   concurrencyAccount.value = account
   showConcurrency.value = true
+}
+
+const priorityAccount = shallowRef<Account | null>(null)
+const showPriorityModal = shallowRef(false)
+function openPriorityModal(account: Account) {
+  priorityAccount.value = account
+  showPriorityModal.value = true
 }
 
 const selectedIds = ref<Set<string>>(new Set())
@@ -144,6 +152,8 @@ const {
   loadingConnectionTestModels,
   refreshingConnectionTestModels,
   connectionTestSelectedModel,
+  connectionTestPrompt,
+  connectionTestPromptError,
   connectionTestModelOptions,
   connectionTestStatusView,
   openConnectionTest,
@@ -356,6 +366,7 @@ const {
                 @reauthorize="openReauthorizeAccount"
                 @test="openConnectionTest"
                 @toggle-scheduling="handleToggleScheduling"
+                @priority="openPriorityModal"
               />
             </template>
 
@@ -385,10 +396,12 @@ const {
     </ZCard>
 
     <AccountConcurrencyModal v-model="showConcurrency" :account="concurrencyAccount" />
+    <AccountPriorityModal v-model="showPriorityModal" :account="priorityAccount" />
 
     <AccountConnectionTestModal
       v-model="showConnectionTestModal"
       v-model:selected-model="connectionTestSelectedModel"
+      v-model:prompt="connectionTestPrompt"
       :account="testingAccount"
       :duration-ms="connectionTestDurationMs"
       :error="connectionTestError"
@@ -397,6 +410,7 @@ const {
       :refreshing-models="refreshingConnectionTestModels"
       :logs="connectionTestLogs"
       :model="connectionTestModel"
+      :prompt-error="connectionTestPromptError"
       :model-options="connectionTestModelOptions"
       :started-at="connectionTestStartedAt"
       :status="connectionTestStatus"

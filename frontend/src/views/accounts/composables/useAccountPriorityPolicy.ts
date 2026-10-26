@@ -13,6 +13,38 @@ interface AccountPriorityDraft {
   autoOffOnQuotaReset: boolean | null
 }
 
+type PrioritySyncListener = (next: AccountPriorityPolicy) => void
+
+const syncListeners = new Map<string, Set<PrioritySyncListener>>()
+
+function registerPriorityListener(accountId: string, listener: PrioritySyncListener) {
+  let set = syncListeners.get(accountId)
+  if (!set) {
+    set = new Set()
+    syncListeners.set(accountId, set)
+  }
+  set.add(listener)
+}
+
+function unregisterPriorityListener(accountId: string, listener: PrioritySyncListener) {
+  const set = syncListeners.get(accountId)
+  if (set) {
+    set.delete(listener)
+    if (set.size === 0)
+      syncListeners.delete(accountId)
+  }
+}
+
+function broadcastPriorityPolicy(accountId: string, next: AccountPriorityPolicy, sourceListener: PrioritySyncListener) {
+  const set = syncListeners.get(accountId)
+  if (set) {
+    for (const listener of set) {
+      if (listener !== sourceListener)
+        listener(next)
+    }
+  }
+}
+
 export function useAccountPriorityPolicy(options: { accountId: () => string }) {
   const policy = shallowRef<AccountPriorityPolicy>()
   const saved = shallowRef<AccountPriorityDraft>()
@@ -30,6 +62,10 @@ export function useAccountPriorityPolicy(options: { accountId: () => string }) {
   const effectiveMode = computed(() => policy.value?.effectiveMode ?? 'default')
   const effectiveAutoOffOnQuotaReset = computed(() => policy.value?.effectiveAutoOffOnQuotaReset ?? false)
   const status = computed(() => policy.value?.status ?? null)
+
+  function onRemoteUpdate(next: AccountPriorityPolicy) {
+    apply(next, dirty.value)
+  }
 
   function apply(next: AccountPriorityPolicy, keepDraft = false) {
     const draft = keepDraft
@@ -92,6 +128,7 @@ export function useAccountPriorityPolicy(options: { accountId: () => string }) {
         autoOffOnQuotaReset: autoOffOnQuotaReset.value,
       }, { silent: true })
       apply(next)
+      broadcastPriorityPolicy(current.accountId, next, onRemoteUpdate)
       ZNotification.success({ message: t('accounts.priority.saved') })
     }
     catch (cause: unknown) {
@@ -109,7 +146,14 @@ export function useAccountPriorityPolicy(options: { accountId: () => string }) {
     }
   }
 
-  watch(options.accountId, () => {
+  let boundAccountId: string | undefined
+
+  watch(options.accountId, (newId, oldId) => {
+    if (oldId)
+      unregisterPriorityListener(oldId, onRemoteUpdate)
+    boundAccountId = newId
+    if (newId)
+      registerPriorityListener(newId, onRemoteUpdate)
     controller?.abort()
     policy.value = undefined
     saved.value = undefined
@@ -122,6 +166,8 @@ export function useAccountPriorityPolicy(options: { accountId: () => string }) {
   onScopeDispose(() => {
     sequence += 1
     controller?.abort()
+    if (boundAccountId)
+      unregisterPriorityListener(boundAccountId, onRemoteUpdate)
   })
 
   return {

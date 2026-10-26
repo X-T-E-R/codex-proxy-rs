@@ -194,7 +194,12 @@ impl FreezeRecoveryTask {
         let probe_succeeded = match self
             .deps
             .accounts
-            .test_connection(account.clone(), model)
+            // 后台健康探测保持短响应，不继承管理页面的可编辑测试语句
+            .test_connection_with_prompt(
+                account.clone(),
+                model,
+                Some("Reply with exactly OK.".to_owned()),
+            )
             .await
         {
             Ok(events) => drain_probe(events).await,

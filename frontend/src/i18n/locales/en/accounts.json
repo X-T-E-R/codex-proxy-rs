@@ -58,6 +58,8 @@
       "duration": "Response time",
       "title": "Test connection",
       "description": "Verify account credentials, identity binding, and upstream model access",
+      "prompt": "Test prompt",
+      "promptDescription": "Sent with this test request",
       "model": "Test model",
       "refreshModels": "Refresh upstream models",
       "loadingModels": "Loading models…",
@@ -94,7 +96,10 @@
         "browserUnsupported": "The current browser does not support connection testing",
         "missingCompletion": "The connection test did not return a completion event",
         "invalidResponse": "Could not parse the test response",
-        "disconnected": "Connection lost during the test"
+        "disconnected": "Connection lost during the test",
+        "promptRequired": "Enter a test prompt",
+        "promptTooLong": "Test prompt must be 4,096 bytes or fewer",
+        "promptControlCharacters": "Test prompt may contain only tabs and line breaks as control characters"
       },
       "stages": {
         "gateway": "Gateway validation",
@@ -532,14 +537,16 @@
         "label": "Fast mode auto-disable rules",
         "baseline": "Enabling records one reliable quota observation first, fast mode turns off once a new quota generation is confirmed, changing the policy rebinds a new observation",
         "inherit": "Following global uses the global default, or set it explicitly for this account",
-        "percent": "Quota is recorded as a used ratio, 0 to 1 means 0% to 100%, not remaining quota"
+        "percent": "Automatically turns off once the window generation advances and quota reset evidence is confirmed"
       },
       "refresh": "Refresh fast mode status",
       "save": "Save fast mode",
       "undo": "Discard fast mode changes",
       "saved": "Fast mode settings saved",
       "loadFailed": "Could not load fast mode settings",
-      "conflict": "Another administrator updated these settings. The latest values are loaded, review and save again"
+      "conflict": "Another administrator updated these settings. The latest values are loaded, review and save again",
+      "modalDescription": "Configure fast mode tier and auto-disable rules after quota reset for this account",
+      "policySettings": "Policy settings"
     },
     "quotaForecast": {
       "tokenCapacity": "Token capacity",

@@ -622,11 +622,11 @@ where
     S: SessionState + Send + Sync,
 {
     let time = crate::time::TimePresenter::new(state.admin_services().timezone());
-    let (account_id, upstream_model) = query.into_command().map_err(map_wire_error)?;
+    let (account_id, upstream_model, prompt) = query.into_command().map_err(map_wire_error)?;
     let stream = state
         .admin_services()
         .accounts()
-        .test_connection(account_id, upstream_model)
+        .test_connection_with_prompt(account_id, upstream_model, prompt)
         .await
         .map_err(map_service_error)?
         .map(move |event| {

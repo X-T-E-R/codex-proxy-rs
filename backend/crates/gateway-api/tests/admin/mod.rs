@@ -124,24 +124,35 @@ impl AdminTestFixture {
     }
 
     pub async fn with_system(system: Arc<dyn SystemOperations>) -> Self {
-        Self::with_dependencies(system, None, Default::default()).await
+        Self::with_dependencies(system, None, Default::default(), Arc::new(NoopProbe)).await
     }
 
     pub async fn with_key_verifier(
         verifier: Arc<dyn ClientKeyVerifier>,
         system: Arc<dyn SystemOperations>,
     ) -> Self {
-        Self::with_dependencies(system, Some(verifier), Default::default()).await
+        Self::with_dependencies(
+            system,
+            Some(verifier),
+            Default::default(),
+            Arc::new(NoopProbe),
+        )
+        .await
     }
 
     pub async fn with_timezone(timezone: gateway_core::time::DeploymentTimeZone) -> Self {
-        Self::with_dependencies(Arc::new(UnusedSystem), None, timezone).await
+        Self::with_dependencies(Arc::new(UnusedSystem), None, timezone, Arc::new(NoopProbe)).await
+    }
+
+    pub async fn with_account_probe(probe: Arc<dyn AccountProbe>) -> Self {
+        Self::with_dependencies(Arc::new(UnusedSystem), None, Default::default(), probe).await
     }
 
     async fn with_dependencies(
         system: Arc<dyn SystemOperations>,
         verifier: Option<Arc<dyn ClientKeyVerifier>>,
         timezone: gateway_core::time::DeploymentTimeZone,
+        account_probe: Arc<dyn AccountProbe>,
     ) -> Self {
         let api_key = Arc::new(Mutex::new(None));
         let auth = Arc::new(MemoryAuthStore::new(api_key.clone()));
@@ -216,7 +227,7 @@ impl AdminTestFixture {
                 providers: gateway_admin::ports::provider::ProviderAdminRegistry::new(providers)
                     .unwrap(),
                 snapshot: Arc::new(NoopSnapshot),
-                account_probe: Arc::new(NoopProbe),
+                account_probe,
                 proxy_probe: Arc::new(proxies::SuccessfulProbe),
                 client_distribution: Arc::new(StaticClientDistribution),
                 system,
@@ -1640,10 +1651,16 @@ impl ProviderAdmin for UnusedProvider {
 
     async fn connection_test_operation(
         &self,
-        _: &gateway_core::routing::UpstreamModelId,
-        _: &str,
+        model: &gateway_core::routing::UpstreamModelId,
+        input: &str,
     ) -> Result<gateway_core::operation::Operation, ProviderAdminError> {
-        Err(unsupported_provider())
+        use gateway_core::operation::{GenerateRequest, Operation, ProtocolPayload};
+        let body = serde_json::json!({"model": model.as_str(), "input": input, "stream": true, "store": false});
+        let payload =
+            ProtocolPayload::json_object("openai", body.as_object().unwrap().clone()).unwrap();
+        Ok(Operation::Generate(GenerateRequest::from_protocol_payload(
+            payload,
+        )))
     }
 
     fn dashboard_wire_profile(

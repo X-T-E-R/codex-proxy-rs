@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { useAccountConnectionTest } from '../composables/useAccountConnectionTest'
 
-import { ZButton, ZDialog, ZIconButton, ZSelect } from '@codex-proxy/ui'
+import { ZButton, ZDialog, ZIconButton, ZSelect, ZTextarea } from '@codex-proxy/ui'
 
 import { RefreshCw } from '@lucide/vue'
 import { useI18n } from 'vue-i18n'
@@ -12,6 +12,8 @@ defineProps<{
   account: ConnectionTest['testingAccount']['value']
   status: ConnectionTest['connectionTestStatus']['value']
   model: string
+  prompt: string
+  promptError: string
   logs: ConnectionTest['connectionTestLogs']['value']
   error: string
   startedAt: string
@@ -34,6 +36,7 @@ type ConnectionTest = ReturnType<typeof useAccountConnectionTest>
 
 const open = defineModel<boolean>({ default: false })
 const selectedModel = defineModel<string>('selectedModel', { required: true })
+const prompt = defineModel<string>('prompt', { required: true })
 
 function connectionLogClass(tone: string) {
   if (tone === 'success')
@@ -70,6 +73,30 @@ function connectionLogClass(tone: string) {
           :next-refresh-at-display="account.nextRefreshAtDisplay"
           variant="pill"
         />
+      </section>
+
+      <section class="rounded-cp-card bg-cp-fill-quaternary px-4 py-3">
+        <div class="grid gap-2">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-cp-sm font-heavy text-cp-text-quaternary">
+              {{ t('accounts.connectionTest.prompt') }}
+            </span>
+            <span class="text-cp-xs text-cp-text-tertiary">{{ t('accounts.connectionTest.promptDescription') }}</span>
+          </div>
+          <ZTextarea
+            v-model="prompt"
+            :aria-label="t('accounts.connectionTest.prompt')"
+            :aria-invalid="promptError ? 'true' : 'false'"
+            :disabled="status === 'running'"
+            :rows="3"
+            maxlength="4096"
+            resize="none"
+            spellcheck="false"
+          />
+          <p v-if="promptError" class="m-0 text-cp-xs text-cp-error-text" role="alert">
+            {{ promptError }}
+          </p>
+        </div>
       </section>
 
       <section class="rounded-cp-card bg-cp-fill-quaternary px-4 py-3">

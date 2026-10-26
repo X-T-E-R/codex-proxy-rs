@@ -878,6 +878,32 @@ mod actions {
     }
 
     #[test]
+    fn connection_test_prompt_query_accepts_omission_and_text_but_rejects_invalid_input() {
+        for prompt in [None, Some("  自定义测试\n\t文本  "), Some("text")] {
+            let mut input = json!({"accountId":"acct_1", "modelId":"gpt-5.4"});
+            if let Some(prompt) = prompt {
+                input["prompt"] = json!(prompt);
+            }
+            serde_json::from_value::<AccountTestQuery>(input)
+                .unwrap()
+                .validate()
+                .unwrap();
+        }
+        for prompt in [
+            "".to_owned(),
+            " \n ".to_owned(),
+            "bad\u{0085}control".to_owned(),
+            "中".repeat(1366),
+        ] {
+            let query: AccountTestQuery = serde_json::from_value(
+                json!({"accountId":"acct_1", "modelId":"gpt-5.4", "prompt":prompt}),
+            )
+            .unwrap();
+            assert_eq!(query.validate().unwrap_err().field(), "prompt");
+        }
+    }
+
+    #[test]
     fn connection_test_events_should_preserve_the_existing_frontend_contract() {
         let mut events = [
             DomainConnectionTestEvent::Started {
