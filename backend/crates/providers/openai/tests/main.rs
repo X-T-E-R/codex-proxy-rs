@@ -3,6 +3,7 @@
 mod admin;
 mod config;
 mod credential;
+mod harness;
 mod jitter;
 mod provider;
 mod support;

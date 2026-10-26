@@ -623,7 +623,7 @@ docker compose -f deploy/compose.yaml pull codex-proxy-rs
 docker compose -f deploy/compose.yaml up -d --no-build --wait codex-proxy-rs
 ```
 
-源码构建需要克隆源码仓库并准备配置与数据目录，构建过程自动准备前端依赖，无需初始化子模块或准备额外 build context。以下命令从仓库根目录执行：
+源码构建需要克隆源码仓库并准备配置与数据目录，构建过程自动准备前端依赖，无需初始化子模块或准备额外 build context。`runtime` 与 `runtime-prebuilt` 镜像包含网关二进制、管理端静态资源和预置插件，不包含 Node.js，也不包含 `backend/crates/providers/openai/harness-worker`。这两类镜像不能执行 OpenCode / pi Responses worker。该 worker 需要 Node.js 22.19.0 或更高版本，以及按锁文件安装的 `effect`、`openai` 和 `partial-json`。以下命令从仓库根目录执行：
 
 ```bash
 docker compose -f deploy/compose.yaml build codex-proxy-rs

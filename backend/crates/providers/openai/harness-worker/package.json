@@ -1,0 +1,15 @@
+{
+  "name": "@cpr/openai-harness-worker",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "effect": "4.0.1",
+    "openai": "7.19.0",
+    "partial-json": "0.1.7"
+  }
+}

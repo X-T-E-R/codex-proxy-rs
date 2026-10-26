@@ -498,6 +498,14 @@ xAI Provider 负责 Codex custom 工具与 Grok function 工具的双向转换�
 `call_id` 配对；超限或转换失败终止流。默认 `store: false` 的续接由现有会话 owner 重放完整历史；
 原生续接按上游约束处理 `instructions` 与 `previous_response_id`，不把协议差异交给 Core
 
+### OpenCode 与 pi Responses
+
+OpenAI Provider 拥有 OpenCode 与 pi 的 Responses worker。Provider 启动 Node 进程，并持有上游 HTTP、账号出站代理和响应体窗口。worker 直接执行固定提交的上游 TypeScript：OpenCode `ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17`，pi `f9daca3480732d0042b1df3a6e27221f597a620d`。OAuth、Responses 正文和工具 ID 规则留在这两份源码里，不在 Rust 中另写一套。
+
+OpenCode route 的默认 transport 是 WebSocket。这条路径改用同一协议导出的 HTTP/SSE transport，请求不携带 `openai-beta`。pi 在 `baseUrl` 恰好为 `https://api.openai.com/v1` 且凭据不以 `sk-` 开头时，按上游规则省略 `max_output_tokens`、`temperature` 和 `prompt_cache_retention`。现有 Codex OAuth 仍经过 `encode_generate_request`，不会仅因 User-Agent 进入这条路径。
+
+账号选择、凭据事务、管理端和发行镜像都还没有调用该 worker。运行需要 Node.js 22.19.0 或更高版本，以及 worker 目录里按锁文件安装的 `effect`、`openai`、`partial-json`。`runtime` 与 `runtime-prebuilt` 镜像不包含 Node.js 和该 worker。
+
 ### 后台账号导入
 
 Admin 拥有进程内导入任务、管理员归属、条目状态与有界队列，以 `account_import` Daemon 贡献给 Host。

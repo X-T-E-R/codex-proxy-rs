@@ -1,0 +1,59 @@
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
+import { managedFetch } from "./managed-fetch.mjs";
+
+function source(root, relative) {
+  return pathToFileURL(resolve(root, relative)).href;
+}
+
+export async function runPi(input, emit, signal) {
+  const root = process.env.CPR_HARNESS_PI_ROOT;
+  const responses = await import(source(root, "packages/ai/src/api/openai-responses.ts"));
+  const model = {
+    id: input.model,
+    name: input.model,
+    api: "openai-responses",
+    provider: "openai",
+    baseUrl: input.base_url,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 4096,
+  };
+  const messages = [];
+  if (input.instructions) messages.push({ role: "system", content: input.instructions, timestamp: 1 });
+  messages.push({ role: "user", content: input.prompt, timestamp: 2 });
+  const stream = responses.stream(model, { messages }, {
+    apiKey: input.bearer,
+    sessionId: input.session_id,
+    ...(input.max_output_tokens != null ? { maxTokens: input.max_output_tokens } : {}),
+    ...(input.temperature != null ? { temperature: input.temperature } : {}),
+    fetch: managedFetch,
+    signal,
+    maxRetries: 0,
+  });
+  for await (const event of stream) {
+    if (event.type === "toolcall_end") {
+      emit({
+        kind: "tool",
+        type: event.type,
+        id: event.toolCall?.id ?? null,
+        name: event.toolCall?.name ?? null,
+      });
+    } else if (event.type === "done") {
+      const tool = event.message?.content?.find((item) => item.type === "toolCall");
+      if (tool) emit({ kind: "tool", type: "done-tool", id: tool.id ?? null, name: tool.name ?? null });
+      emit({
+        kind: "done",
+        type: event.type,
+        finish: event.reason ?? null,
+        response_id: event.message?.responseId ?? null,
+      });
+    } else if (event.type === "error") {
+      throw new Error("pi responses stream failed");
+    } else if (event.type) {
+      emit({ kind: "trace", type: event.type });
+    }
+  }
+}

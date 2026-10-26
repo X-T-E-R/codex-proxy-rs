@@ -5,6 +5,7 @@
 
 # Frontend
 /frontend/node_modules/
+/backend/crates/providers/openai/harness-worker/node_modules/
 /frontend/dist/
 /frontend/.pnpm-store/
 /frontend/.pnpm-cache/

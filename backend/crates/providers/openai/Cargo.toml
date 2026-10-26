@@ -51,7 +51,7 @@ sha2 = "0.11.0"
 subtle = "2.6.1"
 tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.18"
-tokio = { version = "=1.52.3", default-features = false, features = ["fs", "macros", "rt", "sync", "time"] }
+tokio = { version = "=1.52.3", default-features = false, features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 tokio-rustls = { version = "=0.26.4", default-features = false }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tower-service = "0.3.3"
@@ -76,7 +76,7 @@ openssl-sys = { version = "=0.9.111", features = ["vendored"] }
 [dev-dependencies]
 allocation-counter = "0.8.1"
 tempfile = "3.27.0"
-tokio = { version = "1.52.3", default-features = false, features = ["rt-multi-thread", "test-util"] }
+tokio = { version = "1.52.3", default-features = false, features = ["net", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { version = "0.3.23", features = ["json"] }
 wiremock = "0.6.5"
 

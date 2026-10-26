@@ -2,6 +2,7 @@
 
 mod admin;
 pub mod config;
+mod harness;
 mod jitter;
 mod provider;
 mod request_identity;
@@ -33,6 +34,11 @@ use crate::transport::profile::{
 use crate::transport::{CodexWebSocketPool, build_reqwest_client};
 
 pub use config::{OpenAiConfig, OpenAiConfigError};
+pub use harness::{
+    HarnessError, HarnessEvent, HarnessSession, HarnessWorkerConfig, LoadedSource,
+    MINIMUM_NODE_VERSION, OPENCODE_SOURCE_COMMIT, ObservedUpstreamRequest, PI_SOURCE_COMMIT,
+    ParsedResponses, ResponsesCall, ResponsesHarness,
+};
 #[doc(hidden)]
 pub use jitter::{
     catalog_refresh_jitter, quota_failure_refresh_delay, server_error_retry_jitter, uniform_delay,
