@@ -151,6 +151,7 @@ function continueToImport() {
         <AccountOAuthFields
           v-if="mode === 'oauth'"
           v-model="callback"
+          v-model:harness="form.oauthHarness"
           :auth-url="authorization.flow?.authorizationUrl ?? ''"
           :authorization="authorization"
           :can-start="true"
@@ -159,6 +160,8 @@ function continueToImport() {
           :loading="oauthLoading"
           :callback-label="view.oauth.callbackLabel"
           :callback-placeholder="view.oauth.callbackPlaceholder"
+          :harness-options="view.oauth.harnessOptions"
+          :reauthorizing="reauthorizing"
           :disabled="busy"
           @regenerate="emit('generateOauth')"
         />

@@ -1,12 +1,41 @@
-import type { Account, ApiKeyConfiguration } from '@/api'
+import type { Account, AccountOAuthHarness, ApiKeyConfiguration } from '@/api'
 import { t } from '@/i18n'
 
-export function isOpenAiApiKeyAccount(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): boolean {
-  return account?.provider === 'openai' && account.authenticationKind === 'api_key'
+export function resolveAccountOAuthHarness(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): AccountOAuthHarness | null {
+  if (account?.provider !== 'openai')
+    return null
+  switch (account.authenticationKind) {
+    case 'chatgpt_token_sharing':
+      return 'opencode'
+    case 'pi_openai':
+      return 'pi'
+    case 'oauth':
+      return 'codex'
+    default:
+      return null
+  }
+}
+
+export function isCodexOAuthAccount(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): boolean {
+  return account?.provider === 'openai' && account.authenticationKind === 'oauth'
 }
 
 export function isOpenAiOAuthAccount(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): boolean {
-  return account?.provider === 'openai' && account.authenticationKind === 'oauth'
+  return account?.provider === 'openai' && resolveAccountOAuthHarness(account) !== null
+}
+
+export function canReauthorizeAccount(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): boolean {
+  if (!account || !account.provider)
+    return false
+  if (account.provider === 'xai')
+    return account.authenticationKind === 'oauth'
+  if (account.provider === 'openai')
+    return resolveAccountOAuthHarness(account) !== null
+  return false
+}
+
+export function isOpenAiApiKeyAccount(account: Pick<Account, 'provider' | 'authenticationKind'> | null | undefined): boolean {
+  return account?.provider === 'openai' && account.authenticationKind === 'api_key'
 }
 
 export interface ApiKeyAccountForm extends Omit<ApiKeyConfiguration, 'transport'> {

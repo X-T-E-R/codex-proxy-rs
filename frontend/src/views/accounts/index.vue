@@ -36,7 +36,7 @@ import { useAccountMutations } from './composables/useAccountMutations'
 import { useAccountsQuery } from './composables/useAccountsQuery'
 import { useAccountsTable } from './composables/useAccountsTable'
 import { accountColumns } from './constants'
-import { isOpenAiOAuthAccount } from './utils/upstreamApiKey'
+import { isCodexOAuthAccount, isOpenAiOAuthAccount } from './utils/upstreamApiKey'
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -381,7 +381,7 @@ const {
                 />
                 <AccountUsagePanel :account="row" />
                 <AccountPriorityPolicy v-if="isOpenAiOAuthAccount(row)" :account="row" />
-                <AccountQuotaPolicy v-if="isOpenAiOAuthAccount(row)" :account="row" />
+                <AccountQuotaPolicy v-if="isCodexOAuthAccount(row)" :account="row" />
               </div>
             </template>
           </ZTable>

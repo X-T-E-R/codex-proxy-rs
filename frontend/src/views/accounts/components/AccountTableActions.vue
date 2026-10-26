@@ -7,7 +7,7 @@ import { Download, KeyRound, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw
 
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { isOpenAiOAuthAccount } from '../utils/upstreamApiKey'
+import { canReauthorizeAccount, isCodexOAuthAccount, isOpenAiOAuthAccount } from '../utils/upstreamApiKey'
 
 const props = defineProps<{
   account: Account
@@ -33,7 +33,10 @@ const emit = defineEmits<{
 
 const { t } = useI18n({ useScope: 'global' })
 
-const credentialEligible = computed(() => props.account.authenticationKind === 'oauth')
+const canRefreshToken = computed(() => Boolean(props.account.capabilities.quotaRefresh || props.account.hasRefreshToken))
+const canReauthorize = computed(() => canReauthorizeAccount(props.account))
+const canDownloadCatalog = computed(() => Boolean(props.account.provider === 'openai' && isCodexOAuthAccount(props.account)))
+const canConfigurePriority = computed(() => isOpenAiOAuthAccount(props.account) || Boolean(props.account.capabilities.quota && props.account.provider === 'openai'))
 </script>
 
 <template>
@@ -85,7 +88,7 @@ const credentialEligible = computed(() => props.account.authenticationKind === '
             {{ account.enabled ? t('accounts.actions.disableScheduling') : t('accounts.actions.enableScheduling') }}
           </ZMenuItem>
           <ZMenuItem
-            v-if="credentialEligible"
+            v-if="canRefreshToken"
             :loading="refreshing"
             :disabled="refreshing"
             @click.stop="(close(), emit('refresh', account.id))"
@@ -98,14 +101,14 @@ const credentialEligible = computed(() => props.account.authenticationKind === '
             </template>
             {{ t('accounts.actions.refreshToken') }}
           </ZMenuItem>
-          <ZMenuItem v-if="credentialEligible" @click.stop="(close(), emit('reauthorize', account))">
+          <ZMenuItem v-if="canReauthorize" @click.stop="(close(), emit('reauthorize', account))">
             <template #icon>
               <KeyRound class="size-3.5 text-cp-text-quaternary" />
             </template>
             {{ t('accounts.actions.reauthorize') }}
           </ZMenuItem>
           <ZMenuItem
-            v-if="account.provider === 'openai' && account.authenticationKind === 'oauth'"
+            v-if="canDownloadCatalog"
             :loading="downloadingCatalog"
             :disabled="downloadingCatalog"
             @click.stop="(close(), emit('downloadModelCatalog', account))"
@@ -119,7 +122,7 @@ const credentialEligible = computed(() => props.account.authenticationKind === '
             {{ t('accounts.actions.downloadModelCatalog') }}
           </ZMenuItem>
           <ZMenuItem
-            v-if="isOpenAiOAuthAccount(account)"
+            v-if="canConfigurePriority"
             @click.stop="(close(), emit('priority', account))"
           >
             <template #icon>

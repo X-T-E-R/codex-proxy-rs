@@ -2,6 +2,8 @@ import type { RequestOptions } from '../request'
 import type { AccountGroupRef } from './groups'
 import request from '../request'
 
+export type AccountOAuthHarness = 'codex' | 'opencode' | 'pi'
+
 export type AccountStatus
   = 'normal' | 'quota_exhausted' | 'rate_limited' | 'disabled' | 'error'
 
@@ -472,6 +474,7 @@ interface AccountOAuthStartParam {
   provider: string
   name: string
   accountId?: string
+  harness?: AccountOAuthHarness
 }
 
 interface AccountOAuthCompleteParam {

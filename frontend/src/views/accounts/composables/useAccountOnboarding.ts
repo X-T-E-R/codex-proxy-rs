@@ -5,10 +5,10 @@ import { useAsyncAction } from '@/composables/useAsyncAction'
 import { t } from '@/i18n'
 import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage, generateRequestId } from '@/utils/operation'
-import { formatProviderLabel, isSupportedProvider } from '@/utils/providers'
-import { accountCreateProvider, accountCreateSourceKey, accountImportModes, accountImportSettings, accountProxyError, emptyAccountCreateForm } from '../utils/accountCreate'
+import { isSupportedProvider } from '@/utils/providers'
+import { accountCreateProvider, accountCreateSourceKey, accountImportModes, accountImportSettings, accountProxyError, buildOAuthStartPayload, emptyAccountCreateForm } from '../utils/accountCreate'
 import { accountImportBatches, accountImportDocuments, mixedImportDocuments } from '../utils/accountImport'
-import { apiKeyAccountError, emptyApiKeyAccountForm } from '../utils/upstreamApiKey'
+import { apiKeyAccountError, canReauthorizeAccount, emptyApiKeyAccountForm, resolveAccountOAuthHarness } from '../utils/upstreamApiKey'
 import { useAccountAuthorization } from './useAccountAuthorization'
 
 export function useAccountOnboarding(options: {
@@ -118,12 +118,7 @@ export function useAccountOnboarding(options: {
       if (proxyError)
         throw new Error(proxyError)
       await authorization.start({
-        start: {
-          provider,
-          name: account?.name || account?.email || t('accounts.onboarding.accountName', { provider: formatProviderLabel(provider) }),
-          accountId: account?.id,
-          outboundProxyId: account ? undefined : form.proxyMode === 'proxy' ? form.proxyId.trim() : undefined,
-        },
+        start: buildOAuthStartPayload({ account, form, provider }),
         settings: account ? undefined : accountImportSettings(form),
       })
     }
@@ -140,11 +135,17 @@ export function useAccountOnboarding(options: {
   }
 
   function openReauthorizeAccount(account: Account) {
-    if (isSupportedProvider(account.provider) && account.authenticationKind !== 'oauth')
+    if (!canReauthorizeAccount(account))
       return
     authorization.reset()
     reauthorizingAccount.value = account
-    createForm.value = { ...emptyAccountCreateForm(), source: { kind: 'provider', id: account.provider }, step: 'import' }
+    const originalHarness = resolveAccountOAuthHarness(account) ?? 'codex'
+    createForm.value = {
+      ...emptyAccountCreateForm(),
+      source: { kind: 'provider', id: account.provider },
+      oauthHarness: originalHarness,
+      step: 'import',
+    }
     showCreateModal.value = true
     void handleAuthorizeOAuth()
   }
@@ -167,6 +168,7 @@ export function useAccountOnboarding(options: {
   watch([
     () => accountCreateSourceKey(createForm.value),
     () => createForm.value.mode,
+    () => createForm.value.oauthHarness,
     () => createForm.value.step,
     () => createForm.value.proxyMode,
     () => createForm.value.proxyMode === 'proxy' ? createForm.value.proxyId.trim() : '',

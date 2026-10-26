@@ -2,7 +2,7 @@ import type { AccountAuthorizationView } from '../../composables/useAccountAutho
 import type { AccountCreateForm } from '../../utils/accountCreate'
 import { t } from '@/i18n'
 import { formatProviderLabel } from '@/utils/providers'
-import { accountCreateProvider, accountImportModes } from '../../utils/accountCreate'
+import { accountCreateProvider, accountImportModes, accountOAuthHarnessOptions } from '../../utils/accountCreate'
 import { apiKeyAccountError } from '../../utils/upstreamApiKey'
 
 export function resolveAccountCreatePresentation(input: {
@@ -57,6 +57,7 @@ export function resolveAccountCreatePresentation(input: {
       callbackLabel: id === 'xai' ? t('accounts.onboarding.callbackLabel') : t('accounts.onboarding.callbackAddress'),
       callbackPlaceholder: id === 'openai' ? 'http://localhost:1455/auth/callback?code=...&state=...' : t('accounts.onboarding.callbackPlaceholder'),
       description: t('accounts.onboarding.callbackHelp'),
+      harnessOptions: id === 'openai' ? accountOAuthHarnessOptions() : [],
     },
     importInput: form.mode === 'access_token'
       ? { label: 'Access Token', placeholder: t('accounts.onboarding.pasteOneAccessTokenPerLine'), uploadable: false }

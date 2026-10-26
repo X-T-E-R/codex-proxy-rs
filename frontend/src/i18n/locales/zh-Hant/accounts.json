@@ -356,7 +356,14 @@
       "importTaskCreated": "導入任務已創建",
       "partialSubmission": "部分導入任務已創建，保持輸入不變重試可繼續提交",
       "accountName": "{provider} 賬號",
-      "failedToStartAuthorization": "啓動授權失敗"
+      "failedToStartAuthorization": "啓動授權失敗",
+      "oauthHarness": "OAuth 接入通道",
+      "oauthHarnessHelp": "選擇對應的 OAuth 客戶端接入方式",
+      "harnesses": {
+        "codex": "Codex",
+        "opencode": "OpenCode（新版）",
+        "pi": "pi（新版）"
+      }
     },
     "importTasks": {
       "needProcessing": "需處理",

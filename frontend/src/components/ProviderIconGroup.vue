@@ -39,7 +39,7 @@ const iconClass = computed(() => {
 
 const providerLabel = computed(() => formatProviderLabel(props.provider, t('common.providers.unknown')))
 
-const authenticationLabel = computed(() => formatAuthenticationLabel(props.authenticationKind))
+const authenticationLabel = computed(() => formatAuthenticationLabel(props.authenticationKind, props.provider))
 </script>
 
 <template>

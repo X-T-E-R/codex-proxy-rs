@@ -1,6 +1,7 @@
 import type { ApiKeyAccountForm } from './upstreamApiKey'
-import type { AccountModelAccess } from '@/api'
+import type { Account, AccountImportSettings, AccountModelAccess, AccountOAuthHarness } from '@/api'
 import { t } from '@/i18n'
+import { formatProviderLabel } from '@/utils/providers'
 import { accountModelAccessError } from './modelAccess'
 import { parseAccountSchedulingForm } from './schedulingForm'
 import { emptyApiKeyAccountForm } from './upstreamApiKey'
@@ -12,6 +13,7 @@ type AccountImportInputMode = 'access_token' | 'refresh_token' | 'json'
 export interface AccountCreateForm {
   source: AccountCreateSource | null
   apiKey: ApiKeyAccountForm
+  oauthHarness: AccountOAuthHarness
   notes: string
   enabled: boolean
   concurrencyLimit: string
@@ -29,10 +31,12 @@ export function emptyAccountCreateForm(): AccountCreateForm {
   return {
     source: null,
     apiKey: emptyApiKeyAccountForm(),
+    oauthHarness: 'codex',
     notes: '',
     enabled: true,
     concurrencyLimit: '',
     weight: '1',
+    modelAccess: undefined,
     groupIds: [],
     step: 'settings',
     mode: 'oauth',
@@ -58,7 +62,7 @@ export function accountProxyError(form: AccountCreateForm): string | undefined {
   return undefined
 }
 
-export function accountImportSettings(form: AccountCreateForm) {
+export function accountImportSettings(form: AccountCreateForm): AccountImportSettings {
   const scheduling = parseAccountSchedulingForm(form.concurrencyLimit, form.weight)
   if (!scheduling.valid)
     throw new Error(scheduling.message)
@@ -71,6 +75,29 @@ export function accountImportSettings(form: AccountCreateForm) {
     ...scheduling.values,
     groupIds: [...new Set(form.groupIds)],
     notes: form.notes.trim() || undefined,
+  }
+}
+
+export function accountOAuthHarnessOptions() {
+  return [
+    { label: t('accounts.onboarding.harnesses.codex'), value: 'codex' as const },
+    { label: t('accounts.onboarding.harnesses.opencode'), value: 'opencode' as const },
+    { label: t('accounts.onboarding.harnesses.pi'), value: 'pi' as const },
+  ]
+}
+
+export function buildOAuthStartPayload(input: {
+  account: (Pick<Account, 'id' | 'name' | 'email'> & Partial<Pick<Account, 'provider'>>) | null | undefined
+  form: Pick<AccountCreateForm, 'oauthHarness' | 'proxyMode' | 'proxyId'>
+  provider: string
+}) {
+  const isReauth = Boolean(input.account)
+  return {
+    provider: input.provider,
+    name: input.account?.name || input.account?.email || t('accounts.onboarding.accountName', { provider: formatProviderLabel(input.provider) }),
+    accountId: input.account?.id,
+    harness: !isReauth && input.provider === 'openai' ? input.form.oauthHarness : undefined,
+    outboundProxyId: input.account ? undefined : input.form.proxyMode === 'proxy' ? input.form.proxyId.trim() : undefined,
   }
 }
 

@@ -30,18 +30,28 @@ export function providerIcon(value: string): Component {
   }
 }
 
-export function formatAuthenticationLabel(value?: string | null) {
-  const normalized = value?.trim()
-  switch (normalized?.toLowerCase()) {
-    case 'oauth': return 'OAuth'
+export function formatAuthenticationLabel(kind?: string | null, provider?: string | null) {
+  const normalizedKind = kind?.trim()
+  switch (normalizedKind?.toLowerCase()) {
+    case 'chatgpt_token_sharing':
+      return 'OpenCode OAuth'
+    case 'pi_openai':
+      return 'pi OAuth'
+    case 'oauth':
+      if (provider?.trim().toLowerCase() === 'openai')
+        return 'Codex OAuth'
+      return 'OAuth'
     case 'api_key': return 'API Key'
-    default: return normalized ? t('common.providers.customAuth', { normalized }) : t('common.providers.unknownAuth')
+    default: return normalizedKind ? t('common.providers.customAuth', { normalized: normalizedKind }) : t('common.providers.unknownAuth')
   }
 }
 
 export function authenticationIcon(value?: string | null): Component | undefined {
   switch (value?.trim().toLowerCase()) {
-    case 'oauth': return LinkAlt
+    case 'oauth':
+    case 'chatgpt_token_sharing':
+    case 'pi_openai':
+      return LinkAlt
     case 'api_key': return Key
     case undefined:
     case '': return undefined

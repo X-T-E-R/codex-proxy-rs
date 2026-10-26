@@ -8,7 +8,7 @@ import { t } from '@/i18n'
 import { notification as ZNotification } from '@/utils/notification'
 import { accountModelAccessError } from '../utils/modelAccess'
 import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
-import { apiKeyAccountError, emptyApiKeyAccountForm, isOpenAiApiKeyAccount, isOpenAiOAuthAccount, parseApiKeyConfiguration } from '../utils/upstreamApiKey'
+import { apiKeyAccountError, emptyApiKeyAccountForm, isCodexOAuthAccount, isOpenAiApiKeyAccount, parseApiKeyConfiguration } from '../utils/upstreamApiKey'
 
 export function useAccountEditor(options: {
   reloadAccounts: () => Promise<unknown>
@@ -40,7 +40,7 @@ export function useAccountEditor(options: {
       const detail = await getAccountDetail({ accountId }, { signal: configurationRequest.signal, silent: true })
       if (!configurationRequest.isCurrent(requestId))
         return
-      if (isOpenAiOAuthAccount(detail.account)) {
+      if (isCodexOAuthAccount(detail.account)) {
         const transport = detail.credentialConfiguration?.transport
         if (transport !== 'http' && transport !== 'prefer_websocket')
           throw new Error(t('accounts.editor.oauthUnavailable'))
@@ -74,7 +74,7 @@ export function useAccountEditor(options: {
     modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
     selectedGroupIds.value = account.groups.map(group => group.id)
     showEditModal.value = true
-    if (isOpenAiApiKeyAccount(account) || isOpenAiOAuthAccount(account))
+    if (isOpenAiApiKeyAccount(account) || isCodexOAuthAccount(account))
       void loadConfiguration(account.id)
   }
 
@@ -83,7 +83,7 @@ export function useAccountEditor(options: {
     if (!accountId || saving.value)
       return
     const isApiKey = isOpenAiApiKeyAccount(editingAccount.value)
-    const isOAuth = isOpenAiOAuthAccount(editingAccount.value)
+    const isCodexOAuth = isCodexOAuthAccount(editingAccount.value)
     const configuration = isApiKey && configurationReady.value ? parseApiKeyConfiguration(apiKey.value) : undefined
     if (isApiKey && !configuration)
       return
@@ -129,7 +129,7 @@ export function useAccountEditor(options: {
         ...settings,
         connection: connectionChanged && configuration
           ? { baseUrl: configuration.base_url.trim(), transport: configuration.transport, apiKey: apiKey.value.apiKey || undefined }
-          : isOAuth && configurationReady.value && oauthTransport.value && oauthTransport.value !== savedOAuthTransport.value
+          : isCodexOAuth && configurationReady.value && oauthTransport.value && oauthTransport.value !== savedOAuthTransport.value
             ? { transport: oauthTransport.value }
             : undefined,
       })

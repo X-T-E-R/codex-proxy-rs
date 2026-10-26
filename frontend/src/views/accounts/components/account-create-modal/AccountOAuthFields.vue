@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { AccountAuthorizationView } from '../../composables/useAccountAuthorization'
+import type { AccountOAuthHarness } from '@/api'
 
-import { ZButton, ZForm, ZFormItem, ZIconButton, ZScrollbar, ZTextarea } from '@codex-proxy/ui'
+import { ZButton, ZForm, ZFormItem, ZIconButton, ZScrollbar, ZSegmented, ZTextarea } from '@codex-proxy/ui'
 import { Copy, KeyRound } from '@lucide/vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -17,6 +18,8 @@ const props = defineProps<{
   disabled: boolean
   authorization: AccountAuthorizationView
   canStart: boolean
+  harnessOptions?: Array<{ label: string, value: AccountOAuthHarness }>
+  reauthorizing?: boolean
 }>()
 
 const emit = defineEmits<{ regenerate: [] }>()
@@ -24,6 +27,7 @@ const emit = defineEmits<{ regenerate: [] }>()
 const { t } = useI18n({ useScope: 'global' })
 
 const callback = defineModel<string>({ required: true })
+const harness = defineModel<AccountOAuthHarness>('harness')
 const copyWithToast = useCopyText()
 const statusText = computed(() => {
   if (props.authorization.status === 'expired')
@@ -53,6 +57,26 @@ const statusText = computed(() => {
         </div>
       </div>
     </div>
+
+    <ZFormItem
+      v-if="harnessOptions && harnessOptions.length > 0 && harness"
+      :label="t('accounts.onboarding.oauthHarness')"
+    >
+      <ZSegmented
+        v-if="!reauthorizing"
+        v-model="harness"
+        :aria-label="t('accounts.onboarding.oauthHarness')"
+        :options="harnessOptions"
+        :disabled="disabled || loading"
+        class="w-full"
+      />
+      <div
+        v-else
+        class="flex h-9 items-center rounded-cp bg-cp-fill-quaternary px-3 font-medium text-cp-text"
+      >
+        {{ harnessOptions.find(opt => opt.value === harness)?.label ?? harness }}
+      </div>
+    </ZFormItem>
 
     <div class="flex flex-wrap items-center gap-2">
       <ZButton

@@ -356,7 +356,14 @@
       "importTaskCreated": "Import task created",
       "partialSubmission": "Some import tasks were created, retry with the same input to submit the rest",
       "accountName": "{provider} account",
-      "failedToStartAuthorization": "Failed to start authorization"
+      "failedToStartAuthorization": "Failed to start authorization",
+      "oauthHarness": "OAuth Harness",
+      "oauthHarnessHelp": "Select the OAuth client harness method",
+      "harnesses": {
+        "codex": "Codex",
+        "opencode": "OpenCode (New)",
+        "pi": "pi (New)"
+      }
     },
     "importTasks": {
       "needProcessing": "Need processing",
