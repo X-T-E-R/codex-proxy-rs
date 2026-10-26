@@ -101,6 +101,8 @@ export interface UsageListRecord {
   logicalOutcome: string
   errorCode: string | null
   errorMessage: string | null
+  matchedError: { source: string, attemptIndex: number | null, errorCode: string | null, errorKind: string | null, errorMessage: string | null } | null
+  upstreamSendState: string
   clientApiKeyName: string | null
   id: string
   provider: string | null
@@ -137,6 +139,8 @@ export interface UsageListRecord {
 export interface UsageRecord {
   id: string
   requestId: string
+  errorCode: string | null
+  errorKind: string | null
   clientApiKeyId: string | null
   kind: string
   provider: string | null
@@ -154,6 +158,7 @@ export interface UsageRecord {
   clientTransport: string
   upstreamTransport: string | null
   protocol: string
+  upstreamSendState: string
   httpVersion: string | null
   clientStatusCode: number | null
   upstreamStatusCode: number | null

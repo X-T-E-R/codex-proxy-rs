@@ -109,19 +109,19 @@ async fn usage_query_should_parse_error_filters_and_status_precedence() {
     for (suffix, status, error, error_types) in [
         (
             "?error=%20overloaded%20",
-            UsageRecordStatus::Error,
+            UsageRecordStatus::All,
             Some("overloaded"),
             vec![],
         ),
         (
             "?errorTypes=timeout",
-            UsageRecordStatus::Error,
+            UsageRecordStatus::All,
             None,
             vec![UsageErrorType::Timeout],
         ),
         (
             "?errorTypes=rate_limited,%20overloaded,rate_limited,%20,%20timeout",
-            UsageRecordStatus::Error,
+            UsageRecordStatus::All,
             None,
             vec![
                 UsageErrorType::Overloaded,
@@ -215,7 +215,7 @@ async fn usage_query_should_reject_invalid_error_filters_and_enforce_error_limit
         let query = observations.records.last().unwrap();
         assert_eq!(
             query.status,
-            gateway_admin::model::observability::UsageRecordStatus::Error
+            gateway_admin::model::observability::UsageRecordStatus::All
         );
         assert_eq!(query.filter.error.as_ref().map(String::len), Some(512));
     }

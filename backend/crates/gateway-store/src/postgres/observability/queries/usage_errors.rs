@@ -4,6 +4,21 @@ use super::super::*;
 use super::literal_contains_pattern;
 
 pub(super) fn push_error_keyword(query: &mut QueryBuilder<Postgres>, value: &str, alias: &str) {
+    query.push("(");
+    push_error_keyword_source(query, value, alias, false);
+    query.push(format!(
+        " or exists(select 1 from ops_events error_event where error_event.model_request_id = {alias}.id and error_event.attempt_index > 0 and "
+    ));
+    push_error_keyword_source(query, value, "error_event", true);
+    query.push("))");
+}
+
+pub(super) fn push_error_keyword_source(
+    query: &mut QueryBuilder<Postgres>,
+    value: &str,
+    alias: &str,
+    event: bool,
+) {
     let pattern = literal_contains_pattern(value);
     let status = value
         .trim()
@@ -11,15 +26,12 @@ pub(super) fn push_error_keyword(query: &mut QueryBuilder<Postgres>, value: &str
         .ok()
         .filter(|code| (100..=599).contains(code));
     query.push("(");
-    push_error_text_source(query, &pattern, status, alias, false);
-    query.push(format!(
-        " or exists(select 1 from ops_events error_event where error_event.model_request_id = {alias}.id and error_event.attempt_index > 0 and ("
-    ));
-    push_error_text_source(query, &pattern, status, "error_event", true);
-    query.push("))");
+    push_error_text_source(query, &pattern, status, alias, event);
     for error_type in matched_error_types_for_keyword(value) {
-        query.push(" or ");
-        push_error_type(query, error_type, alias);
+        query
+            .push(" or (")
+            .push(error_type_source_predicate(error_type, alias, event))
+            .push(")");
     }
     query.push(")");
 }
@@ -83,6 +95,64 @@ pub(super) fn push_error_type(
         .push(")))");
 }
 
+pub(super) fn push_error_match_projection(
+    query: &mut QueryBuilder<Postgres>,
+    filter: &UsageRecordFilter,
+) {
+    let keywords: Vec<_> = [&filter.error, &filter.search]
+        .into_iter()
+        .flatten()
+        .collect();
+    if keywords.is_empty() && filter.error_types.is_empty() {
+        query.push("null::jsonb");
+        return;
+    }
+    query.push("coalesce(");
+    for (index, (alias, event)) in [("mr", false), ("matched_event", true)]
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            query.push(",");
+        }
+        let (source, kind, message, attempt) = if event {
+            ("attempt", "failure_kind", "message", "attempt_index")
+        } else {
+            ("terminal", "error_kind", "error_message", "attempt_count")
+        };
+        query.push(format!("(select jsonb_build_object('source','{source}','attemptIndex',nullif({alias}.{attempt},0),'errorCode',{alias}.provider_error_code,'errorKind',{alias}.{kind},'errorMessage',{alias}.{message})"));
+        if event {
+            query.push(" from ops_events matched_event where matched_event.model_request_id=mr.id and matched_event.attempt_index>0 and (");
+        } else {
+            query.push(" where (");
+        }
+        let mut separated = false;
+        for value in &keywords {
+            if separated {
+                query.push(" or ");
+            }
+            push_error_keyword_source(query, value, alias, event);
+            separated = true;
+        }
+        for error_type in &filter.error_types {
+            if separated {
+                query.push(" or ");
+            }
+            query
+                .push("(")
+                .push(error_type_source_predicate(*error_type, alias, event))
+                .push(")");
+            separated = true;
+        }
+        query.push(")");
+        if event {
+            query.push(" order by matched_event.attempt_index desc,matched_event.created_at desc,matched_event.id desc limit 1");
+        }
+        query.push(")");
+    }
+    query.push(")");
+}
+
 fn error_type_source_predicate(error_type: UsageErrorType, alias: &str, event: bool) -> String {
     let kind = format!(
         "{alias}.{}",
@@ -101,12 +171,16 @@ fn error_type_source_predicate(error_type: UsageErrorType, alias: &str, event: b
     match error_type {
         UsageErrorType::Overloaded => {
             let message = if event { "message" } else { "error_message" };
-            let raw = structured_error_predicate(
+            structured_error_predicate(
                 alias,
-                "raw_code like '%overload%' or raw_type like '%overload%'",
-            );
-            format!(
-                "{code} like '%overload%' or coalesce({alias}.{message},'') ~* 'server[ _]+(is[ _]+)?overloaded|server_overloaded' or {raw}"
+                &overloaded_predicate(
+                    &code,
+                    "raw_code",
+                    "raw_type",
+                    &format!(
+                        "coalesce({alias}.{message},'') ~* 'server[ _]+(is[ _]+)?overloaded|server_overloaded'"
+                    ),
+                ),
             )
         }
         UsageErrorType::Status503 => {
@@ -160,6 +234,17 @@ fn error_type_source_predicate(error_type: UsageErrorType, alias: &str, event: b
     }
 }
 
+pub(super) fn overloaded_predicate(
+    stored: &str,
+    raw_code: &str,
+    raw_type: &str,
+    message: &str,
+) -> String {
+    format!(
+        "{stored} like '%overload%' or {raw_code} like '%overload%' or {raw_type} like '%overload%' or {message}"
+    )
+}
+
 fn structured_error_predicate(alias: &str, predicate: &str) -> String {
     // 与服务端错误摘要使用相同的受控详情解码路径，非法 JSON 不参与分类
     format!(
@@ -177,9 +262,23 @@ fn structured_error_predicate(alias: &str, predicate: &str) -> String {
 }
 
 fn matched_error_types_for_keyword(value: &str) -> Vec<UsageErrorType> {
-    let value = value.to_lowercase();
+    let value = value.trim().to_lowercase();
+    // 原始标识符只按完整别名扩展，避免某个具体限流码被扩大成所有限流与配额错误
+    let identifier = value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
     let aliases: &[(UsageErrorType, &[&str])] = &[
-        (UsageErrorType::Overloaded, &["过载", "過載", "overload"]),
+        (
+            UsageErrorType::Overloaded,
+            &[
+                "过载",
+                "過載",
+                "overload",
+                "overloaded",
+                "server_overloaded",
+                "server_is_overloaded",
+            ],
+        ),
         (
             UsageErrorType::Status503,
             &["503", "服务不可用", "服務不可用"],
@@ -271,7 +370,7 @@ fn matched_error_types_for_keyword(value: &str) -> Vec<UsageErrorType> {
         .filter_map(|(error_type, keywords)| {
             keywords
                 .iter()
-                .any(|keyword| value.contains(keyword))
+                .any(|keyword| value == *keyword || (!identifier && value.contains(keyword)))
                 .then_some(*error_type)
         })
         .collect()

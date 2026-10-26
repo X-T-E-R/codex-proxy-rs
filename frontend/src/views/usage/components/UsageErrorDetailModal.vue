@@ -4,7 +4,7 @@ import type { UsageListRecord, UsageRecordDetail } from '@/api'
 import { ZButton, ZDialog } from '@codex-proxy/ui'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { usageAccountText, usageModelDisplay, usageTransportType } from '@/components/usage/shared/presenter'
+import { usageAccountText, usageModelDisplay, usageSendStateText, usageTransportType } from '@/components/usage/shared/presenter'
 import { formatDuration } from '@/utils/format'
 import { attemptOutcomeClass, attemptOutcomeText, visibleResponseText } from '../utils/detail'
 import DiagnosticsDownloadButton from './DiagnosticsDownloadButton.vue'
@@ -49,6 +49,9 @@ const contextItems = computed(() => [
   { label: t('usage.error.upstreamTransport'), value: usageTransportType(props.record?.upstreamTransport), mono: true },
 ])
 const identifierItems = computed(() => [
+  { label: t('usage.error.sendStatus'), value: usageSendStateText(props.record?.upstreamSendState) },
+  { label: t('usage.error.errorCode'), value: props.record?.errorCode, mono: true },
+  { label: t('usage.error.failureClassification'), value: props.record?.errorKind, mono: true },
   { label: t('usage.error.clientStatusCode'), value: props.record?.clientStatusCode, mono: true },
   { label: t('usage.error.upstreamStatusCode'), value: props.record?.upstreamStatusCode, mono: true },
   { label: t('usage.error.requestId'), value: props.record?.requestId, mono: true, fullWidth: true },
@@ -69,7 +72,7 @@ const attempts = computed(() => (props.record?.attempts ?? []).map(attempt => ({
     { label: t('usage.error.upstreamTransport'), value: usageTransportType(attempt.transport), mono: true },
     { label: t('usage.error.duration'), value: formatDuration(attempt.latencyMs), mono: true },
     { label: t('usage.error.triggerMode'), value: attempt.trigger, mono: true },
-    { label: t('usage.error.sendStatus'), value: attempt.sendState, mono: true },
+    { label: t('usage.error.sendStatus'), value: usageSendStateText(attempt.sendState) },
   ],
 })))
 </script>

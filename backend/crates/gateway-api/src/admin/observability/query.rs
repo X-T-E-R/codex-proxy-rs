@@ -356,8 +356,7 @@ pub(crate) fn usage_command(
     let has_error_filter = filter.error.is_some() || !filter.error_types.is_empty();
     Ok(domain::UsageQuery {
         status: match query.status.as_deref() {
-            None if locating => domain::UsageRecordStatus::All,
-            None if has_error_filter => domain::UsageRecordStatus::Error,
+            None if locating || has_error_filter => domain::UsageRecordStatus::All,
             None | Some("success") => domain::UsageRecordStatus::Success,
             Some("error") => domain::UsageRecordStatus::Error,
             Some("all") => domain::UsageRecordStatus::All,

@@ -689,6 +689,8 @@ pub(super) struct MemoryClientKeyStore(Arc<Mutex<Option<ClientKeyRecord>>>);
 
 #[derive(Default)]
 pub(super) struct MemoryObservations {
+    pub server_summary: Option<gateway_admin::model::server_errors::ServerErrorSummary>,
+    pub server_summary_queries: Vec<(TimeRange, Option<String>)>,
     pub summary: Option<UsageOverview>,
     pub trend: Option<Vec<RequestMetricPoint>>,
     pub summaries: Vec<(TimeRange, UsageFilter)>,
@@ -1429,6 +1431,19 @@ impl AccountRuntimeStore for UnusedStore {
 
 #[async_trait]
 impl ObservabilityStore for UnusedStore {
+    async fn server_error_summary(
+        &self,
+        range: TimeRange,
+        _: gateway_core::time::DeploymentTimeZone,
+        provider: Option<String>,
+    ) -> AdminStoreResult<gateway_admin::model::server_errors::ServerErrorSummary> {
+        let mut data = self.observations.lock().expect("observations");
+        data.server_summary_queries.push((range, provider));
+        data.server_summary
+            .clone()
+            .ok_or_else(|| unavailable("server summary"))
+    }
+
     async fn diagnostic_errors(
         &self,
         target: &gateway_admin::model::diagnostics::DiagnosticTarget,

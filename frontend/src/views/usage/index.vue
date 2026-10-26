@@ -25,12 +25,7 @@ import { isErrorUsageRecord } from './utils/detail'
 const { t } = useI18n({ useScope: 'global' })
 
 const recordView = shallowRef<UsageRecordStatus>('success')
-const recordColumns = computed<TableColumn<UsageListRecord>[]>(() => recordView.value === 'error'
-  ? usageRecordColumns.value.flatMap(column => column.key === 'route'
-      ? [column, { key: 'errorMessage', label: t('usage.filters.error'), kind: 'custom', size: '4xl', hideable: false }]
-      : [column])
-  : usageRecordColumns.value)
-const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(recordColumns, 'usage-records')
+const statusExplicit = shallowRef(false)
 const { timeRange, timeRangeParams, disabledDate, refreshTimeRangeEnd, latestTimeRangeParams }
   = useUsageTimeRange()
 
@@ -58,6 +53,28 @@ const {
   status: recordView,
 })
 
+const errorExploration = computed(() => recordView.value === 'error' || filterField.value === 'error'
+  || (filterField.value === 'search' && filterValue.value.trim() !== '') || errorTypes.value.length > 0)
+const recordColumns = computed<TableColumn<UsageListRecord>[]>(() => errorExploration.value
+  ? usageRecordColumns.value.flatMap(column => column.key === 'route'
+      ? [
+          column,
+          { key: 'errorMessage', label: t('usage.filters.error'), kind: 'custom', size: '4xl', hideable: false },
+          { key: 'upstreamSendState', label: t('usage.error.sendStatus'), kind: 'custom', size: 'md', hideable: false },
+        ]
+      : [column])
+  : usageRecordColumns.value)
+const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(recordColumns, 'usage-records')
+
+function showAllOverloaded() {
+  // 摘要只按时间与平台统计，钻取清除不属于摘要范围的局部筛选
+  filterField.value = 'error'
+  filterValue.value = ''
+  errorTypes.value = ['overloaded']
+  recordView.value = 'all'
+  statusExplicit.value = false
+}
+
 const { showDetailModal, selectedUsageRecord, pendingUsageRecord, detailLoading, detailError, handleViewDetail, retryDetail } = useUsageRecordDetail()
 const detailComponent = computed(() => isErrorUsageRecord(pendingUsageRecord.value)
   ? UsageErrorDetailModal
@@ -78,14 +95,12 @@ watch(timeRange, () => {
 watch(filterField, (field) => {
   if (isUsageLocatorField(field) && recordView.value !== 'all')
     recordView.value = 'all'
-  else if (field === 'error' && recordView.value === 'success')
-    recordView.value = 'error'
 })
 
-// 选择错误类型筛选时自动从仅成功切到错误视图，展示错误列与错误摘要
-watch(errorTypes, (types) => {
-  if (types.length > 0 && recordView.value === 'success')
-    recordView.value = 'error'
+// 错误探索包含重试后成功的请求，用户显式选择的状态仍优先
+watch([filterField, filterValue, errorTypes], ([field, value, types]) => {
+  if (!statusExplicit.value && (types.length > 0 || field === 'error' || (field === 'search' && value.trim() !== '')))
+    recordView.value = 'all'
 })
 </script>
 
@@ -119,8 +134,10 @@ watch(errorTypes, (types) => {
       :loading="analyticsLoading"
     />
     <UsageServerErrorSummary
-      v-if="recordView === 'error'"
+      v-if="errorExploration"
       :range="timeRangeParams"
+      :provider="providerQuery || undefined"
+      @overloaded="showAllOverloaded"
     />
 
     <ZCard
@@ -152,7 +169,7 @@ watch(errorTypes, (types) => {
             @refresh="refreshUsage"
           >
             <template #actions>
-              <UsageRecordStatusFilter v-model="recordView" />
+              <UsageRecordStatusFilter v-model="recordView" @update:model-value="statusExplicit = true" />
               <ZTableColumnSettings
                 :options="columnOptions"
                 @change="setColumnVisible"

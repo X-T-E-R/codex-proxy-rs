@@ -295,6 +295,8 @@ fn push_request_error_predicates(
                 "mr.provider_error_code",
             ],
             search,
+            "mr",
+            false,
         );
     }
 }
@@ -342,6 +344,8 @@ fn push_ops_event_predicates(
                 "oe.provider_error_code",
             ],
             search,
+            "oe",
+            true,
         );
     }
 }
@@ -375,7 +379,13 @@ fn push_response_id_filter(
     }
 }
 
-fn push_prefix_search(statement: &mut QueryBuilder<Postgres>, columns: &[&str], value: &str) {
+fn push_prefix_search(
+    statement: &mut QueryBuilder<Postgres>,
+    columns: &[&str],
+    value: &str,
+    alias: &str,
+    event: bool,
+) {
     let pattern = literal_prefix_pattern(value);
     statement.push(" and (");
     for (index, column) in columns.iter().enumerate() {
@@ -389,6 +399,7 @@ fn push_prefix_search(statement: &mut QueryBuilder<Postgres>, columns: &[&str], 
     statement
         .push(" or mr.client_api_key_name_snapshot ilike ")
         .push_bind(pattern)
-        .push(" escape '\\'");
+        .push(" escape '\\' or ");
+    super::usage_errors::push_error_keyword_source(statement, value, alias, event);
     statement.push(")");
 }

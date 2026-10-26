@@ -7,7 +7,7 @@ const SUMMARY: &str = r#"
 with base as materialized (
   select id,started_at,attempt_count,error_kind,client_status_code,upstream_status_code,
     provider_error_code,error_message,error_details
-  from model_request_observations where started_at >= $1 and started_at < $2
+  from model_request_observations where started_at >= $1 and started_at < $2 and ($4::text is null or provider_kind=$4)
 ), sources as materialized (
   select id request_id, 'terminal' source, attempt_count attempt_index, error_kind,
     client_status_code,upstream_status_code,provider_error_code,error_message,error_details
@@ -33,7 +33,7 @@ with base as materialized (
   from upstream
 ), flags as materialized (
   select *,
-    (stored_code like '%overload%' or raw_code like '%overload%' or raw_type like '%overload%' or message_overload) overloaded,
+    (__OVERLOADED__) overloaded,
     (left(stored_code,7)='server_' or left(raw_code,7)='server_' or left(raw_type,7)='server_' or message_server) server_prefix,
     (coalesce(client_status_code=503,false) or coalesce(upstream_status_code=503,false) or stored_code='503' or raw_code='503' or raw_status='503') status503,
     (coalesce(client_status_code between 500 and 599,false) or coalesce(upstream_status_code between 500 and 599,false) or raw_status ~ '^5[0-9]{2}$') status5xx,
@@ -70,7 +70,7 @@ with base as materialized (
 )
 select jsonb_build_object(
   'fromInclusive',$1::timestamptz,'toExclusive',$2::timestamptz,'timezone',$3::text,
-  'timeBasis','started_at','source','retained_records',
+  'provider',$4::text,'timeBasis','started_at','source','retained_records',
   'earliestRetainedAt',(select min(started_at) from base),'latestRetainedAt',(select max(started_at) from base),
   'totals',(select to_jsonb(counts)-'day' from counts where day is null),
   'daily',coalesce((select jsonb_agg(to_jsonb(counts) order by day) from counts where day is not null),'[]'::jsonb),
@@ -82,11 +82,24 @@ pub(crate) async fn server_error_summary(
     connection: &mut ObservabilityConnection,
     range: admin_observability::TimeRange,
     timezone: gateway_core::time::DeploymentTimeZone,
+    provider: Option<String>,
 ) -> StoreResult<ServerErrorSummary> {
-    let value: serde_json::Value = sqlx::query_scalar(SUMMARY)
+    validate_optional_text(provider.as_deref(), MAX_FILTER_BYTES, "provider filter")?;
+    let sql = SUMMARY.replace(
+        "__OVERLOADED__",
+        &super::usage_errors::overloaded_predicate(
+            "stored_code",
+            "raw_code",
+            "raw_type",
+            "message_overload",
+        ),
+    );
+    // SQL 片段仅由固定列名与共享分类规则组成，所有请求参数仍通过 bind 传入
+    let value: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(range.start)
         .bind(range.end)
         .bind(timezone.name())
+        .bind(provider)
         .fetch_one(&mut **connection)
         .await
         .map_err(|source| postgres_unavailable("summarize server error family", source))?;

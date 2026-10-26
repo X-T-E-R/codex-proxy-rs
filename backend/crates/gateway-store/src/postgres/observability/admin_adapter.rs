@@ -408,6 +408,7 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
         &self,
         range: admin_observability::TimeRange,
         timezone: gateway_core::time::DeploymentTimeZone,
+        provider: Option<String>,
     ) -> AdminStoreResult<gateway_admin::model::server_errors::ServerErrorSummary> {
         self.repository
             .query_budget
@@ -415,7 +416,7 @@ impl AdminObservabilityStore for PgAdminObservabilityStore {
                 &self.repository.pool,
                 "summarize server error family",
                 |mut connection| async move {
-                    server_error_summary(&mut connection, range, timezone).await
+                    server_error_summary(&mut connection, range, timezone, provider).await
                 },
             )
             .await

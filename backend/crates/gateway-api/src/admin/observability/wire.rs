@@ -88,6 +88,8 @@ pub struct ImageBillingView {
 pub struct UsageListRecordView {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub matched_error: Option<domain::UsageErrorMatch>,
+    pub upstream_send_state: String,
     pub logical_outcome: String,
     pub client_api_key_name: Option<String>,
     pub id: String,
@@ -128,6 +130,8 @@ pub struct UsageListRecordView {
 pub struct UsageRecordView {
     pub id: String,
     pub request_id: String,
+    pub error_code: Option<String>,
+    pub error_kind: Option<String>,
     pub client_api_key_id: Option<String>,
     pub routing_scope: String,
     pub routing_group_refs: Vec<String>,
@@ -148,6 +152,7 @@ pub struct UsageRecordView {
     pub client_transport: String,
     pub upstream_transport: Option<String>,
     pub protocol: String,
+    pub upstream_send_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

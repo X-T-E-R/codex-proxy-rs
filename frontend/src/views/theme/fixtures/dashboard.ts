@@ -117,6 +117,8 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
     logicalOutcome: 'succeeded',
     errorCode: null,
     errorMessage: null,
+    matchedError: null,
+    upstreamSendState: 'sent',
     clientApiKeyName: t('appearance.preview.dashboard.demoKey'),
     provider: options.provider,
     authenticationKind: options.authenticationKind,

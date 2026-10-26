@@ -15,6 +15,7 @@ import {
   usageLatencyDetails,
   usageModelDisplay,
   usageReasoningEffort,
+  usageSendStateText,
   usageTransportType,
   usageUserAgent,
 } from '@/components/usage/shared/presenter'
@@ -64,6 +65,7 @@ const finalAttemptIndex = computed(() => {
 const requestItems = computed(() => [
   { label: t('accounts.account'), value: accountDisplay.value, mono: true, fullWidth: true },
   { label: t('usage.request.statusCode'), value: props.record?.statusCode, mono: true },
+  { label: t('usage.error.sendStatus'), value: usageSendStateText(props.record?.upstreamSendState) },
   { label: t('usage.request.message'), value: props.record?.message },
   { label: t('usage.fields.time'), value: props.record?.createdAtDisplay, mono: true },
   { label: t('usage.fields.endpoint'), value: props.record?.route, mono: true },
@@ -122,6 +124,8 @@ interface AttemptRow {
   provider: string
   model: string | null
   transport: string
+  sendState: string
+  errorCode: string | null
   statusCode: number | null
   accountLabel: string
   accountId: string | null
@@ -131,6 +135,8 @@ interface AttemptRow {
 const attemptColumns = computed(() => (defineTableColumns<AttemptRow>([
   { key: 'attemptIndex', label: t('usage.request.serialNumber'), kind: 'index' },
   { key: 'outcome', label: t('usage.request.result'), kind: 'status', size: 'sm' },
+  { key: 'sendState', label: t('usage.error.sendStatus'), kind: 'meta', size: 'md' },
+  { key: 'errorCode', label: t('usage.error.errorCode'), kind: 'mono', size: 'xl' },
   { key: 'provider', label: t('usage.error.platform'), kind: 'meta', size: 'sm' },
   { key: 'model', label: t('usage.fields.model'), kind: 'mono', size: 'lg' },
   { key: 'transport', label: t('usage.diagnostics.transport'), kind: 'status', size: 'md' },
@@ -147,6 +153,8 @@ const attemptRows = computed<AttemptRow[]>(() =>
     provider: attempt.provider,
     model: attempt.model,
     transport: attempt.transport,
+    sendState: usageSendStateText(attempt.sendState),
+    errorCode: attempt.providerErrorCode || attempt.failureClass,
     statusCode: attempt.statusCode,
     accountLabel: attempt.accountEmail || attempt.accountName || attempt.accountId || '—',
     accountId: attempt.accountId,

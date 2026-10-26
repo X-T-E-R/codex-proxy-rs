@@ -140,7 +140,7 @@ pub(crate) fn push_usage_filter(
 }
 
 pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
-    "select mr.id, mr.outcome, mr.provider_error_code as error_code, mr.error_message, mr.client_status_code, mr.client_api_key_name_snapshot as client_api_key_name, mr.endpoint, mr.client_transport, mr.requested_model_id,
+    "select mr.id, mr.outcome, mr.provider_error_code as error_code, mr.error_message, mr.upstream_send_state, mr.client_status_code, mr.client_api_key_name_snapshot as client_api_key_name, mr.endpoint, mr.client_transport, mr.requested_model_id,
             mr.provider_kind, mr.provider_account_ref,
             mr.provider_account_name_snapshot as provider_account_name,
             mr.provider_account_email_snapshot as provider_account_email,
@@ -159,8 +159,7 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             mr.account_selection_wait_ms, mr.capacity_used_slots, mr.capacity_total_slots,
             host(mr.client_ip) as client_ip, mr.user_agent,
             mr.reasoning_effort, mr.reasoning_preset, mr.subagent_kind, mr.compact,
-            mr.started_at
-     from model_request_observations mr";
+            mr.started_at,";
 
 pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
     "select mr.id, mr.client_api_key_ref, mr.config_revision,
@@ -245,7 +244,7 @@ async fn projected_usage_counts(
     query: &UsageRecordQuery,
 ) -> StoreResult<Option<BTreeMap<DateTime<Utc>, u64>>> {
     use admin_observability::UsageRecordStatus;
-    if query.status == UsageRecordStatus::Error {
+    if query.status == UsageRecordStatus::Error || error_exploration(&query.filter) {
         return Ok(None);
     }
     let Some(mut counts) = snapshot
@@ -324,7 +323,7 @@ async fn list_usage_record_items_at<'e, E: sqlx::Executor<'e, Database = Postgre
     statement.push_bind(page.range.start);
     statement.push(" and mr.started_at < ");
     statement.push_bind(page.range.end);
-    push_usage_record_status(&mut statement, query.status);
+    push_usage_record_status(&mut statement, query.status, &query.filter);
     push_usage_filter(&mut statement, &query.filter, "mr");
     statement.push(if ascending {
         " order by mr.started_at, mr.id limit "
@@ -336,8 +335,9 @@ async fn list_usage_record_items_at<'e, E: sqlx::Executor<'e, Database = Postgre
     statement.push_bind(offset);
     statement.push(") ");
     statement.push(USAGE_LIST_RECORD_SELECT);
+    usage_errors::push_error_match_projection(&mut statement, &query.filter);
     statement.push(
-        " join candidate_page page on page.id = mr.id order by page.started_at desc, page.id desc",
+        " as matched_error from model_request_observations mr join candidate_page page on page.id = mr.id order by page.started_at desc, page.id desc",
     );
     let rows = statement
         .build()
@@ -450,7 +450,7 @@ fn usage_counts_query(
     by_minute: bool,
 ) -> QueryBuilder<Postgres> {
     use admin_observability::UsageRecordStatus;
-    let split = status == UsageRecordStatus::All;
+    let split = status == UsageRecordStatus::All && !error_exploration(filter);
     let mut statement = QueryBuilder::<Postgres>::new(if split {
         if by_minute {
             "select bucket_start,sum(request_count)::bigint as request_count from ("
@@ -486,6 +486,7 @@ fn usage_counts_query(
                 } else {
                     status
                 },
+                filter,
             );
         }
         if branch > 0 || status == UsageRecordStatus::Error {
@@ -721,9 +722,14 @@ pub(crate) fn push_diagnostic_dimension_filter(
     }
 }
 
+fn error_exploration(filter: &UsageRecordFilter) -> bool {
+    filter.error.is_some() || !filter.error_types.is_empty() || filter.search.is_some()
+}
+
 fn push_usage_record_status(
     statement: &mut QueryBuilder<Postgres>,
     status: admin_observability::UsageRecordStatus,
+    filter: &UsageRecordFilter,
 ) {
     use admin_observability::UsageRecordStatus;
     match status {
@@ -732,11 +738,19 @@ fn push_usage_record_status(
             statement.push(" and mr.outcome in ('failed', 'incomplete')");
         }
         UsageRecordStatus::All => {
-            // 成功沿用用量边界，未成功记录保留真实生命周期，不把取消与执行中标为错误
+            // 明确错误筛选读取全部保留事实，普通名称查询仍沿用成功用量边界
+            if filter.error.is_some() || !filter.error_types.is_empty() {
+                return;
+            }
             statement
                 .push(" and (")
                 .push(completed_usage_fact_predicate("mr"))
-                .push(" or mr.outcome <> 'succeeded')");
+                .push(" or mr.outcome <> 'succeeded'");
+            if let Some(search) = &filter.search {
+                statement.push(" or ");
+                usage_errors::push_error_keyword(statement, search, "mr");
+            }
+            statement.push(")");
         }
     }
 }

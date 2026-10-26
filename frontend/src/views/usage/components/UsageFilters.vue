@@ -23,6 +23,7 @@ const field = defineModel<UsageRecordFilterField>('field', { required: true })
 const value = defineModel<string>('value', { required: true })
 const errorTypes = defineModel<UsageErrorType[]>('errorTypes', { default: () => [] })
 const fieldOptions = computed(() => [
+  { value: 'search', label: t('usage.filters.search') },
   { value: 'key', label: t('usage.filters.keyName') },
   { value: 'account', label: t('usage.filters.account') },
   { value: 'model', label: t('usage.fields.model') },

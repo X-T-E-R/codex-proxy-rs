@@ -37,6 +37,7 @@ export interface ServerErrorSummary {
   fromInclusive: string
   toExclusive: string
   timezone: string
+  provider: string | null
   timeBasis: string
   source: string
   earliestRetainedAt: string | null
@@ -47,6 +48,7 @@ export interface ServerErrorSummary {
 }
 
 interface ServerErrorSummaryParams {
+  provider?: string
   period?: ServerErrorPeriod
   asOf?: number
   startTime?: string

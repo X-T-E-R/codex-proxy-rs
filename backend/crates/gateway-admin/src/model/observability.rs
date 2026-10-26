@@ -776,12 +776,25 @@ pub struct DashboardObservation {
     pub recent_requests: Vec<UsageListRecord>,
 }
 
+/// 与当前错误筛选命中的终态或保留尝试，不覆盖请求终态错误
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageErrorMatch {
+    pub source: String,
+    pub attempt_index: Option<u32>,
+    pub error_code: Option<String>,
+    pub error_kind: Option<String>,
+    pub error_message: Option<String>,
+}
+
 /// 使用记录表格的窄读模型
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageListRecord {
     pub outcome: RequestOutcome,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub matched_error: Option<UsageErrorMatch>,
+    pub upstream_send_state: String,
     pub client_status_code: Option<u16>,
     pub client_api_key_name: Option<String>,
     pub id: String,

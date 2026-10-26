@@ -19,6 +19,7 @@ import UsageTokenCell from '@/components/usage/UsageTokenCell.vue'
 import UsageTransportBadge from '@/components/usage/UsageTransportBadge.vue'
 import {
   usageAccountText,
+  usageSendStateText,
   usageUserAgent,
 } from './shared/presenter'
 
@@ -114,14 +115,22 @@ const { t } = useI18n({ useScope: 'global' })
     </template>
 
     <template #errorMessage="{ row }">
-      <div class="min-w-0 py-0.5" :title="row.errorMessage || row.errorCode || undefined">
+      <div class="min-w-0 py-0.5" :title="row.matchedError?.errorMessage || row.errorMessage || undefined">
         <code class="block truncate font-mono text-cp-sm font-bold text-cp-error-text">
-          {{ row.errorCode || (row.logicalOutcome === 'incomplete' ? t('usage.error.responseIsNotComplete') : t('usage.error.requestFailed')) }}
+          {{ row.matchedError?.errorCode || row.matchedError?.errorKind || row.errorCode || (row.logicalOutcome === 'incomplete' ? t('usage.error.responseIsNotComplete') : row.logicalOutcome === 'failed' ? t('usage.error.requestFailed') : '—') }}
         </code>
-        <p v-if="row.errorMessage" class="mt-1 mb-0 truncate text-cp-xs leading-[1.45] font-emphasis text-cp-text-secondary">
-          {{ row.errorMessage }}
+        <p v-if="row.matchedError?.errorMessage || row.errorMessage" class="mt-1 mb-0 truncate text-cp-xs leading-[1.45] font-emphasis text-cp-text-secondary">
+          {{ row.matchedError?.errorMessage || row.errorMessage }}
         </p>
+        <div v-if="row.matchedError?.source === 'attempt'" class="flex flex-wrap gap-x-2 text-cp-xs">
+          <span class="text-cp-text-tertiary">{{ t('usage.error.attemptMatch', { index: row.matchedError.attemptIndex }) }}</span>
+          <span v-if="row.logicalOutcome === 'succeeded'" class="text-cp-success-text">{{ t('common.status.success') }}</span>
+        </div>
       </div>
+    </template>
+
+    <template #upstreamSendState="{ row }">
+      <span class="text-cp-sm text-cp-text-secondary">{{ usageSendStateText(row.upstreamSendState) }}</span>
     </template>
 
     <template #clientTransport="{ row }">

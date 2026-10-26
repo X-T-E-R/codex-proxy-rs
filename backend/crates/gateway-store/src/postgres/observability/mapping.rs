@@ -312,6 +312,12 @@ pub(crate) fn usage_list_record_from_row(
     Ok(UsageListRecord {
         error_code: get(row, "error_code")?,
         error_message: get(row, "error_message")?,
+        matched_error: get::<Option<sqlx::types::Json<admin_observability::UsageErrorMatch>>>(
+            row,
+            "matched_error",
+        )?
+        .map(|value| value.0),
+        upstream_send_state: get(row, "upstream_send_state")?,
         client_status_code: optional_status(row, "client_status_code")?,
         outcome: admin_observability::RequestOutcome::new(get::<String>(row, "outcome")?)
             .map_err(|_| invalid("invalid request outcome"))?,

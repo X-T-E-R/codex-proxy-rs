@@ -21,7 +21,7 @@ interface UseUsageRecordsTableOptions {
 }
 
 type UsageLoadScope = 'all' | 'table'
-export type UsageRecordFilterField = 'key' | 'account' | 'model' | 'error' | 'requestId' | 'upstreamRequestId' | 'responseId'
+export type UsageRecordFilterField = 'search' | 'key' | 'account' | 'model' | 'error' | 'requestId' | 'upstreamRequestId' | 'responseId'
 // 精确 ID 定位不携带 status，后端据此同时查成功与失败
 export function isUsageLocatorField(field: UsageRecordFilterField): boolean {
   return field === 'requestId' || field === 'upstreamRequestId' || field === 'responseId'
@@ -36,7 +36,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
   const analyticsLoading = shallowRef(true)
   const summary = shallowRef(emptySummary())
   const insights = shallowRef(emptyInsights())
-  const filterField = shallowRef<UsageRecordFilterField>('key')
+  const filterField = shallowRef<UsageRecordFilterField>('search')
   const filterValue = shallowRef('')
   const errorTypes = shallowRef<UsageErrorType[]>([])
   const filterParams = computed(() => {
@@ -49,6 +49,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
       clientApiKeyName: filterField.value === 'key' ? value : undefined,
       accountName: filterField.value === 'account' ? value : undefined,
       model: filterField.value === 'model' ? value : undefined,
+      search: filterField.value === 'search' ? value : undefined,
       error: filterField.value === 'error' ? value : undefined,
       errorTypes: selectedErrorTypes,
     }
@@ -78,7 +79,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
 
   function snapshot(asOf?: number) {
     return {
-      ...options.latestTimeRangeParams(asOf),
+      ...(asOf === undefined ? options.timeRangeParams.value : options.latestTimeRangeParams(asOf)),
       provider: providerQuery.value || undefined,
       ...filterParams.value,
       // 精确 ID 定位时省略 status，让后端同时查成功与失败
@@ -94,6 +95,7 @@ export function useUsageRecordsTable(options: UseUsageRecordsTableOptions) {
       || tableParams.clientApiKeyName !== filter.clientApiKeyName
       || tableParams.accountName !== filter.accountName
       || tableParams.model !== filter.model
+      || tableParams.search !== filter.search
       || tableParams.error !== filter.error
       || tableParams.errorTypes !== filter.errorTypes
   }

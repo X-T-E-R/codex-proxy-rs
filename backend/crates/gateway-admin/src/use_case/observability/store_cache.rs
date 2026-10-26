@@ -199,8 +199,11 @@ impl ObservabilityStore for CachedObservabilityStore {
         &self,
         range: TimeRange,
         timezone: gateway_core::time::DeploymentTimeZone,
+        provider: Option<String>,
     ) -> AdminStoreResult<crate::model::server_errors::ServerErrorSummary> {
-        self.inner.server_error_summary(range, timezone).await
+        self.inner
+            .server_error_summary(range, timezone, provider)
+            .await
     }
     fn query_timeout(&self) -> Duration {
         self.inner.query_timeout()

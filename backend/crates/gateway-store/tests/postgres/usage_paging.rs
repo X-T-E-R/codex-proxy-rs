@@ -821,6 +821,7 @@ async fn usage_scale_rehearsal_covers_pages_filters_details_and_error_summary() 
         .server_error_summary(
             TimeRange::new(range.start, range.end).unwrap(),
             DeploymentTimeZone::default(),
+            None,
         )
         .await
         .unwrap();

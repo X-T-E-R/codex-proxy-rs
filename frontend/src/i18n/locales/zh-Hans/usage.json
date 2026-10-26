@@ -2,7 +2,9 @@
   "usage": {
     "serverErrors": {
       "title": "服务端错误",
-      "description": "同一窗口内按请求去重的服务端错误，过载单独突出",
+      "description": "按当前日期与平台统计全部保留请求，含重试后成功的请求",
+      "viewOverloaded": "查看全部 {count} 个过载请求",
+      "drilldownHint": "点击过载数量查看同范围全部请求，并清除明细局部筛选",
       "loading": "正在加载服务端错误摘要",
       "loadFailed": "服务端错误摘要加载失败",
       "kpis": {
@@ -135,6 +137,7 @@
       "reviewSubagentRequest": "Review 子代理请求"
     },
     "filters": {
+      "search": "搜索",
       "error": "错误",
       "errorType": "错误类型",
       "errorTypePlaceholder": "筛选错误类型",
@@ -356,7 +359,11 @@
       "failureClassification": "失败分类",
       "duration": "耗时",
       "triggerMode": "触发方式",
-      "sendStatus": "发送状态",
+      "sendStatus": "上游发送状态",
+      "sent": "已发送",
+      "notSent": "未发送",
+      "sendUnknown": "未知",
+      "attemptMatch": "命中尝试 {index}",
       "errorDetails": "错误详情",
       "description": "失败原因与请求上下文",
       "responseIsNotComplete": "响应未完成",

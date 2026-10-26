@@ -447,6 +447,7 @@ pub trait ObservabilityStore: Send + Sync {
         &self,
         _range: TimeRange,
         _timezone: gateway_core::time::DeploymentTimeZone,
+        _provider: Option<String>,
     ) -> AdminStoreResult<crate::model::server_errors::ServerErrorSummary> {
         Err(AdminStoreError::new(
             AdminStoreErrorKind::Unavailable,

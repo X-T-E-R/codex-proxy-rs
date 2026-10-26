@@ -42,6 +42,14 @@ export function usageTokenDetails(details: UsageTokenDetails): UsageTokenDetails
   }
 }
 
+export function usageSendStateText(state?: string | null) {
+  if (state === 'sent')
+    return t('usage.error.sent')
+  if (state === 'not_sent')
+    return t('usage.error.notSent')
+  return t('usage.error.sendUnknown')
+}
+
 export function usageTransportType(transport?: string | null) {
   if (transport === 'websocket')
     return 'WS'

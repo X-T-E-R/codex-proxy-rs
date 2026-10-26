@@ -1345,6 +1345,8 @@ fn total_record(
     UsageListRecord {
         error_code: None,
         error_message: None,
+        matched_error: None,
+        upstream_send_state: "unknown".to_owned(),
         client_status_code: None,
         outcome: gateway_admin::model::observability::RequestOutcome::Succeeded,
         client_api_key_name: Some("Production".to_owned()),

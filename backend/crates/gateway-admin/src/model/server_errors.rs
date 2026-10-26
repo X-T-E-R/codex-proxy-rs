@@ -45,6 +45,7 @@ pub struct ServerErrorSummary {
     pub from_inclusive: DateTime<Utc>,
     pub to_exclusive: DateTime<Utc>,
     pub timezone: String,
+    pub provider: Option<String>,
     pub time_basis: String,
     pub source: String,
     pub earliest_retained_at: Option<DateTime<Utc>>,

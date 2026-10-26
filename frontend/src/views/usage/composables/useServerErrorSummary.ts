@@ -5,7 +5,7 @@ import { getServerErrorSummary } from '@/api'
 
 import { errorMessage } from '@/utils/operation'
 
-export function useServerErrorSummary(options: { range: () => UsageTimeRangeParams }) {
+export function useServerErrorSummary(options: { range: () => UsageTimeRangeParams, provider: () => string | undefined }) {
   const summary = shallowRef<ServerErrorSummary>()
   const loading = shallowRef(true)
   const error = shallowRef('')
@@ -27,6 +27,7 @@ export function useServerErrorSummary(options: { range: () => UsageTimeRangePara
       const result = await getServerErrorSummary({
         startTime: range.startTime,
         endTime: range.endTime,
+        provider: options.provider(),
       }, { silent: true, signal: next.signal })
       if (current !== sequence)
         return

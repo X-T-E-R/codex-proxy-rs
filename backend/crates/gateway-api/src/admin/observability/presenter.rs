@@ -264,6 +264,8 @@ pub(crate) fn usage_list_record_view(
     UsageListRecordView {
         error_code: record.error_code,
         error_message: record.error_message,
+        matched_error: record.matched_error,
+        upstream_send_state: record.upstream_send_state,
         logical_outcome: record.outcome.as_str().to_owned(),
         client_api_key_name: record.client_api_key_name,
         id: record.id,
@@ -363,6 +365,8 @@ pub(crate) fn usage_record_view(
     UsageRecordView {
         id: record.id.clone(),
         request_id: record.id,
+        error_code: record.provider_error_code,
+        error_kind: record.error_kind,
         client_api_key_id: Some(record.client_api_key_ref),
         routing_scope: record.routing_scope,
         routing_group_refs: record.routing_group_refs,
@@ -383,6 +387,7 @@ pub(crate) fn usage_record_view(
         client_transport: record.client_transport,
         upstream_transport: record.upstream_transport,
         protocol: record.protocol.clone(),
+        upstream_send_state: record.upstream_send_state,
         http_version: record.http_version.clone(),
         client_status_code: record.client_status_code.map(i64::from),
         upstream_status_code: record.upstream_status_code.map(i64::from),

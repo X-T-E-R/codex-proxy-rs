@@ -270,6 +270,7 @@ where
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ServerErrorQuery {
+    provider: Option<String>,
     period: Option<String>,
     as_of: Option<i64>,
     start_time: Option<String>,
@@ -296,7 +297,7 @@ where
     let summary = state
         .admin_services()
         .observability()
-        .server_error_summary(range)
+        .server_error_summary(range, non_empty(query.provider))
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(

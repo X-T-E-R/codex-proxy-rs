@@ -2,7 +2,9 @@
   "usage": {
     "serverErrors": {
       "title": "服務端錯誤",
-      "description": "同一窗口內按請求去重的服務端錯誤，過載單獨突出",
+      "description": "按當前日期與平臺統計全部保留請求，含重試後成功的請求",
+      "viewOverloaded": "查看全部 {count} 個過載請求",
+      "drilldownHint": "點擊過載數量查看同範圍全部請求，並清除明細局部篩選",
       "loading": "正在加載服務端錯誤摘要",
       "loadFailed": "服務端錯誤摘要加載失敗",
       "kpis": {
@@ -135,6 +137,7 @@
       "reviewSubagentRequest": "Review 子代理請求"
     },
     "filters": {
+      "search": "搜索",
       "error": "錯誤",
       "errorType": "錯誤類型",
       "errorTypePlaceholder": "篩選錯誤類型",
@@ -356,7 +359,11 @@
       "failureClassification": "失敗分類",
       "duration": "耗時",
       "triggerMode": "觸發方式",
-      "sendStatus": "發送狀態",
+      "sendStatus": "上游發送狀態",
+      "sent": "已發送",
+      "notSent": "未發送",
+      "sendUnknown": "未知",
+      "attemptMatch": "命中嘗試 {index}",
       "errorDetails": "錯誤詳情",
       "description": "失敗原因與請求上下文",
       "responseIsNotComplete": "響應未完成",

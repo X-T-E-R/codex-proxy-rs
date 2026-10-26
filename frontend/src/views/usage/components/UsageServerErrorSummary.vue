@@ -22,14 +22,17 @@ import {
 
 const props = defineProps<{
   range: UsageTimeRangeParams
+  provider?: string
 }>()
+
+const emit = defineEmits<{ overloaded: [] }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
-const { summary, loading, error, load } = useServerErrorSummary({ range: () => props.range })
+const { summary, loading, error, load } = useServerErrorSummary({ range: () => props.range, provider: () => props.provider })
 const { palette } = useChartPalette()
 
-watch(() => props.range, () => void load(true), { immediate: true })
+watch([() => props.range, () => props.provider], () => void load(true), { immediate: true })
 
 const totals = computed(() => summary.value?.totals)
 const daily = computed<ServerErrorDaily[]>(() => summary.value?.daily ?? [])
@@ -146,6 +149,7 @@ function formatTooltip(params: unknown) {
           </template>
           <div class="grid max-w-80 gap-2 px-3 py-2 text-cp-sm leading-relaxed text-cp-text-secondary">
             <p>{{ t('usage.serverErrors.help.dedupe') }}</p>
+            <p>{{ t('usage.serverErrors.drilldownHint') }}</p>
             <p>{{ t('usage.serverErrors.help.overlap') }}</p>
             <p>{{ t('usage.serverErrors.help.sources') }}</p>
             <p>{{ t('usage.serverErrors.help.client200') }}</p>
@@ -203,7 +207,18 @@ function formatTooltip(params: unknown) {
         <div class="grid grid-cols-2 gap-x-4 gap-y-4 rounded-cp-lg bg-cp-fill-quaternary/45 p-3 sm:grid-cols-5">
           <div v-for="item in kpis" :key="item.key" class="grid min-w-0 content-start gap-1 px-1">
             <span class="truncate text-[10px] font-bold text-cp-text-quaternary">{{ item.label }}</span>
+            <button
+              v-if="item.key === 'overloaded'"
+              type="button"
+              class="w-fit cursor-pointer rounded-cp-xs font-mono text-cp-xl leading-none font-heavy text-cp-error-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cp-primary"
+              :disabled="loading"
+              :aria-label="t('usage.serverErrors.viewOverloaded', { count: formatInteger(item.value) })"
+              @click="emit('overloaded')"
+            >
+              {{ formatInteger(item.value) }}
+            </button>
             <strong
+              v-else
               class="font-mono leading-none font-heavy tabular-nums"
               :class="item.accent ? 'text-cp-xl text-cp-error-text' : 'text-cp-lg text-cp-text'"
             >

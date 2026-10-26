@@ -48,6 +48,7 @@ pub trait ObservabilityService: Send + Sync {
     async fn server_error_summary(
         &self,
         _range: TimeRange,
+        _provider: Option<String>,
     ) -> Result<crate::model::server_errors::ServerErrorSummary, AdminError> {
         Err(AdminError::unavailable("服务端错误统计暂不可用"))
     }
@@ -210,12 +211,13 @@ impl ObservabilityService for DefaultObservabilityService {
     async fn server_error_summary(
         &self,
         range: TimeRange,
+        provider: Option<String>,
     ) -> Result<crate::model::server_errors::ServerErrorSummary, AdminError> {
         if range.end.signed_duration_since(range.start) > Duration::days(31) {
             return Err(AdminError::invalid("错误统计单次最多查询31天"));
         }
         self.store
-            .server_error_summary(range, self.timezone)
+            .server_error_summary(range, self.timezone, provider)
             .await
             .map_err(|error| map_store_error(error, "server error summary"))
     }

@@ -2,7 +2,9 @@
   "usage": {
     "serverErrors": {
       "title": "Server errors",
-      "description": "Server errors in this window, de-duplicated per request, with overloaded highlighted",
+      "description": "All retained requests for this date range and provider, including successful retries",
+      "viewOverloaded": "View all {count} overloaded requests",
+      "drilldownHint": "Select the overloaded count to view all matching requests and clear local detail filters",
       "loading": "Loading server error summary",
       "loadFailed": "Could not load server error summary",
       "kpis": {
@@ -135,6 +137,7 @@
       "reviewSubagentRequest": "Review subagent request"
     },
     "filters": {
+      "search": "Search",
       "error": "Error",
       "errorType": "Error type",
       "errorTypePlaceholder": "Filter error types",
@@ -356,7 +359,11 @@
       "failureClassification": "Failure classification",
       "duration": "Duration",
       "triggerMode": "Trigger mode",
-      "sendStatus": "Send status",
+      "sendStatus": "Upstream send status",
+      "sent": "Sent",
+      "notSent": "Not sent",
+      "sendUnknown": "Unknown",
+      "attemptMatch": "Matched attempt {index}",
       "errorDetails": "Error details",
       "description": "Failure reason and request context",
       "responseIsNotComplete": "Response is not complete",

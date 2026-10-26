@@ -96,7 +96,7 @@ async fn summary_counts_stream_errors_legacy_codes_and_intermediate_attempts_onc
     )
     .unwrap();
     let summary = admin_observability_store(&db.pool)
-        .server_error_summary(range, DeploymentTimeZone::default())
+        .server_error_summary(range, DeploymentTimeZone::default(), None)
         .await
         .unwrap();
     assert_eq!(summary.totals.retained_requests, 8);
@@ -117,7 +117,7 @@ async fn summary_counts_stream_errors_legacy_codes_and_intermediate_attempts_onc
         admin_observability::TimeRange::new(now + TimeDelta::days(1), now + TimeDelta::days(2))
             .unwrap();
     let summary = admin_observability_store(&db.pool)
-        .server_error_summary(empty, DeploymentTimeZone::default())
+        .server_error_summary(empty, DeploymentTimeZone::default(), None)
         .await
         .unwrap();
     assert_eq!(summary.totals.retained_requests, 0);

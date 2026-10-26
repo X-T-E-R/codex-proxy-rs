@@ -425,6 +425,16 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
                 occurred_at: now,
             }],
         });
+    {
+        let mut stored = fixture.usage_detail.lock().unwrap();
+        let detail = stored.as_mut().unwrap();
+        for state in [Some("ambiguous"), None] {
+            let mut attempt = detail.attempts[0].clone();
+            attempt.id = format!("ops_{state:?}");
+            attempt.upstream_send_state = state.map(str::to_owned);
+            detail.attempts.push(attempt);
+        }
+    }
     let response = observability::router::<AdminTestState>()
         .with_state(fixture.state())
         .oneshot(
@@ -442,6 +452,10 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
         .await
         .expect("usage detail body");
     let value: serde_json::Value = serde_json::from_slice(&body).expect("usage detail JSON");
+    assert_eq!(value["data"]["upstreamSendState"], "sent");
+    assert_eq!(value["data"]["attempts"][0]["sendState"], "sent");
+    assert_eq!(value["data"]["attempts"][1]["sendState"], "ambiguous");
+    assert_eq!(value["data"]["attempts"][2]["sendState"], "unknown");
     assert_eq!(value["data"]["firstTokenLatencyMs"], 20);
     assert_eq!(value["data"]["latencyDetails"]["upstreamResponseMs"], 1_000);
     assert_eq!(
@@ -547,6 +561,7 @@ async fn zero_attempt_failure_detail_omits_trace_and_keeps_missing_upstream_fact
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let data = &value["data"];
     assert_eq!(data["requestId"], "req_early");
+    assert_eq!(data["upstreamSendState"], "not_sent");
     assert_eq!(data["attemptCount"], 0);
     assert_eq!(data["attempts"], json!([]));
     // 明细仍沿用全局 best-effort 合同，不从预备 trace 推断完整尝试列表
@@ -887,6 +902,8 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .push(UsageListRecord {
             error_code: None,
             error_message: None,
+            matched_error: None,
+            upstream_send_state: "sent".to_owned(),
             client_status_code: None,
             outcome: gateway_admin::model::observability::RequestOutcome::Succeeded,
             client_api_key_name: Some("Production".to_owned()),
@@ -975,6 +992,13 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
             });
             records.push(image);
         }
+        records[0].matched_error = Some(gateway_admin::model::observability::UsageErrorMatch {
+            source: "attempt".to_owned(),
+            attempt_index: Some(1),
+            error_code: Some("server_overloaded".to_owned()),
+            error_kind: Some("upstream_error".to_owned()),
+            error_message: Some("retained attempt was overloaded".to_owned()),
+        });
         let mut failed = records[0].clone();
         failed.id = "request_failed".to_owned();
         failed.outcome = gateway_admin::model::observability::RequestOutcome::Failed;
@@ -1002,6 +1026,15 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
 
     assert!(value["data"]["items"][0]["errorCode"].is_null());
     assert!(value["data"]["items"][0]["errorMessage"].is_null());
+    assert_eq!(value["data"]["items"][0]["upstreamSendState"], "sent");
+    assert_eq!(
+        value["data"]["items"][0]["matchedError"]["source"],
+        "attempt"
+    );
+    assert_eq!(
+        value["data"]["items"][0]["matchedError"]["errorCode"],
+        "server_overloaded"
+    );
     assert_eq!(value["data"]["items"][3]["errorCode"], "server_error");
     assert_eq!(
         value["data"]["items"][3]["errorMessage"],
@@ -1585,5 +1618,129 @@ async fn usage_locator_and_legacy_search_reach_store_without_hiding_failed_reque
         .await
         .0,
         StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn usage_detail_preserves_recorded_send_state_with_no_retained_attempts() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use gateway_admin::model::observability::{RequestOutcome, UsageDetail};
+    use tower::ServiceExt as _;
+    for state in ["sent", "not_sent", "ambiguous", "unknown"] {
+        let fixture = AdminTestFixture::new().await;
+        fixture.auth.insert_session("valid-session");
+        let mut record = usage_record_with_account(
+            "req_send_state",
+            "acct",
+            "Synthetic",
+            "synthetic@example.invalid",
+            "oauth",
+            Utc::now(),
+        );
+        record.upstream_send_state = state.to_owned();
+        record.outcome = RequestOutcome::Failed;
+        record.client_status_code = Some(200);
+        record.upstream_status_code = Some(429);
+        record.provider_error_code = Some("turn_rate_limit_exceeded".to_owned());
+        fixture.usage_detail.lock().unwrap().replace(UsageDetail {
+            request: record,
+            attempts: vec![],
+            trace: None,
+            related_requests: vec![],
+        });
+        let response = gateway_api::admin::observability::router::<AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/usage/records/detail?id=req_send_state")
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .header("x-request-id", "req_send_state_detail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["data"]["upstreamSendState"], state);
+        assert_eq!(value["data"]["errorCode"], "turn_rate_limit_exceeded");
+        assert_eq!(value["data"]["logicalOutcome"], "failed");
+        assert_eq!(value["data"]["clientStatusCode"], 200);
+        assert_eq!(value["data"]["upstreamStatusCode"], 429);
+        assert_eq!(value["data"]["attempts"], json!([]));
+        assert_eq!(value["data"]["attemptsComplete"], false);
+    }
+}
+
+#[tokio::test]
+async fn server_error_summary_forwards_provider_and_the_exact_drilldown_window() {
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use gateway_admin::model::{
+        observability::TimeRange,
+        server_errors::{ServerErrorAttempts, ServerErrorCounts, ServerErrorSummary},
+    };
+    use tower::ServiceExt as _;
+    let fixture = crate::admin::AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let start = chrono::DateTime::parse_from_rfc3339("2026-10-26T06:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let end = start + chrono::TimeDelta::hours(1);
+    fixture.observations.lock().unwrap().server_summary = Some(ServerErrorSummary {
+        from_inclusive: start,
+        to_exclusive: end,
+        timezone: "UTC".to_owned(),
+        provider: Some("openai".to_owned()),
+        time_basis: "started_at".to_owned(),
+        source: "retained_records".to_owned(),
+        earliest_retained_at: Some(start),
+        latest_retained_at: Some(end - chrono::TimeDelta::seconds(1)),
+        totals: ServerErrorCounts {
+            retained_requests: 12,
+            overloaded: 12,
+            ..Default::default()
+        },
+        daily: vec![],
+        attempts: ServerErrorAttempts {
+            overloaded: 15,
+            coverage: "observed_only".to_owned(),
+            ..Default::default()
+        },
+    });
+    let uri = "/api/admin/errors/summary?startTime=2026-10-26T06:00:00Z&endTime=2026-10-26T07:00:00Z&provider=%20openai%20";
+    let response = gateway_api::admin::observability::router::<crate::admin::AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::COOKIE, "cpr_session=valid-session")
+                .header("x-request-id", "req_server_error_scope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(value["data"]["provider"], "openai");
+    assert_eq!(value["data"]["totals"]["overloaded"], 12);
+    assert_eq!(value["data"]["attempts"]["overloaded"], 15);
+    assert_eq!(value["data"]["fromInclusive"], "2026-10-26T06:00:00Z");
+    assert_eq!(
+        fixture.observations.lock().unwrap().server_summary_queries,
+        vec![(
+            TimeRange::new(start, end).unwrap(),
+            Some("openai".to_owned())
+        )]
     );
 }
