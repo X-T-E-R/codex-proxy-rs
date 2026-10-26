@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "effect": "4.0.1",
+    "jose": "6.0.11",
     "openai": "7.19.0",
     "partial-json": "0.1.7"
   }

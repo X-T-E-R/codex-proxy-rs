@@ -29,14 +29,14 @@ const address = await new Promise((resolve, reject) => {
 const origin = `http://127.0.0.1:${address.origin}`;
 const scratch = mkdtempSync(path.join(tmpdir(), "cpr-package-smoke-"));
 
-function oauth(input) {
+function oauth(input, expectedStatus = 0) {
   const result = spawnSync(node, [path.join(worker, "oauth-run.mjs")], {
     env,
     input: JSON.stringify({ ...input, upstreamOrigin: origin }),
     encoding: "utf8",
     timeout: 30000,
   });
-  assert.equal(result.status, 0, `${input.harness} ${input.op}: ${result.stdout} ${result.stderr}`);
+  assert.equal(result.status, expectedStatus, `${input.harness} ${input.op}: ${result.stdout} ${result.stderr}`);
   return JSON.parse(result.stdout);
 }
 
@@ -62,8 +62,11 @@ async function oauthSmoke(harness) {
   const exchanged = oauth({ harness, op: "exchange", callbackUrl: callback.href, expectedState: authorized.state, verifier: authorized.verifier, nonce: authorized.nonce, redirectUri: authorized.redirectUri, jwksUrl: `${origin}/.well-known/jwks.json` });
   assert.equal(exchanged.accessToken, expected.accessToken);
   assert.equal(exchanged.clientId, clientId);
-  const refreshed = oauth({ harness, op: "refresh", refreshToken: exchanged.refreshToken, accessToken: exchanged.accessToken, expiresAt: exchanged.expiresAt, clientId, scopes: exchanged.scopes });
+  const refresh = { harness, op: "refresh", refreshToken: exchanged.refreshToken, accessToken: exchanged.accessToken, expiresAt: exchanged.expiresAt, clientId, scopes: exchanged.scopes };
+  const refreshed = oauth(refresh);
   assert.equal(refreshed.accessToken, `${expected.accessToken}-next`);
+  assert.equal(oauth(refresh, 1).error.code, "invalid_grant");
+  assert.equal(oauth({ ...refresh, clientId: "unknown-client" }, 1).error.code, "upstream");
 }
 
 async function responsesSmoke(harness) {

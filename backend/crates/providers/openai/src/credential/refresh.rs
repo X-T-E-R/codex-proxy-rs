@@ -635,6 +635,17 @@ impl CodexCredentialRefreshService {
                         &due.account,
                         CredentialState::Expired,
                         AccountErrorReason::CredentialExpired,
+                        RefreshFailureContext::new("harness_refresh_invalid_token", None, None),
+                        CodexCredentialRefreshOutcome::Invalidated { account_id },
+                    )
+                    .await;
+            }
+            Err(super::harness_oauth::HarnessRunnerError::InvalidGrant) => {
+                return self
+                    .persist_terminal(
+                        &due.account,
+                        CredentialState::Expired,
+                        AccountErrorReason::CredentialExpired,
                         RefreshFailureContext::new("refresh_invalid_grant", None, None),
                         CodexCredentialRefreshOutcome::Invalidated { account_id },
                     )
@@ -642,6 +653,24 @@ impl CodexCredentialRefreshService {
             }
             Err(super::harness_oauth::HarnessRunnerError::Callback)
             | Err(super::harness_oauth::HarnessRunnerError::Upstream) => {
+                if refresh_recovery_window_exhausted(
+                    due.account.access_token_expires_at(),
+                    SystemTime::now(),
+                ) {
+                    return self
+                        .persist_terminal(
+                            &due.account,
+                            CredentialState::Expired,
+                            AccountErrorReason::CredentialExpired,
+                            RefreshFailureContext::new(
+                                "refresh_recovery_window_exhausted",
+                                None,
+                                None,
+                            ),
+                            CodexCredentialRefreshOutcome::Invalidated { account_id },
+                        )
+                        .await;
+                }
                 if self
                     .defer_refresh(&due.account, "harness-refresh", None, None)
                     .await?

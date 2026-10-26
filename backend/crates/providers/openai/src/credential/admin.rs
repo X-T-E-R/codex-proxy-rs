@@ -1842,6 +1842,12 @@ fn map_harness_refresh(
                 message: None,
             }
         }
+        super::harness_oauth::HarnessRunnerError::InvalidGrant => {
+            CodexCredentialAdminError::RefreshRejected {
+                code: Some("invalid_grant".to_owned()),
+                message: None,
+            }
+        }
         super::harness_oauth::HarnessRunnerError::Callback
         | super::harness_oauth::HarnessRunnerError::Upstream => {
             CodexCredentialAdminError::RefreshUnavailable

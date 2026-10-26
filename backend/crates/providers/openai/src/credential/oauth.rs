@@ -1040,7 +1040,6 @@ struct PinnedAuthorization {
     saved_client_id: Option<String>,
 }
 
-
 fn current_oauth_refresh_token(
     current: &LoadedCredential,
 ) -> Result<Option<SecretString>, CodexOAuthAdminError> {
@@ -1241,7 +1240,10 @@ fn map_harness_error(error: super::harness_oauth::HarnessRunnerError) -> CodexOA
         super::harness_oauth::HarnessRunnerError::Callback => {
             CodexOAuthAdminError::CallbackRejected
         }
-        super::harness_oauth::HarnessRunnerError::Token => CodexOAuthAdminError::TokenRejected,
+        super::harness_oauth::HarnessRunnerError::Token
+        | super::harness_oauth::HarnessRunnerError::InvalidGrant => {
+            CodexOAuthAdminError::TokenRejected
+        }
         super::harness_oauth::HarnessRunnerError::Upstream => {
             CodexOAuthAdminError::UpstreamUnavailable
         }

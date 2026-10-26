@@ -109,12 +109,18 @@ function readResponse(socket) {
     });
     socket.on("error", fail);
     socket.on("end", () => tryFinish(true));
+    socket.resume();
   });
 }
 
-function connect(host, port) {
+function connectProxy(proxy) {
+  const port = proxy.port ? Number(proxy.port) : proxy.protocol === "https:" ? 443 : proxy.protocol === "http:" ? 80 : 1080;
   return new Promise((resolve, reject) => {
-    const socket = net.connect({ host, port }, () => resolve(socket));
+    const secure = proxy.protocol === "https:";
+    const socket = secure
+      ? tls.connect({ host: proxy.hostname, port, servername: proxy.hostname, rejectUnauthorized: true })
+      : net.connect({ host: proxy.hostname, port });
+    socket.once(secure ? "secureConnect" : "connect", () => resolve(socket));
     socket.once("error", reject);
   });
 }
@@ -134,7 +140,7 @@ function writeHttp(socket, requestTarget, method, headers, body, hostHeader) {
 }
 
 async function httpProxy(target, init, body, proxy) {
-  const socket = await connect(proxy.hostname, Number(proxy.port));
+  const socket = await connectProxy(proxy);
   const basic = encodeBasic(proxy);
   if (target.protocol === "http:") {
     const headers = new Headers(init.headers);
@@ -200,74 +206,121 @@ function socksConnectRequest(target) {
   ]);
 }
 
-async function readBytes(socket, size) {
-  const chunks = [];
-  let got = 0;
-  while (got < size) {
-    const chunk = await new Promise((resolve, reject) => {
-      const onData = (data) => {
-        socket.off("error", onError);
-        resolve(data);
-      };
-      const onError = (error) => {
-        socket.off("data", onData);
-        reject(error);
-      };
-      socket.once("data", onData);
-      socket.once("error", onError);
-    });
-    chunks.push(chunk);
-    got += chunk.length;
-  }
-  return Buffer.concat(chunks).subarray(0, size);
+function handshakeReader(socket) {
+  let buffered = Buffer.alloc(0);
+  let waiting = null;
+  let failure = null;
+  const take = (size) => {
+    const result = buffered.subarray(0, size);
+    buffered = buffered.subarray(size);
+    return result;
+  };
+  const onData = (chunk) => {
+    buffered = Buffer.concat([buffered, chunk]);
+    if (buffered.length > 4096) {
+      onError(new Error("outbound proxy handshake is too large"));
+      return;
+    }
+    if (waiting && buffered.length >= waiting.size) {
+      const current = waiting;
+      waiting = null;
+      current.resolve(take(current.size));
+    }
+  };
+  const onError = (error) => {
+    failure = error;
+    if (waiting) {
+      const current = waiting;
+      waiting = null;
+      current.reject(error);
+    }
+    socket.destroy();
+  };
+  const onEnd = () => onError(new Error("outbound proxy handshake ended early"));
+  socket.on("data", onData);
+  socket.on("error", onError);
+  socket.on("end", onEnd);
+  return {
+    read(size) {
+      if (failure) return Promise.reject(failure);
+      if (buffered.length >= size) return Promise.resolve(take(size));
+      return new Promise((resolve, reject) => { waiting = { size, resolve, reject }; });
+    },
+    release() {
+      socket.pause();
+      socket.off("data", onData);
+      socket.off("error", onError);
+      socket.off("end", onEnd);
+      if (buffered.length) socket.unshift(buffered);
+    },
+  };
 }
 
 async function socksProxy(target, init, body, proxy) {
-  const socket = await connect(proxy.hostname, Number(proxy.port));
-  socket.write(socksGreeting(proxy));
-  const greeting = await readBytes(socket, 2);
-  if (greeting[0] !== 0x05) throw new Error("outbound proxy is not socks5");
-  if (greeting[1] === 0x02) {
-    socket.write(socksAuth(proxy));
-    const auth = await readBytes(socket, 2);
-    if (auth[1] !== 0x00) throw new Error("outbound proxy rejected the credentials");
-  } else if (greeting[1] !== 0x00) {
-    throw new Error("outbound proxy requires unsupported authentication");
+  const socket = await connectProxy(proxy);
+  const reader = handshakeReader(socket);
+  try {
+    socket.write(socksGreeting(proxy));
+    const greeting = await reader.read(2);
+    if (greeting[0] !== 0x05) throw new Error("outbound proxy is not socks5");
+    if (greeting[1] === 0x02) {
+      socket.write(socksAuth(proxy));
+      const auth = await reader.read(2);
+      if (auth[1] !== 0x00) throw new Error("outbound proxy rejected the credentials");
+    } else if (greeting[1] !== 0x00) {
+      throw new Error("outbound proxy requires unsupported authentication");
+    }
+    socket.write(socksConnectRequest(target));
+    const head = await reader.read(4);
+    if (head[1] !== 0x00) throw new Error("outbound proxy rejected the connection");
+    if (head[3] === 0x01) await reader.read(4 + 2);
+    else if (head[3] === 0x03) {
+      const length = (await reader.read(1))[0];
+      await reader.read(length + 2);
+    } else if (head[3] === 0x04) await reader.read(16 + 2);
+    else throw new Error("outbound proxy returned an unsupported address");
+    reader.release();
+    let stream = socket;
+    if (target.protocol === "https:") {
+      stream = tls.connect({ socket, servername: target.hostname, rejectUnauthorized: true });
+      await new Promise((resolve, reject) => {
+        stream.once("secureConnect", resolve);
+        stream.once("error", reject);
+      });
+    }
+    writeHttp(stream, `${target.pathname}${target.search}`, init.method ?? "GET", init.headers, body, target.host);
+    return readResponse(stream);
+  } catch (error) {
+    socket.destroy();
+    throw error;
   }
-  socket.write(socksConnectRequest(target));
-  const head = await readBytes(socket, 4);
-  if (head[1] !== 0x00) throw new Error("outbound proxy rejected the connection");
-  if (head[3] === 0x01) await readBytes(socket, 4 + 2);
-  else if (head[3] === 0x03) {
-    const length = (await readBytes(socket, 1))[0];
-    await readBytes(socket, length + 2);
-  } else if (head[3] === 0x04) await readBytes(socket, 16 + 2);
-  let stream = socket;
-  if (target.protocol === "https:") {
-    stream = tls.connect({ socket, servername: target.hostname, rejectUnauthorized: true });
-    await new Promise((resolve, reject) => {
-      stream.once("secureConnect", resolve);
-      stream.once("error", reject);
-    });
-  }
-  writeHttp(stream, `${target.pathname}${target.search}`, init.method ?? "GET", init.headers, body, target.host);
-  return readResponse(stream);
 }
 
 export function installFetch(options) {
   const proxyUrl = options.proxyUrl || "";
   const upstreamOrigin = options.upstreamOrigin || "";
+  let invalidGrant = false;
   globalThis.fetch = async (url, init = {}) => {
-    const target = rewriteUpstream(String(url), upstreamOrigin);
-    if (!proxyUrl) return nativeFetch(target, init);
-    const proxy = new URL(proxyUrl);
-    const body = bodyText(init.body);
-    if (proxy.protocol === "socks5:" || proxy.protocol === "socks5h:") {
-      return socksProxy(new URL(target), init, body, proxy);
+    const original = new URL(String(url));
+    const target = rewriteUpstream(original.toString(), upstreamOrigin);
+    let response;
+    if (!proxyUrl) response = await nativeFetch(target, init);
+    else {
+      const proxy = new URL(proxyUrl);
+      const body = bodyText(init.body);
+      if (proxy.protocol === "socks5:" || proxy.protocol === "socks5h:") {
+        response = await socksProxy(new URL(target), init, body, proxy);
+      } else if (proxy.protocol === "http:" || proxy.protocol === "https:") {
+        response = await httpProxy(new URL(target), init, body, proxy);
+      } else throw new Error("unsupported outbound proxy");
     }
-    if (proxy.protocol === "http:" || proxy.protocol === "https:") {
-      return httpProxy(new URL(target), init, body, proxy);
+    if (original.hostname === "auth.openai.com"
+      && original.pathname === "/api/accounts/oauth/token"
+      && response.status === 400) {
+      const failure = await response.clone().json().catch(() => null);
+      invalidGrant = failure?.error === "invalid_grant";
     }
-    throw new Error("unsupported outbound proxy");
+    return response;
   };
+  return { invalidGrant: () => invalidGrant };
 }

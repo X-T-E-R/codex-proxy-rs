@@ -22,7 +22,8 @@ pub(crate) const PI_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
 pub(crate) const DIRECT_TOKEN_SCOPE: &str = "chatgpt.tokens.use.direct";
 pub(crate) const REGISTRATION_CLIENT_ID: &str = "dynamic_agent_client";
 const AUTHORIZE_PREFIX: &str = "https://auth.openai.com/api/accounts/authorize?";
-const RUNNER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/harness-worker/oauth-run.mjs");
+const DEVELOPMENT_RUNNER: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/harness-worker/oauth-run.mjs");
 const RUNNER_TIMEOUT: Duration = Duration::from_secs(25);
 const MAX_RUNNER_BYTES: usize = 64 * 1024;
 
@@ -79,6 +80,7 @@ pub(crate) fn is_harness_kind(kind: &str) -> bool {
 pub(crate) enum HarnessRunnerError {
     Callback,
     Token,
+    InvalidGrant,
     Upstream,
 }
 
@@ -367,11 +369,22 @@ fn parse_tokens(value: &Value) -> Result<HarnessTokens, HarnessRunnerError> {
     })
 }
 
+fn runner_path() -> Result<PathBuf, HarnessRunnerError> {
+    let path = match env_path("CPR_OPENAI_HARNESS_WORKER_DIR") {
+        Some(directory) => directory.join("oauth-run.mjs"),
+        None if cfg!(debug_assertions) => PathBuf::from(DEVELOPMENT_RUNNER),
+        None => return Err(HarnessRunnerError::Upstream),
+    };
+    path.is_file()
+        .then_some(path)
+        .ok_or(HarnessRunnerError::Upstream)
+}
+
 async fn invoke(request: &Value) -> Result<Value, HarnessRunnerError> {
     let body = serde_json::to_vec(request).map_err(|_| HarnessRunnerError::Upstream)?;
     let mut child = Command::new("node")
         .arg("--experimental-strip-types")
-        .arg(RUNNER)
+        .arg(runner_path()?)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -417,6 +430,7 @@ async fn invoke(request: &Value) -> Result<Value, HarnessRunnerError> {
         return Err(match error.get("code").and_then(Value::as_str) {
             Some("callback") => HarnessRunnerError::Callback,
             Some("token") => HarnessRunnerError::Token,
+            Some("invalid_grant") => HarnessRunnerError::InvalidGrant,
             _ => HarnessRunnerError::Upstream,
         });
     }

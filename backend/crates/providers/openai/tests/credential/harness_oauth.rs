@@ -18,15 +18,16 @@ use gateway_core::provider_ports::{
 use gateway_core::routing::ProviderKind;
 use provider_openai::credential::token_client::{
     AuthorizationCodeExchangeError, AuthorizationCodeExchanger, AuthorizationCodeGrant,
-    AuthorizationTokenSet, OFFICIAL_CODEX_OAUTH_CLIENT_ID, RefreshFailure, TokenPair, TokenRefresher,
+    AuthorizationTokenSet, OFFICIAL_CODEX_OAUTH_CLIENT_ID, RefreshFailure, TokenPair,
+    TokenRefresher,
 };
 use provider_openai::credential::{
     CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING, CODEX_AUTHENTICATION_KIND_PI_OPENAI,
-    CodexCredentialAdmin, CodexCredentialAdminService,
-    CodexCredentialCodec, CodexOAuthAdmin, CodexOAuthAdminError,
-    CodexOAuthAdminService, CodexOAuthPendingClaimOutcome, CodexOAuthPendingStore,
-    CodexOAuthPendingStoreError, CompleteCodexOAuthAuthorization, CompletedCodexOAuthCredential,
-    ImportCodexOAuthCredential, StartCodexOAuthAuthorization, StoredCodexPendingAuthorization,
+    CodexCredentialAdmin, CodexCredentialAdminError, CodexCredentialAdminService,
+    CodexCredentialCodec, CodexOAuthAdmin, CodexOAuthAdminError, CodexOAuthAdminService,
+    CodexOAuthPendingClaimOutcome, CodexOAuthPendingStore, CodexOAuthPendingStoreError,
+    CompleteCodexOAuthAuthorization, CompletedCodexOAuthCredential, ImportCodexOAuthCredential,
+    StartCodexOAuthAuthorization, StoredCodexPendingAuthorization,
 };
 use provider_openai::transport::profile::CodexWireProfileState;
 use secrecy::SecretString;
@@ -200,7 +201,15 @@ impl MockUpstream {
         }
     }
 
-    async fn expect(&self, client_id: &str, code: &str, redirect: &str, nonce: &str, refresh: &str, access: &str) {
+    async fn expect(
+        &self,
+        client_id: &str,
+        code: &str,
+        redirect: &str,
+        nonce: &str,
+        refresh: &str,
+        access: &str,
+    ) {
         reqwest::Client::new()
             .post(format!("{}/expect", self.origin))
             .json(&json!({
@@ -259,9 +268,9 @@ fn create_mutation(method: Option<&str>, proxy: Option<&str>) -> PendingAuthoriz
         None => mutation,
     };
     match proxy {
-        Some(proxy) => mutation.with_outbound_proxy(Some(
-            OutboundProxy::parse(proxy).expect("proxy"),
-        )),
+        Some(proxy) => {
+            mutation.with_outbound_proxy(Some(OutboundProxy::parse(proxy).expect("proxy")))
+        }
         None => mutation,
     }
 }
@@ -342,7 +351,12 @@ async fn harness_accounts_authorize_refresh_and_reauthorize_without_crossing_cod
         })
         .await;
     let pending = Arc::new(PendingStore::default());
-    let oauth = service(Arc::clone(&store), Arc::clone(&pending), &host_file, &mock.origin);
+    let oauth = service(
+        Arc::clone(&store),
+        Arc::clone(&pending),
+        &host_file,
+        &mock.origin,
+    );
 
     let codex_started = oauth
         .start_authorization(StartCodexOAuthAuthorization {
@@ -350,8 +364,16 @@ async fn harness_accounts_authorize_refresh_and_reauthorize_without_crossing_cod
         })
         .await
         .expect("codex start");
-    assert!(codex_started.authorization_url.contains("chatgpt.com/codex/desktop-auth"));
-    assert!(codex_started.authorization_url.contains(OFFICIAL_CODEX_OAUTH_CLIENT_ID));
+    assert!(
+        codex_started
+            .authorization_url
+            .contains("chatgpt.com/codex/desktop-auth")
+    );
+    assert!(
+        codex_started
+            .authorization_url
+            .contains(OFFICIAL_CODEX_OAUTH_CLIENT_ID)
+    );
     // 丢弃这条 Codex pending，后面的 harness create 需要空的测试存储
     pending.pending.lock().expect("pending lock").take();
 
@@ -390,7 +412,10 @@ async fn harness_accounts_authorize_refresh_and_reauthorize_without_crossing_cod
         "http://127.0.0.1:1455/auth/callback"
     );
     assert_eq!(query_value(&first_url, "client_id"), "dynamic_agent_client");
-    assert_eq!(query_value(&second_url, "client_id"), "dynamic_agent_client");
+    assert_eq!(
+        query_value(&second_url, "client_id"),
+        "dynamic_agent_client"
+    );
 
     let opencode_client = "client-opencode-a";
     let pi_client = "client-pi-a";
@@ -487,10 +512,14 @@ async fn harness_accounts_authorize_refresh_and_reauthorize_without_crossing_cod
         .filter(|call| call["grant"] == "refresh_token")
         .collect();
     assert!(refreshes.iter().any(|call| {
-        call["clientId"] == opencode_client && call["refreshToken"] == "refresh-opencode" && call["proxy"] == "1"
+        call["clientId"] == opencode_client
+            && call["refreshToken"] == "refresh-opencode"
+            && call["proxy"] == "1"
     }));
     assert!(refreshes.iter().any(|call| {
-        call["clientId"] == pi_client && call["refreshToken"] == "refresh-pi" && call["proxy"] == "1"
+        call["clientId"] == pi_client
+            && call["refreshToken"] == "refresh-pi"
+            && call["proxy"] == "1"
     }));
     assert!(recorded.iter().all(|call| {
         !call["body"]
@@ -506,17 +535,54 @@ async fn harness_accounts_authorize_refresh_and_reauthorize_without_crossing_cod
     assert_eq!(opencode_after.installation_id, opencode.installation_id);
     assert_eq!(pi_after.installation_id, pi.installation_id);
 
+    for (id, client_id, authorization, code) in [
+        (&opencode_id, opencode_client, &first_url, "code-opencode"),
+        (&pi_id, pi_client, &second_url, "code-pi"),
+    ] {
+        mock.expect(
+            client_id,
+            code,
+            &query_value(authorization, "redirect_uri"),
+            &query_value(authorization, "nonce"),
+            "another-refresh-token",
+            "another-access-token",
+        )
+        .await;
+        let account_id = ProviderAccountId::new(id.clone()).expect("id");
+        let current = store
+            .load_current_credential(&account_id)
+            .await
+            .expect("current credential");
+        let rejected = admin.manual_refresh(current).await;
+        assert!(matches!(
+            rejected,
+            Err(CodexCredentialAdminError::RefreshRejected { code: Some(ref code), .. })
+                if code == "invalid_grant"
+        ));
+    }
+
     let reauth_pending = Arc::new(PendingStore::default());
-    let reauth = service(Arc::clone(&store), Arc::clone(&reauth_pending), &host_file, &mock.origin);
+    let reauth = service(
+        Arc::clone(&store),
+        Arc::clone(&reauth_pending),
+        &host_file,
+        &mock.origin,
+    );
     let started = reauth
         .start_authorization(StartCodexOAuthAuthorization {
-            mutation: reauthorize_mutation(ProviderAccountId::new(opencode_id.clone()).expect("id")),
+            mutation: reauthorize_mutation(
+                ProviderAccountId::new(opencode_id.clone()).expect("id"),
+            ),
         })
         .await
         .expect("opencode reauth start");
     let reauth_url = Url::parse(&started.authorization_url).expect("reauth url");
     assert_eq!(query_value(&reauth_url, "client_id"), opencode_client);
-    assert!(reauth_url.query_pairs().all(|(key, _)| key != "agent_name_hint"));
+    assert!(
+        reauth_url
+            .query_pairs()
+            .all(|(key, _)| key != "agent_name_hint")
+    );
     assert!(
         reauth_pending
             .pending
@@ -543,7 +609,10 @@ async fn harness_accounts_authorize_refresh_and_reauthorize_without_crossing_cod
         mismatched,
         Err(CodexOAuthAdminError::TokenRejected) | Err(CodexOAuthAdminError::CallbackRejected)
     ));
-    assert_eq!(load_saved(&store, &opencode_id).await.access_token, opencode_after.access_token);
+    assert_eq!(
+        load_saved(&store, &opencode_id).await.access_token,
+        opencode_after.access_token
+    );
 
     let _ = std::fs::remove_file(host_file);
 }
@@ -558,13 +627,20 @@ impl MethodText for gateway_admin::model::provider_credentials::AuthorizationMet
     }
 }
 
-async fn refresh_account(admin: &CodexCredentialAdminService, store: &Arc<MemoryAccountStore>, id: &str) {
+async fn refresh_account(
+    admin: &CodexCredentialAdminService,
+    store: &Arc<MemoryAccountStore>,
+    id: &str,
+) {
     let account_id = ProviderAccountId::new(id.to_owned()).expect("id");
     let current = store
         .load_current_credential(&account_id)
         .await
         .expect("current credential");
-    let prepared = admin.manual_refresh(current).await.expect("refresh harness account");
+    let prepared = admin
+        .manual_refresh(current)
+        .await
+        .expect("refresh harness account");
     let (_, update, _, guard) = prepared.into_parts();
     store
         .compare_and_swap_credential(update)

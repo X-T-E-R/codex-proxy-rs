@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -21,7 +21,9 @@ function sha256(bytes) {
 function sourceRoot(name) {
   const env = process.env[`CPR_${name.toUpperCase()}_SOURCE`];
   if (env) return env;
-  return path.resolve("C:/Programs/AI/MLAIGateWay/sources", name, "checkout");
+  const bundled = path.resolve(workerDir, "..", "sources", name);
+  if (existsSync(bundled)) return bundled;
+  return path.resolve(workerDir, "../../../../../../../../sources", name, "checkout");
 }
 
 function assertHash(file, expected) {
@@ -34,7 +36,9 @@ function assertHash(file, expected) {
 }
 
 function tempDir() {
-  return mkdtempSync(path.join(tmpdir(), "cpr-oauth-"));
+  const directory = mkdtempSync(path.join(tmpdir(), "cpr-oauth-"));
+  process.once("exit", () => rmSync(directory, { recursive: true, force: true }));
+  return directory;
 }
 
 const OPENCODE_HEADER = `
