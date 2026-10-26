@@ -1,5 +1,7 @@
 //! OpenCode 与 pi Responses 的 Provider 进程桥
 //!
+//! 调用方传入已经决定的有效 `service_tier` 和原请求会话身份
+//! 模型目录是否支持 priority，以及 Fast `enabled` / `disabled` 如何改写，都不在这里
 //! 账号选择、凭据事务、管理端和发行镜像都还没有调用这里
 //! Codex OAuth 仍走 `encode_generate_request`，不能靠换 User-Agent 进入这条路径
 
@@ -61,11 +63,28 @@ pub enum ResponsesHarness {
     Pi,
 }
 
+/// 下游原请求的会话身份
+///
+/// OpenCode 写成 `session-id`、`thread-id`、`x-client-request-id`
+/// 缺省字段沿用 `ResponsesCall::session_id`，不另造 UUID
+/// pi 只消费 `session_id`：源码同时写 `session_id`、`x-client-request-id` 和 `prompt_cache_key`
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResponsesRequestIdentity {
+    pub session_affinity_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub client_request_id: Option<String>,
+}
+
 pub struct ResponsesCall {
     pub harness: ResponsesHarness,
     pub model: String,
     pub base_url: String,
     pub session_id: String,
+    /// 选账号后已经决定的有效档位
+    /// 空白与缺省都不传给源库，源库因此不会补写 `service_tier`
+    /// 非空值进入 OpenCode `providerOptions.serviceTier` 与 pi `options.serviceTier`
+    pub service_tier: Option<String>,
+    pub identity: ResponsesRequestIdentity,
     pub bearer: SecretString,
     pub prompt: String,
     pub instructions: Option<String>,

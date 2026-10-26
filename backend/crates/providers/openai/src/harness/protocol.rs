@@ -89,6 +89,14 @@ pub(crate) struct CallPayload<'a> {
     pub(crate) max_output_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) temperature: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) service_tier: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_affinity_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) thread_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) client_request_id: Option<&'a str>,
 }
 
 pub(crate) struct BodyWindow {

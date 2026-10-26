@@ -185,6 +185,10 @@ impl HarnessSession {
         self.remote_refusal.store(0, Ordering::SeqCst);
         let window = Arc::new(BodyWindow::new(call.body_window));
         let temperature = call.temperature.and_then(json_temperature);
+        let service_tier = trimmed(call.service_tier.as_deref());
+        let session_affinity_id = trimmed(call.identity.session_affinity_id.as_deref());
+        let thread_id = trimmed(call.identity.thread_id.as_deref());
+        let client_request_id = trimmed(call.identity.client_request_id.as_deref());
         let payload = protocol::CallPayload {
             harness: match call.harness {
                 ResponsesHarness::OpenCode => "opencode",
@@ -198,6 +202,10 @@ impl HarnessSession {
             instructions: call.instructions.as_deref(),
             max_output_tokens: call.max_output_tokens,
             temperature,
+            service_tier: service_tier.as_deref(),
+            session_affinity_id: session_affinity_id.as_deref(),
+            thread_id: thread_id.as_deref(),
+            client_request_id: client_request_id.as_deref(),
         };
         protocol::write_json(&self.stdin, protocol::CALL, 1, &payload).await?;
         let mut request = None;
@@ -557,6 +565,13 @@ impl Drop for InFlightGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
+}
+
+fn trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
 }
 
 fn json_temperature(value: f64) -> Option<serde_json::Value> {

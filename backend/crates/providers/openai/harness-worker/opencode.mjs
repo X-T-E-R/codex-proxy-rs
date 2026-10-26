@@ -4,6 +4,10 @@ import { Effect, Fiber, Layer, Stream } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { managedFetch } from "./managed-fetch.mjs";
 
+function text(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
 function source(root, relative) {
   return pathToFileURL(resolve(root, relative)).href;
 }
@@ -51,12 +55,23 @@ export async function runOpenCode(input, emit, signal) {
   const generation = {};
   if (input.max_output_tokens != null) generation.maxTokens = input.max_output_tokens;
   if (input.temperature != null) generation.temperature = input.temperature;
+  const sessionId = text(input.session_id);
+  const serviceTier = text(input.service_tier);
+  // 档位只经 providerOptions 交给协议；身份头缺省沿用 session_id，不另造 UUID
   const request = llm.request({
     id: "req_bridge",
     model,
     ...(input.instructions ? { system: input.instructions } : {}),
     prompt: input.prompt,
     ...(Object.keys(generation).length > 0 ? { generation } : {}),
+    ...(serviceTier ? { providerOptions: { serviceTier } } : {}),
+    http: {
+      headers: {
+        "session-id": text(input.session_affinity_id) ?? sessionId,
+        "thread-id": text(input.thread_id) ?? sessionId,
+        "x-client-request-id": text(input.client_request_id) ?? sessionId,
+      },
+    },
   });
   const httpLayer = Layer.succeed(
     HttpClient.HttpClient,

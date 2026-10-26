@@ -504,6 +504,8 @@ OpenAI Provider 拥有 OpenCode 与 pi 的 Responses worker。Provider 启动 No
 
 OpenCode route 的默认 transport 是 WebSocket。这条路径改用同一协议导出的 HTTP/SSE transport，请求不携带 `openai-beta`。pi 在 `baseUrl` 恰好为 `https://api.openai.com/v1` 且凭据不以 `sk-` 开头时，按上游规则省略 `max_output_tokens`、`temperature` 和 `prompt_cache_retention`。现有 Codex OAuth 仍经过 `encode_generate_request`，不会仅因 User-Agent 进入这条路径。
 
+调用方提供已经决定的有效 `service_tier` 和原请求会话身份。OpenCode 把档位写入正文，并把身份投影为 `session-id`、`thread-id`、`x-client-request-id`；缺省身份沿用该次调用的 `session_id`。pi 把同一档位写入正文，会话头和 `prompt_cache_key` 只跟随 `session_id`。这条桥不调用 `normalize_codex_request_body`，也不根据模型目录改写档位。账号上的 Fast 冻结仍留在请求路径。
+
 账号选择、凭据事务、管理端和发行镜像都还没有调用该 worker。运行需要 Node.js 22.19.0 或更高版本，以及 worker 目录里按锁文件安装的 `effect`、`openai`、`partial-json`。`runtime` 与 `runtime-prebuilt` 镜像不包含 Node.js 和该 worker。
 
 ### 后台账号导入

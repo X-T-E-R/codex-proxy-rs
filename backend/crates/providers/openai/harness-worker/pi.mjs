@@ -2,6 +2,10 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { managedFetch } from "./managed-fetch.mjs";
 
+function text(value) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
 function source(root, relative) {
   return pathToFileURL(resolve(root, relative)).href;
 }
@@ -24,9 +28,12 @@ export async function runPi(input, emit, signal) {
   const messages = [];
   if (input.instructions) messages.push({ role: "system", content: input.instructions, timestamp: 1 });
   messages.push({ role: "user", content: input.prompt, timestamp: 2 });
+  const serviceTier = text(input.service_tier);
+  // 源码在 ChatGPT 省略字段之后仍写入 serviceTier；无档位时不传，避免空字符串进正文
   const stream = responses.stream(model, { messages }, {
     apiKey: input.bearer,
     sessionId: input.session_id,
+    ...(serviceTier !== undefined ? { serviceTier } : {}),
     ...(input.max_output_tokens != null ? { maxTokens: input.max_output_tokens } : {}),
     ...(input.temperature != null ? { temperature: input.temperature } : {}),
     fetch: managedFetch,

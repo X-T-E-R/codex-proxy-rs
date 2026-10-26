@@ -1,4 +1,5 @@
 //! 固定上游源码的离线请求、SSE 解析、取消和进程回收
+//! 有效 `service_tier` 与原请求会话身份也在这里对照两边真实请求
 
 use std::{
     net::SocketAddr,
@@ -11,7 +12,7 @@ use std::{
 use gateway_core::{account::OutboundProxy, lifecycle::CancellationToken};
 use provider_openai::{
     HarnessError, HarnessEvent, HarnessSession, HarnessWorkerConfig, OPENCODE_SOURCE_COMMIT,
-    PI_SOURCE_COMMIT, ParsedResponses, ResponsesCall, ResponsesHarness,
+    PI_SOURCE_COMMIT, ParsedResponses, ResponsesCall, ResponsesHarness, ResponsesRequestIdentity,
 };
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -67,6 +68,18 @@ async fn pinned_sources_complete_opencode_and_pi_responses() {
         Some("resp_bridge")
     );
     assert!(header(&opencode_result.request.headers, "openai-beta").is_none());
+    assert_eq!(
+        header(&opencode_result.request.headers, "session-id"),
+        Some(SESSION)
+    );
+    assert_eq!(
+        header(&opencode_result.request.headers, "thread-id"),
+        Some(SESSION)
+    );
+    assert_eq!(
+        header(&opencode_result.request.headers, "x-client-request-id"),
+        Some(SESSION)
+    );
     assert_clean(&session, TOKEN);
 
     let pi_result = call(&session, ResponsesHarness::Pi, TOKEN_PI).await;
@@ -282,6 +295,7 @@ fn assert_contract(parsed: &ParsedResponses, pi: bool) {
     assert_eq!(body["model"].as_str(), Some(MODEL));
     assert_eq!(body["store"].as_bool(), Some(false));
     assert_eq!(body["stream"].as_bool(), Some(true));
+    assert!(body.get("service_tier").is_none());
     let rendered = String::from_utf8_lossy(&request.body);
     assert!(rendered.contains(PROMPT), "{rendered}");
     if !pi {
@@ -348,8 +362,127 @@ fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
         instructions: Some(INSTRUCTIONS.to_owned()),
         max_output_tokens: Some(20),
         temperature: Some(0.0),
+        service_tier: None,
+        identity: ResponsesRequestIdentity::default(),
         body_window: 4096,
         timeout: Duration::from_secs(90),
+    }
+}
+
+#[tokio::test]
+async fn service_tier_and_request_identity_follow_both_sources() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let identity = ResponsesRequestIdentity {
+        session_affinity_id: Some("ses_parent_affinity".to_owned()),
+        thread_id: Some("thr_original_thread".to_owned()),
+        client_request_id: Some("req_original_client".to_owned()),
+    };
+    for tier in ["priority", "flex"] {
+        let opencode_result = call_with(
+            &session,
+            ResponsesHarness::OpenCode,
+            TOKEN,
+            Some(tier),
+            identity.clone(),
+        )
+        .await;
+        let opencode_body = json_body(&opencode_result.request.body);
+        assert_eq!(opencode_body["service_tier"].as_str(), Some(tier));
+        assert_eq!(opencode_body["max_output_tokens"].as_u64(), Some(20));
+        assert_eq!(opencode_body["temperature"].as_f64(), Some(0.0));
+        assert_eq!(
+            header(&opencode_result.request.headers, "session-id"),
+            Some("ses_parent_affinity")
+        );
+        assert_eq!(
+            header(&opencode_result.request.headers, "thread-id"),
+            Some("thr_original_thread")
+        );
+        assert_eq!(
+            header(&opencode_result.request.headers, "x-client-request-id"),
+            Some("req_original_client")
+        );
+        assert!(header(&opencode_result.request.headers, "openai-beta").is_none());
+        assert_clean(&session, TOKEN);
+
+        let pi_result = call_with(
+            &session,
+            ResponsesHarness::Pi,
+            TOKEN_PI,
+            Some(tier),
+            identity.clone(),
+        )
+        .await;
+        let pi_body = json_body(&pi_result.request.body);
+        assert_eq!(pi_body["service_tier"].as_str(), Some(tier));
+        assert!(pi_body.get("max_output_tokens").is_none());
+        assert!(pi_body.get("temperature").is_none());
+        assert!(pi_body.get("prompt_cache_retention").is_none());
+        assert_eq!(pi_body["prompt_cache_key"].as_str(), Some(SESSION));
+        assert_eq!(
+            header(&pi_result.request.headers, "session_id"),
+            Some(SESSION)
+        );
+        assert_eq!(
+            header(&pi_result.request.headers, "x-client-request-id"),
+            Some(SESSION)
+        );
+        assert!(header(&pi_result.request.headers, "thread-id").is_none());
+        assert!(header(&pi_result.request.headers, "session-id").is_none());
+        let user_agent = header(&pi_result.request.headers, "user-agent").unwrap_or("");
+        assert!(user_agent.starts_with("pi/1.4.0 ("), "{user_agent}");
+        assert_clean(&session, TOKEN_PI);
+    }
+
+    let blank = call_with(
+        &session,
+        ResponsesHarness::OpenCode,
+        TOKEN,
+        Some("  "),
+        ResponsesRequestIdentity::default(),
+    )
+    .await;
+    assert!(json_body(&blank.request.body).get("service_tier").is_none());
+    assert_eq!(header(&blank.request.headers, "session-id"), Some(SESSION));
+    let blank_pi = call_with(
+        &session,
+        ResponsesHarness::Pi,
+        TOKEN_PI,
+        Some("  "),
+        identity,
+    )
+    .await;
+    assert!(
+        json_body(&blank_pi.request.body)
+            .get("service_tier")
+            .is_none()
+    );
+    assert_eq!(
+        json_body(&blank_pi.request.body)["prompt_cache_key"].as_str(),
+        Some(SESSION)
+    );
+    assert_eq!(
+        header(&blank_pi.request.headers, "x-client-request-id"),
+        Some(SESSION)
+    );
+    session.shutdown().await.expect("shutdown");
+}
+
+async fn call_with(
+    session: &HarnessSession,
+    harness: ResponsesHarness,
+    token: &str,
+    service_tier: Option<&str>,
+    identity: ResponsesRequestIdentity,
+) -> ParsedResponses {
+    let mut call = sample_call(harness, token);
+    call.service_tier = service_tier.map(str::to_owned);
+    call.identity = identity;
+    match session.responses(call, &CancellationToken::new()).await {
+        Ok(parsed) => parsed,
+        Err(error) => panic!("{error}; stderr={}", session.stderr_snapshot()),
     }
 }
 
