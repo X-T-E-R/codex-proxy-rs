@@ -18,6 +18,17 @@ pub(crate) struct ReleaseFiles {
     binary: String,
     web: String,
     official_plugins: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime: Option<RuntimeFiles>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeFiles {
+    node: String,
+    node_license: String,
+    harness: String,
+    manifest: String,
 }
 
 impl ReleaseFiles {
@@ -26,6 +37,7 @@ impl ReleaseFiles {
             &config.executable_path()?,
             config.web_dist_dir()?,
             &config.official_plugins_dir()?,
+            false,
         )
     }
 
@@ -34,19 +46,78 @@ impl ReleaseFiles {
             &backup_path_for(&config.executable_path()?),
             &backup_path_for(config.web_dist_dir()?),
             &backup_path_for(&config.official_plugins_dir()?),
+            true,
         )
     }
 
-    fn read(binary: &Path, web: &Path, plugins: &Path) -> Result<Self, OperationError> {
+    fn read(
+        binary: &Path,
+        web: &Path,
+        plugins: &Path,
+        backed_up: bool,
+    ) -> Result<Self, OperationError> {
         if !web.join("index.html").is_file() || !plugins.join(OFFICIAL_PLUGIN_MANIFEST).is_file() {
             return Err(conflict("安装文件不完整，请核对部署后重试"));
         }
         let mut binary_hash = Sha256::new();
         hash_file(binary, &mut binary_hash).map_err(read_error)?;
+        let parent = binary.parent().ok_or_else(|| conflict("安装路径不完整"))?;
+        let runtime_paths = [
+            "node",
+            "node-LICENSE",
+            "openai-harness",
+            "runtime-manifest.json",
+        ]
+        .map(|name| {
+            let path = parent.join(name);
+            if backed_up {
+                backup_path_for(&path)
+            } else {
+                path
+            }
+        });
+        let present = runtime_paths
+            .each_ref()
+            .map(|path| match fs::symlink_metadata(path) {
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(read_error(error)),
+            });
+        let present = present.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let runtime = if present.iter().all(|present| !present) {
+            None
+        } else if present.iter().all(|present| *present) {
+            let [node, license, harness, manifest] = runtime_paths;
+            if !harness.join("bundle-manifest.json").is_file() {
+                return Err(conflict("安装的 harness 缺少清单"));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if fs::symlink_metadata(&node)
+                    .map_err(read_error)?
+                    .permissions()
+                    .mode()
+                    & 0o111
+                    == 0
+                {
+                    return Err(conflict("安装的 Node 不可执行"));
+                }
+            }
+            Some(RuntimeFiles {
+                node: fingerprint_file(&node).map_err(read_error)?,
+                node_license: fingerprint_file(&license).map_err(read_error)?,
+                harness: hash_directory(&harness).map_err(read_error)?,
+                manifest: fingerprint_file(&manifest).map_err(read_error)?,
+            })
+        } else {
+            return Err(conflict("安装的 Node 与 harness 文件不完整"));
+        };
         Ok(Self {
             binary: hex::encode(binary_hash.finalize()),
             web: hash_directory(web).map_err(read_error)?,
             official_plugins: hash_directory(plugins).map_err(read_error)?,
+            runtime,
         })
     }
 }
@@ -56,7 +127,20 @@ fn read_error(error: io::Error) -> OperationError {
     internal("无法核对安装文件，请检查文件完整性与读取权限")
 }
 
+fn fingerprint_file(path: &Path) -> io::Result<String> {
+    let mut hash = Sha256::new();
+    hash_file(path, &mut hash)?;
+    Ok(hex::encode(hash.finalize()))
+}
+
 fn hash_directory(path: &Path) -> io::Result<String> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "发行目录必须为普通目录",
+        ));
+    }
     let mut hash = Sha256::new();
     hash_tree(path, &mut hash)?;
     Ok(hex::encode(hash.finalize()))

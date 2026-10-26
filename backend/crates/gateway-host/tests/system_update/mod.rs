@@ -6,6 +6,7 @@ mod events;
 mod installation;
 mod operations;
 mod release;
+mod runtime;
 mod state;
 mod swap_paths;
 
@@ -371,6 +372,14 @@ enum ArchiveKind {
     MissingOfficialManifest,
     NestedOfficialAsset,
     OfficialSymlink,
+    Runtime,
+    RuntimeMissingLicense,
+    RuntimeBadDigest,
+    RuntimeSymlink,
+    RuntimeDuplicate,
+    RuntimeTraversal,
+    RuntimeExtra,
+    RuntimeCaseDuplicate,
 }
 
 #[derive(Clone, Copy)]
@@ -383,7 +392,27 @@ enum ChecksumKind {
 fn release_archive(kind: ArchiveKind) -> Vec<u8> {
     let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut tar = Builder::new(encoder);
-    append_file(&mut tar, "codex-proxy-rs", b"new-binary", false);
+    let with_runtime = matches!(
+        kind,
+        ArchiveKind::Runtime
+            | ArchiveKind::RuntimeMissingLicense
+            | ArchiveKind::RuntimeBadDigest
+            | ArchiveKind::RuntimeSymlink
+            | ArchiveKind::RuntimeDuplicate
+            | ArchiveKind::RuntimeTraversal
+            | ArchiveKind::RuntimeExtra
+            | ArchiveKind::RuntimeCaseDuplicate
+    );
+    append_file(
+        &mut tar,
+        if with_runtime {
+            "codex-proxy-rs/codex-proxy-rs"
+        } else {
+            "codex-proxy-rs"
+        },
+        b"new-binary",
+        false,
+    );
     append_file(&mut tar, "web/dist/index.html", b"new-web", false);
     if !matches!(kind, ArchiveKind::MissingOfficialManifest) {
         append_file(
@@ -417,8 +446,82 @@ fn release_archive(kind: ArchiveKind) -> Vec<u8> {
             "../outside.tar.gz",
         );
     }
+    if with_runtime {
+        append_runtime(&mut tar, kind);
+    }
     let encoder = tar.into_inner().expect("tar");
     encoder.finish().expect("gzip")
+}
+
+fn append_runtime(tar: &mut Builder<GzEncoder<Vec<u8>>>, kind: ArchiveKind) {
+    let files: &[(&str, &[u8])] = &[
+        ("worker/package.json", b"{}"),
+        ("worker/package-lock.json", b"{}"),
+        ("worker/NOTICE.md", b"notice"),
+        ("worker/source-manifest.json", b"{}"),
+        ("worker/runner.mjs", b"export default 'worker-v2'"),
+        (
+            "worker/node_modules/example/dist/index.html",
+            b"private-dependency",
+        ),
+        ("sources/opencode/index.js", b"opencode-v2"),
+        ("sources/pi/index.js", b"pi-v2"),
+    ];
+    let entries: Vec<_> = files.iter().map(|(name, data)| {
+        let manifest_path = if matches!(kind, ArchiveKind::RuntimeTraversal) && *name == "worker/runner.mjs" {
+            "worker/../runner.mjs"
+        } else { name };
+        serde_json::json!({ "path": manifest_path, "sha256": hex::encode(Sha256::digest(data)) })
+    }).collect();
+    let bundle = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1, "opencode_commit": "test-opencode", "pi_commit": "test-pi",
+        "node_version": "26.12.0", "files": entries,
+    }))
+    .expect("bundle manifest");
+    let runtime = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 1, "node_version": "26.12.0",
+        "node_sha256": if matches!(kind, ArchiveKind::RuntimeBadDigest) { "0".repeat(64) } else { hex::encode(Sha256::digest(b"node-v2")) },
+        "node_license_sha256": hex::encode(Sha256::digest(b"node-license")),
+        "harness_manifest_sha256": hex::encode(Sha256::digest(&bundle)),
+    })).expect("runtime manifest");
+    append_file(tar, "codex-proxy-rs/node", b"node-v2", false);
+    if !matches!(kind, ArchiveKind::RuntimeMissingLicense) {
+        append_file(tar, "codex-proxy-rs/node-LICENSE", b"node-license", false);
+    }
+    append_file(tar, "codex-proxy-rs/runtime-manifest.json", &runtime, false);
+    append_file(
+        tar,
+        "codex-proxy-rs/openai-harness/bundle-manifest.json",
+        &bundle,
+        false,
+    );
+    for (name, data) in files {
+        let path = format!("codex-proxy-rs/openai-harness/{name}");
+        if matches!(kind, ArchiveKind::RuntimeSymlink) && *name == "sources/pi/index.js" {
+            append_symlink(tar, &path, "../../outside");
+        } else {
+            append_file(tar, &path, data, false);
+        }
+        if matches!(kind, ArchiveKind::RuntimeDuplicate) && *name == "worker/runner.mjs" {
+            append_file(tar, &path, data, false);
+        }
+        if matches!(kind, ArchiveKind::RuntimeCaseDuplicate) && *name == "worker/runner.mjs" {
+            append_file(
+                tar,
+                "codex-proxy-rs/openai-harness/worker/RUNNER.mjs",
+                data,
+                false,
+            );
+        }
+    }
+    if matches!(kind, ArchiveKind::RuntimeExtra) {
+        append_file(
+            tar,
+            "codex-proxy-rs/openai-harness/worker/unlisted.mjs",
+            b"untrusted",
+            false,
+        );
+    }
 }
 
 fn append_symlink(tar: &mut Builder<GzEncoder<Vec<u8>>>, name: &str, target: &str) {
