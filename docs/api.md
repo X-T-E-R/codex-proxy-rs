@@ -493,6 +493,9 @@ OpenAI HTTP 明确未发送的瞬时建连失败（含 TLS 握手 EOF）在单�
 这是一项轮次重试预算控制，不是客户端重试意图的精确检测；状态与交付顺序见[数据面请求生命周期](architecture.md#4-数据面请求生命周期)
 
 `turn_rate_limit_exceeded` 保留原始错误和 `Retry-After`，由客户端按自身重试预算等待。
+真正的 HTTP 非 2xx 响应使用 `Retry-After` 响应头；SSE 与 WebSocket 的 `response.failed` 使用
+`response.error.headers["retry-after"]`。网关合成的 WebSocket `type: "error"` 使用真实非 2xx `status` 和事件顶层
+`headers["retry-after"]`。字段值遵循 HTTP 秒数或日期语义，例如 `"10"` 表示建议等待 10 秒。
 代理不因此写入账号冷却、换号或透明重试，其他会话仍可使用该账号
 
 Responses 的 HTTP/SSE 与 WebSocket 按顺序即时交付正常事件，不暂存前导等待后续输出。
@@ -741,7 +744,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `GET` | `/api/admin/accounts/models` | `accountId` | 优先读取该 Provider + 套餐的模型 cache，缺失时有限实时拉取 |
 | `GET` | `/api/admin/accounts/models/catalog` | `accountId` | 读取指定账号的完整 Codex 原生模型目录，返回 `{ modelCount, observedAt, catalog }` |
 | `POST` | `/api/admin/accounts/models/refresh` | `{ accountId }` | 强制拉取最新模型并覆盖 cache |
-| `GET` | `/api/admin/accounts/connection-test` | `accountId`、`modelId` | 通过 SSE 返回实时连接测试事件，不作为业务 Responses 用量记录 |
+| `GET` | `/api/admin/accounts/connection-test` | `accountId`、`modelId`、`prompt?` | 通过 SSE 返回实时连接测试事件，不作为业务 Responses 用量记录 |
 | `POST` | `/api/admin/accounts/oauth/start` | `{ provider, name, accountId?, outboundProxyId?, outboundProxyUrl? }` | 为支持登录的 Provider 创建 flow；`accountId` 表示重新授权 |
 | `POST` | `/api/admin/accounts/oauth/complete` | `{ provider, flowId, callbackUrl, settings? }` | 消费 OAuth callback；首次授权可附带账号设置，重新授权保留原设置 |
 
@@ -928,8 +931,11 @@ OAuth 等待回调期间不持有保护；提交仍拒绝已删除或连接配�
 
 ### 账号连接测试 SSE
 
-`GET /api/admin/accounts/connection-test` 固定探测请求指定的账号，不参与普通账号轮换。成功流沿用
-`test_start`、`request`、`content`、`test_complete` 事件；失败事件为：
+`GET /api/admin/accounts/connection-test` 固定探测请求指定的账号，不参与普通账号轮换。
+可选 `prompt` 仅用于本次测试，省略时使用“不搜索互联网，直接告诉我日本首相是谁”，不持久化为账号或模型配置。
+自定义语句去除首尾空白后须为 1–4096 个 UTF-8 字节，允许换行和 Tab，拒绝其他控制字符；空白文本不会回退到默认句。
+后台冻结恢复探测仍使用原有短探针，不使用管理员测试语句。
+成功流沿用 `test_start`、`request`、`content`、`test_complete` 事件；失败事件为：
 
 ```json
 {
@@ -1348,8 +1354,10 @@ GET 和 POST 均返回 `enabled`、`leadMinutes`、`nextDiscoveryAtDisplay`、`n
 `status:{armed,lastObservedAt,lastAutoOffAt,reason}`。`effectiveMode` 不包含具体请求的分组限制
 
 开启自动关闭后，`awaiting_baseline` 表示等待可靠新观测，`armed` 表示已绑定基线，`quota_reset`
-表示已确认该账号窗口重置并持久设置账号 `mode=disabled`，`off` 表示未启用。已用百分比 0/1
-本身不证明重置，还须同身份、更新的观测和重置边界推进；旧观察、读取失败或同代次下降不会关闭。
+表示已确认该账号窗口重置并持久设置账号 `mode=disabled`，`off` 表示未启用。
+重置须来自同一凭据身份、更新的观测和同一额度窗口标识，且新重置边界比旧边界推进超过 2 秒。
+观测已跨过旧边界即可确认，不要求恰好捕获 0/1% 用量；旧边界之前的提前重置还须同时观察到已用比例下降。
+旧观测、读取失败、单独的用量下降或未跨旧边界的单独时间修正不触发关闭。
 各账号独立关闭，不修改全局模式、不消费重置卡。重新开启会绑定新基线；配置冲突返回 `409`，重新读取后再保存
 
 ## 6. 账号分组
