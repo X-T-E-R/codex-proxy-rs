@@ -296,6 +296,20 @@ jobs:
           PLATFORM_MATRIX: ${{ needs.release-info.outputs.platform_matrix }}
         run: ruby .github/scripts/package-release.rb archives
 
+      - name: Exercise packaged Linux archive
+        shell: bash
+        env:
+          VERSION: ${{ needs.release-info.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cpr-archive-smoke"
+          tar -xzf "dist/release/codex-proxy-rs_${VERSION}_linux_amd64.tar.gz" \
+            -C "$RUNNER_TEMP/cpr-archive-smoke"
+          root="$RUNNER_TEMP/cpr-archive-smoke/codex-proxy-rs"
+          test -f "$root/runtime-manifest.json"
+          test "$("$root/node" --version)" = v26.12.0
+          "$root/node" deploy/harness-sources/smoke.mjs "$root/openai-harness" "$root/node"
+
       - name: Generate release asset provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
