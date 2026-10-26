@@ -627,8 +627,9 @@ docker compose -f deploy/compose.yaml up -d --no-build --wait codex-proxy-rs
 无需初始化上游子模块或准备额外 build context。`runtime` 与 `runtime-prebuilt` 镜像均内置 Node.js 26.12.0、
 OpenAI harness worker 及固定 OpenCode/pi 源码，分别位于 `/app/bin/node` 与 `/app/bin/openai-harness/`。
 两种镜像均设置 worker 和源码路径环境变量，不依赖运行主机的上游源码 checkout；
-源码快照的 167 个文件按固定提交及摘要验证；pi 的 OpenAI 模型目录来自固定 1.4.0 发行包，
-随源码快照离线装配。以下命令从仓库根目录执行：
+源码快照的 168 个文件按固定提交及摘要验证；OpenCode 模型目录使用其固定提交的 models.dev 快照，
+pi 的 OpenAI 模型目录来自固定 1.4.0 发行包，两者均随源码快照离线装配。
+以下命令从仓库根目录执行：
 
 ```bash
 docker compose -f deploy/compose.yaml build codex-proxy-rs

@@ -33,6 +33,7 @@ PI_PACKAGE_URL = "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.4.0
 ADDITIONAL = {
     ("opencode", "LICENSE"): "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b",
     ("opencode", "packages/core/src/plugin/provider/chatgpt.ts"): "27f84a6177a6e01b5a1fc15dbcd39510a1d239779034533a548162e979425064",
+    ("opencode", "packages/core/src/models-dev/snapshot.txt"): "34c6751862ca34af12992d77c74eb73db74e83b424242215a61aa55a5fc8e655",
     ("pi", "LICENSE"): "0457f5bcec3b3b211605dfb5d1a49042fd638f3686a410fe099c24a25af13c48",
     ("pi", "packages/ai/src/auth/oauth/openai-chatgpt.ts"): "ad9dbdd7ffa52fcbaff1d1be2d0ba97b643476aaf8930e6dd67147bf35c837de",
     ("pi", "packages/ai/src/auth/oauth/pkce.ts"): "33835111577490103dbb7509b7687db1643691d7b425845428f3cbeb873fe9cf",

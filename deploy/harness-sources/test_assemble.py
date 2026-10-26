@@ -16,21 +16,25 @@ class SnapshotTests(unittest.TestCase):
 
     def test_rejects_drifted_source(self):
         original = assemble.SNAPSHOT
-        with tempfile.TemporaryDirectory() as temp:
-            changed = Path(temp) / "drift.tar.gz"
-            with tarfile.open(original, "r:gz") as source, tarfile.open(changed, "w:gz") as target:
-                for member in source:
-                    data = source.extractfile(member).read()
-                    if member.name == "opencode/packages/core/src/plugin/provider/chatgpt.ts":
-                        data += b"\n// drift\n"
-                        member.size = len(data)
-                    target.addfile(member, io.BytesIO(data))
-            try:
-                assemble.SNAPSHOT = changed
-                with self.assertRaisesRegex(AssertionError, "pinned source drift"):
-                    assemble.verify()
-            finally:
-                assemble.SNAPSHOT = original
+        for changed_path in (
+            "opencode/packages/core/src/plugin/provider/chatgpt.ts",
+            "opencode/packages/core/src/models-dev/snapshot.txt",
+        ):
+            with self.subTest(changed_path=changed_path), tempfile.TemporaryDirectory() as temp:
+                changed = Path(temp) / "drift.tar.gz"
+                with tarfile.open(original, "r:gz") as source, tarfile.open(changed, "w:gz") as target:
+                    for member in source:
+                        data = source.extractfile(member).read()
+                        if member.name == changed_path:
+                            data += b"\n// drift\n"
+                            member.size = len(data)
+                        target.addfile(member, io.BytesIO(data))
+                try:
+                    assemble.SNAPSHOT = changed
+                    with self.assertRaisesRegex(AssertionError, "pinned source drift"):
+                        assemble.verify()
+                finally:
+                    assemble.SNAPSHOT = original
 
     def test_rejects_published_pi_model_data_drift(self):
         original = assemble.PI_PUBLISHED_DATA

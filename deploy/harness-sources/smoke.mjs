@@ -1,7 +1,7 @@
 // 在隔离的发行目录用 mock 验证固定源码的 OAuth 与 Responses 执行路径
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -147,8 +147,29 @@ console.log(JSON.stringify({ chat: Object.keys(OPENAI_MODELS).length, classifier
   assert.equal(catalog.decision?.id, "gpt-6-luna");
 }
 
+function openCodeCatalogSmoke() {
+  const source = readFileSync(path.join(env.CPR_OPENCODE_SOURCE, "packages/core/src/plugin/provider/chatgpt.ts"), "utf8");
+  const block = source.match(/const fallbackModels = new Set\(\[([\s\S]*?)\]\)/);
+  assert.ok(block, "pinned OpenCode fallback list is missing");
+  const fallback = [...block[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(fallback.length, 16);
+  const snapshot = JSON.parse(readFileSync(path.join(env.CPR_OPENCODE_SOURCE, "packages/core/src/models-dev/snapshot.txt"), "utf8"));
+  const models = snapshot.openai?.models;
+  assert.equal(Object.keys(models ?? {}).length, 51);
+  // 固定 models-dev.ts 的 normalize 路径会将 experimental.modes 展开为独立模型 ID
+  const available = new Set(Object.values(models).flatMap((model) => [
+    model.id,
+    ...Object.keys(model.experimental?.modes ?? {}).map((mode) => `${model.id}-${mode}`),
+  ]));
+  assert.ok(available.has("gpt-6.1-sol-pro") && available.has("gpt-6.1-sol-ultrafast"));
+  assert.deepEqual(fallback.filter((id) => available.has(id)), fallback);
+  assert.equal(fallback.filter((id) => id.endsWith("-fast")).length, 8);
+  assert.ok(fallback.every((id) => !id.endsWith("-pro") && !id.endsWith("-ultrafast")));
+}
+
 try {
   catalogSmoke();
+  openCodeCatalogSmoke();
   for (const harness of ["opencode", "pi"]) {
     await oauthSmoke(harness);
     if (process.argv[4] !== "--oauth-only") await responsesSmoke(harness);
