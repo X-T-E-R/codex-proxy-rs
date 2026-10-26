@@ -2,6 +2,7 @@
 //!
 //! 认证头只活在这一次发送里，连接中断或任务结束时随请求值一起释放
 //! 发送前核对原始 URL 和唯一账号认证头，回环改写发生在核对之后
+//! 身份、会话、传输和 hop-by-hop 不随选定账号的令牌离开；源码自己写出的会话头按本次调用保留
 
 use std::{
     net::SocketAddr,
@@ -72,12 +73,21 @@ pub(crate) struct ForwardIo<'a> {
     pub(crate) remote_refusal: &'a AtomicUsize,
 }
 
+#[derive(Clone)]
+pub(crate) struct SourceHeaders {
+    pub(crate) pi: bool,
+    pub(crate) session_id: String,
+    pub(crate) thread_id: String,
+    pub(crate) client_request_id: String,
+}
+
 pub(crate) async fn forward(
     io: ForwardIo<'_>,
     observed: &ObservedUpstreamRequest,
     dial: &DialPlan,
     http_id: u32,
     bearer: &str,
+    source: &SourceHeaders,
 ) -> Result<(), HarnessError> {
     if let Err(error) = permit_upstream(observed, bearer) {
         io.remote_refusal.store(1, Ordering::SeqCst);
@@ -99,7 +109,7 @@ pub(crate) async fn forward(
         Method::from_bytes(observed.method.as_bytes()).map_err(|_| HarnessError::Upstream)?;
     let mut headers = HeaderMap::new();
     for (name, value) in &observed.headers {
-        if hop(name) {
+        if !outbound_header(name, value, bearer, source) {
             continue;
         }
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| HarnessError::Upstream)?;
@@ -206,6 +216,66 @@ fn is_auth_header(name: &str) -> bool {
             | "proxy-authorization"
             | "x-openai-actor-authorization"
     )
+}
+
+fn outbound_header(name: &str, value: &str, bearer: &str, source: &SourceHeaders) -> bool {
+    if hop(name) || downstream_owned(name) {
+        return source_claims(name, value, bearer, source);
+    }
+    true
+}
+
+fn source_claims(name: &str, value: &str, bearer: &str, source: &SourceHeaders) -> bool {
+    match name.to_ascii_lowercase().as_str() {
+        "authorization" => value == format!("Bearer {bearer}"),
+        "content-type" | "accept" | "accept-encoding" => true,
+        "user-agent" => source.pi && value.starts_with("pi/"),
+        "session_id" => source.pi && value == source.session_id,
+        "session-id" => !source.pi && value == source.session_id,
+        "thread-id" => !source.pi && value == source.thread_id,
+        "x-client-request-id" => value == source.client_request_id,
+        _ => false,
+    }
+}
+
+fn downstream_owned(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cf-aig-authorization"
+            | "x-api-key"
+            | "api-key"
+            | "cookie"
+            | "cookie2"
+            | "chatgpt-account-id"
+            | "chatgpt-project-id"
+            | "openai-organization"
+            | "openai-project"
+            | "originator"
+            | "version"
+            | "user-agent"
+            | "session_id"
+            | "session-id"
+            | "x-session-id"
+            | "thread-id"
+            | "x-thread-id"
+            | "x-client-request-id"
+            | "x-request-id"
+            | "accept"
+            | "accept-encoding"
+            | "content-type"
+            | "forwarded"
+            | "via"
+            | "x-real-ip"
+            | "x-forwarded-for"
+            | "x-forwarded-host"
+            | "x-forwarded-proto"
+    ) || name.starts_with("x-codex-")
+        || name.starts_with("x-openai-")
+        || name.starts_with("x-oai-")
+        || name.starts_with("openai-")
 }
 
 fn hop(name: &str) -> bool {

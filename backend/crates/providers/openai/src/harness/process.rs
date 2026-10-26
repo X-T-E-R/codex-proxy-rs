@@ -382,6 +382,25 @@ async fn drive(
     let session_affinity_id = trimmed(call.identity.session_affinity_id.as_deref());
     let thread_id = trimmed(call.identity.thread_id.as_deref());
     let client_request_id = trimmed(call.identity.client_request_id.as_deref());
+    let pi = matches!(call.harness, ResponsesHarness::Pi);
+    let source_headers = exchange::SourceHeaders {
+        pi,
+        session_id: if pi {
+            call.session_id.clone()
+        } else {
+            session_affinity_id
+                .clone()
+                .unwrap_or_else(|| call.session_id.clone())
+        },
+        thread_id: thread_id.clone().unwrap_or_else(|| call.session_id.clone()),
+        client_request_id: if pi {
+            call.session_id.clone()
+        } else {
+            client_request_id
+                .clone()
+                .unwrap_or_else(|| call.session_id.clone())
+        },
+    };
     let payload = protocol::CallPayload {
         harness: match call.harness {
             ResponsesHarness::OpenCode => "opencode",
@@ -442,6 +461,7 @@ async fn drive(
                     Arc::clone(&window),
                     local_cancel,
                     call.bearer.expose_secret(),
+                    source_headers.clone(),
                 );
                 request_seen = true;
                 deliver(
@@ -607,6 +627,7 @@ fn spawn_forward(
     window: Arc<BodyWindow>,
     cancel: &CancellationToken,
     bearer: &str,
+    source_headers: exchange::SourceHeaders,
 ) {
     let client = state.client.clone();
     let dial = state.dial.clone();
@@ -629,6 +650,7 @@ fn spawn_forward(
             &dial,
             http_id,
             &bearer,
+            &source_headers,
         )
         .await
     });

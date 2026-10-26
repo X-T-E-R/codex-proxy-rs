@@ -92,7 +92,8 @@ pub struct ResponsesCall {
     /// 桥不改写成 `unused`，也不改用下游 `Authorization`
     pub bearer: SecretString,
     /// 下游原请求头
-    /// 只去掉 `authorization` 与 `cf-aig-authorization`，其余交给源库
+    /// 身份、会话、传输和 hop-by-hop 不进入源库，也不改写源码自己的会话头
+    /// 只有源码本来就要发送的非身份扩展头才能透传，当前没有这种头
     pub downstream_headers: Vec<(String, String)>,
     /// 当前文本轮次，历史和工具轮次在这个结构上追加
     pub prompt: String,

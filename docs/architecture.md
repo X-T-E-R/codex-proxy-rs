@@ -506,7 +506,9 @@ OpenCode route 的默认 transport 是 WebSocket。这条路径改用同一协�
 
 调用方提供已经决定的有效 `service_tier` 和原请求会话身份。OpenCode 把档位写入正文，并把身份投影为 `session-id`、`thread-id`、`x-client-request-id`；缺省身份沿用该次调用的 `session_id`。pi 把同一档位写入正文，会话头和 `prompt_cache_key` 只跟随 `session_id`。这条桥不调用 `normalize_codex_request_body`，也不根据模型目录改写档位。账号上的 Fast 冻结仍留在请求路径。
 
-pi 的 `apiKey` 是调用方传入的账号访问令牌。令牌不以 `sk-` 开头时源码省略 `max_output_tokens`、`temperature` 和长缓存字段，仍写入 `service_tier`；以 `sk-` 开头时保留这些字段。下游 `authorization` 与 `cf-aig-authorization` 不进入源库，其他下游头保留。桥不用占位 `unused` 或下游 API key 代替账号令牌。
+pi 的 `apiKey` 是调用方传入的账号访问令牌。令牌不以 `sk-` 开头时源码省略 `max_output_tokens`、`temperature` 和长缓存字段，仍写入 `service_tier`；以 `sk-` 开头时保留这些字段。桥不用占位 `unused` 或下游 API key 代替账号令牌。
+
+上游请求头由这两份源码和选定账号生成。下游的认证、Cookie、账号、`originator`、`version`、`user-agent`、会话、`x-codex-*`、`x-openai-*`、传输和 hop-by-hop 头不进入源库；pi 会在自己的头之后合并调用方头，因此这些名字也不能交给它。Rust 在拨号前再次去掉不属于这次源码调用的头，并保持账号 `Authorization` 与源码会话头。Codex 的 `encode_generate_request` 不使用这套过滤。
 
 一次调用超时或取消后，桥取消该次 worker 调用和它已经发出的上游流，并等到该次调用的帧结束，才允许同一会话开始下一次调用。旧调用没有在限时内结束时，桥重启 worker。下一次调用不读取上一轮的帧、流或令牌。
 

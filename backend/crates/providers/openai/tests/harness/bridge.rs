@@ -448,7 +448,7 @@ async fn pi_branch_follows_account_token_not_downstream_authorization() {
     assert!(oauth_body.get("prompt_cache_retention").is_none());
     assert_eq!(oauth_body["service_tier"].as_str(), Some("priority"));
     assert_account_token(&oauth_result.request.headers, TOKEN);
-    assert_kept_downstream_header(&oauth_result.request.headers);
+    assert!(header(&oauth_result.request.headers, "x-request-id").is_none());
     assert_eq!(
         header(&oauth_result.request.headers, "session_id"),
         Some(SESSION)
@@ -464,7 +464,7 @@ async fn pi_branch_follows_account_token_not_downstream_authorization() {
     assert_eq!(api_key_body["temperature"].as_f64(), Some(0.0));
     assert_eq!(api_key_body["service_tier"].as_str(), Some("flex"));
     assert_account_token(&api_key_result.request.headers, API_KEY);
-    assert_kept_downstream_header(&api_key_result.request.headers);
+    assert!(header(&api_key_result.request.headers, "x-request-id").is_none());
     assert_clean(&session, API_KEY);
 
     let mut opencode_call = sample_call(ResponsesHarness::OpenCode, TOKEN);
@@ -473,7 +473,7 @@ async fn pi_branch_follows_account_token_not_downstream_authorization() {
     let opencode_body = json_body(&opencode_result.request.body);
     assert_eq!(opencode_body["max_output_tokens"].as_u64(), Some(20));
     assert_account_token(&opencode_result.request.headers, TOKEN);
-    assert_kept_downstream_header(&opencode_result.request.headers);
+    assert!(header(&opencode_result.request.headers, "x-request-id").is_none());
     assert_eq!(
         header(&opencode_result.request.headers, "session-id"),
         Some(SESSION)
@@ -492,8 +492,111 @@ fn assert_account_token(headers: &[(String, String)], token: &str) {
     assert!(header(headers, "cf-aig-authorization").is_none());
 }
 
-fn assert_kept_downstream_header(headers: &[(String, String)]) {
-    assert_eq!(header(headers, "x-request-id"), Some("req_keep_downstream"));
+fn assert_source_session(headers: &[(String, String)], pi: bool) {
+    if pi {
+        assert_eq!(header(headers, "session_id"), Some(SESSION));
+        assert_eq!(header(headers, "x-client-request-id"), Some(SESSION));
+        let user_agent = header(headers, "user-agent").unwrap_or("");
+        assert!(user_agent.starts_with("pi/1.4.0 ("), "{user_agent}");
+        assert!(header(headers, "session-id").is_none());
+        assert!(header(headers, "thread-id").is_none());
+    } else {
+        assert_eq!(header(headers, "session-id"), Some(SESSION));
+        assert_eq!(header(headers, "thread-id"), Some(SESSION));
+        assert_eq!(header(headers, "x-client-request-id"), Some(SESSION));
+        assert!(header(headers, "session_id").is_none());
+    }
+}
+
+fn assert_no_downstream_identity(headers: &[(String, String)]) {
+    for (name, value) in headers {
+        let lower = name.to_ascii_lowercase();
+        assert!(
+            !matches!(
+                lower.as_str(),
+                "cookie"
+                    | "chatgpt-account-id"
+                    | "chatgpt-project-id"
+                    | "originator"
+                    | "version"
+                    | "openai-organization"
+                    | "openai-project"
+                    | "cf-aig-authorization"
+                    | "x-api-key"
+                    | "x-request-id"
+            ),
+            "{name}"
+        );
+        assert!(!lower.starts_with("x-codex-"), "{name}");
+        assert!(!lower.starts_with("x-openai-"), "{name}");
+        assert!(!lower.starts_with("x-oai-"), "{name}");
+        assert!(!value.contains("downstream-"), "{name}={value}");
+    }
+}
+
+#[tokio::test]
+async fn downstream_identity_headers_do_not_override_either_source() {
+    const DOWNSTREAM_KEY: &str = "sk-downstream-client";
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let downstream = vec![
+        (
+            "Authorization".to_owned(),
+            format!("Bearer {DOWNSTREAM_KEY}"),
+        ),
+        ("Cookie".to_owned(), "acct=downstream-cookie".to_owned()),
+        (
+            "chatgpt-account-id".to_owned(),
+            "acct_downstream".to_owned(),
+        ),
+        ("originator".to_owned(), "downstream-originator".to_owned()),
+        ("version".to_owned(), "downstream-version".to_owned()),
+        ("User-Agent".to_owned(), "downstream-ua/0".to_owned()),
+        ("session_id".to_owned(), "ses_downstream".to_owned()),
+        (
+            "x-client-request-id".to_owned(),
+            "req_downstream".to_owned(),
+        ),
+        ("session-id".to_owned(), "ses_downstream_oc".to_owned()),
+        ("thread-id".to_owned(), "thr_downstream".to_owned()),
+        (
+            "x-codex-turn-state".to_owned(),
+            "downstream-turn".to_owned(),
+        ),
+        (
+            "x-openai-internal-codex-residency".to_owned(),
+            "downstream-residency".to_owned(),
+        ),
+        (
+            "openai-organization".to_owned(),
+            "org_downstream".to_owned(),
+        ),
+        ("openai-project".to_owned(), "proj_downstream".to_owned()),
+        ("x-api-key".to_owned(), "downstream-api-key".to_owned()),
+        ("api-key".to_owned(), "downstream-second-auth".to_owned()),
+    ];
+    for harness in [ResponsesHarness::Pi, ResponsesHarness::OpenCode] {
+        let pi_path = harness == ResponsesHarness::Pi;
+        let mut call = sample_call(harness, if pi_path { TOKEN_PI } else { TOKEN });
+        call.downstream_headers = downstream.clone();
+        let parsed = complete(&session, call).await;
+        let token = if pi_path { TOKEN_PI } else { TOKEN };
+        assert_account_token(&parsed.request.headers, token);
+        assert_source_session(&parsed.request.headers, pi_path);
+        assert_no_downstream_identity(&parsed.request.headers);
+        let wire = origin.headers_for_last();
+        assert_account_token(&wire, token);
+        assert_source_session(&wire, pi_path);
+        assert_no_downstream_identity(&wire);
+        assert_eq!(header(&wire, "x-cpr-harness-managed"), Some("1"));
+        assert_clean(&session, token);
+    }
+    let stderr = session.stderr_snapshot();
+    assert!(!stderr.contains(DOWNSTREAM_KEY));
+    assert!(!stderr.contains("downstream-"));
+    assert!(!stderr.contains("unused"));
+    session.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
@@ -880,13 +983,6 @@ async fn upstream_permit_rejects_other_hosts_and_conflicting_auth() {
         ("https://evil.example/v1", Vec::new()),
         ("https://api.openai.com.evil.example/v1", Vec::new()),
         ("http://api.openai.com/v1", Vec::new()),
-        (
-            "https://api.openai.com/v1",
-            vec![
-                ("x-api-key".to_owned(), "sk-conflict-header".to_owned()),
-                ("api-key".to_owned(), "second-auth".to_owned()),
-            ],
-        ),
     ];
     for (base_url, headers) in cases {
         let mut call = sample_call(ResponsesHarness::OpenCode, TOKEN);
@@ -910,6 +1006,34 @@ async fn upstream_permit_rejects_other_hosts_and_conflicting_auth() {
         assert!(!session.stderr_snapshot().contains(TOKEN));
         assert!(!error.to_string().contains(TOKEN));
     }
+    session.shutdown().await.expect("shutdown");
+
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let mut call = sample_call(ResponsesHarness::OpenCode, TOKEN);
+    call.downstream_headers = vec![
+        ("x-api-key".to_owned(), "sk-conflict-header".to_owned()),
+        ("api-key".to_owned(), "second-auth".to_owned()),
+        (
+            "Authorization".to_owned(),
+            "Bearer sk-duplicate-auth".to_owned(),
+        ),
+    ];
+    let parsed = complete(&session, call).await;
+    assert_account_token(&parsed.request.headers, TOKEN);
+    assert!(header(&parsed.request.headers, "x-api-key").is_none());
+    assert!(header(&parsed.request.headers, "api-key").is_none());
+    let wire = origin.headers_for_last();
+    assert_account_token(&wire, TOKEN);
+    assert!(header(&wire, "x-api-key").is_none());
+    assert!(header(&wire, "api-key").is_none());
+    assert_eq!(header(&wire, "x-cpr-harness-managed"), Some("1"));
+    assert_eq!(origin.recorded.lock().expect("records").len(), 1);
+    let stderr = session.stderr_snapshot();
+    assert!(!stderr.contains("sk-conflict-header"));
+    assert!(!stderr.contains("second-auth"));
+    assert!(!stderr.contains("sk-duplicate-auth"));
+    assert!(!stderr.contains(TOKEN));
     session.shutdown().await.expect("shutdown");
 }
 
