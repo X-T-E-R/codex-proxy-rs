@@ -226,8 +226,13 @@ jobs:
           python3 deploy/harness-sources/assemble.py verify-bundle --output dist/harness-bundle/openai-harness
           node deploy/harness-sources/smoke.mjs dist/harness-bundle/openai-harness
 
-      - name: Check source-build harness stage
-        run: docker build --target harness-builder -f deploy/Dockerfile -t cpr-harness-source-check .
+      - name: Check source-build harness matches prebuilt assets
+        run: |
+          docker build --target harness-builder -f deploy/Dockerfile -t cpr-harness-source-check .
+          docker run --rm --entrypoint /bin/cat cpr-harness-source-check \
+            /app/bin/openai-harness/bundle-manifest.json > "$RUNNER_TEMP/source-bundle-manifest.json"
+          cmp "$RUNNER_TEMP/source-bundle-manifest.json" \
+            dist/harness-bundle/openai-harness/bundle-manifest.json
 
       - name: Upload harness assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
