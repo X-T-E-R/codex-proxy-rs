@@ -34,6 +34,8 @@ const TRACE_FIELDS: &[&str] = &[
 ];
 const ID_HEADERS: &[&str] = &[
     "session-id",
+    // pi 写出下划线 session_id；与 session-id 使用同一次账号映射
+    "session_id",
     "thread-id",
     "x-codex-window-id",
     "x-codex-parent-thread-id",
@@ -41,6 +43,14 @@ const ID_HEADERS: &[&str] = &[
     "x-client-turn-id",
     "x-codex-image-turn-id",
 ];
+
+/// 把原始会话、线程或缓存 ID 映到所选账号的稳定 UUID
+///
+/// 同一 `installation_id` 与原值始终得到同一结果，换账号才变
+/// 调用方只映射一次；已经是作用域值时不能再送进这里
+pub fn account_scoped_id(installation_id: &str, original: &str) -> String {
+    scoped_id(installation_id, original)
+}
 
 fn scoped_id(installation_id: &str, original: &str) -> String {
     let mut digest = Sha256::new();
@@ -235,5 +245,37 @@ pub(super) fn scope_request(
                 )
             }))
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    use super::{account_scoped_id, scope_headers};
+
+    #[test]
+    fn underscore_session_id_shares_one_account_scope() {
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", HeaderValue::from_static("ses_raw"));
+        headers.insert("session_id", HeaderValue::from_static("ses_raw"));
+        headers.insert("x-client-request-id", HeaderValue::from_static("req_raw"));
+        scope_headers(&mut headers, Some("inst_a"));
+
+        let session = account_scoped_id("inst_a", "ses_raw");
+        let request = account_scoped_id("inst_a", "req_raw");
+        assert_eq!(headers["session-id"].to_str().unwrap(), session);
+        assert_eq!(headers["session_id"].to_str().unwrap(), session);
+        assert_eq!(headers["x-client-request-id"].to_str().unwrap(), request);
+        assert_ne!(session, account_scoped_id("inst_b", "ses_raw"));
+        assert_eq!(session, account_scoped_id("inst_a", "ses_raw"));
+
+        let mut again = HeaderMap::new();
+        again.insert(
+            "session_id",
+            HeaderValue::from_str(&session).expect("scoped header"),
+        );
+        scope_headers(&mut again, Some("inst_a"));
+        assert_ne!(again["session_id"].to_str().unwrap(), session);
     }
 }

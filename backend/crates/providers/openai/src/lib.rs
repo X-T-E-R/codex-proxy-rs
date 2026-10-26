@@ -48,6 +48,7 @@ pub use provider::{
     CodexProvider, CodexProviderConfigError, CodexProviderTransport, OFFICIAL_CODEX_BASE_PATH,
     OFFICIAL_CODEX_BASE_URL, openai_failure_affects_account_score,
 };
+pub use transport::account_scoped_id;
 
 pub mod credential;
 pub mod transport;

@@ -68,8 +68,10 @@ pub enum ResponsesHarness {
 /// 当前会话上可跨 step 重复的身份
 ///
 /// `session_affinity_id` 是 parent 或 fork affinity，只给 OpenCode 的 `session-id`
+/// 它和 `ResponsesCall::session_id` 都必须已经是所选账号的作用域值
+/// 调用方用 `account_scoped_id(installation_id, 原值)` 映射一次
 /// 缺省时 `session-id` 沿用 `ResponsesCall::session_id`
-/// `thread-id`、`x-client-request-id` 和 pi 的 `session_id` 都使用当前会话 ID，不在这里另造
+/// `thread-id`、`x-client-request-id` 和 pi 的 `session_id` 都使用该会话值，不在这里另造
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResponsesRequestIdentity {
     pub session_affinity_id: Option<String>,
@@ -79,9 +81,10 @@ pub struct ResponsesCall {
     pub harness: ResponsesHarness,
     pub model: String,
     pub base_url: String,
-    /// 当前会话 ID
+    /// 所选账号已经作用域化的当前会话 ID
+    /// 调用方用 `account_scoped_id` 映射一次后传入，桥不再映射
     /// OpenCode 用它写 `thread-id` 和 `x-client-request-id`，pi 用它写 `session_id`、`x-client-request-id` 和 `prompt_cache_key`
-    /// 同一次会话的后续 step 重复这个值
+    /// 同账号、同原会话的后续 step 重复这个值；换账号必须换另一个作用域值
     pub session_id: String,
     /// CPR Core 这一次执行或 attempt 的请求 ID
     /// 只关联进程帧，并作为 OpenCode `LLMRequest.id`

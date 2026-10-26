@@ -504,7 +504,7 @@ OpenAI Provider 拥有 OpenCode 与 pi 的 Responses worker。Provider 启动 No
 
 OpenCode route 的默认 transport 是 WebSocket。这条路径改用同一协议导出的 HTTP/SSE transport，请求不携带 `openai-beta`。pi 在 `baseUrl` 恰好为 `https://api.openai.com/v1` 且凭据不以 `sk-` 开头时，按上游规则省略 `max_output_tokens`、`temperature` 和 `prompt_cache_retention`。现有 Codex OAuth 仍经过 `encode_generate_request`，不会仅因 User-Agent 进入这条路径。
 
-调用方提供已经决定的有效 `service_tier`、这一次执行的 request ID、当前会话 ID，以及可选的 parent/fork affinity。request ID 只关联这次进程帧，并写入 OpenCode `LLMRequest.id`。OpenCode 的 `session-id` 使用 affinity，缺省时使用当前会话 ID；`thread-id` 和 `x-client-request-id` 都是当前会话 ID，同一次会话的后续 step 重复它们。pi 的 `session_id`、`x-client-request-id` 和 `prompt_cache_key` 都跟随当前会话 ID。桥不生成源码没有的逐请求指纹头，也不从访问令牌推导账号 ID。OAuth client ID 和安装 host ID 不在这条调用上。这条桥不调用 `normalize_codex_request_body`，也不根据模型目录改写档位。账号上的 Fast 冻结仍留在请求路径。
+调用方提供已经决定的有效 `service_tier`、这一次执行的 request ID，以及所选账号已经作用域化的会话 ID 和可选 parent/fork affinity。作用域化使用 `account_scoped_id(installation_id, 原值)`，与 Codex 出站关联同一算法，并且只做一次；桥不再映射，也不逐请求生成 UUID。request ID 只关联这次进程帧，并写入 OpenCode `LLMRequest.id`。OpenCode 的 `session-id` 使用作用域化后的 affinity，缺省时使用作用域化后的当前会话 ID；`thread-id` 和 `x-client-request-id` 都是该会话 ID，同账号的后续 step 重复它们。pi 的 `session_id`、`x-client-request-id` 和 `prompt_cache_key` 同样跟随该会话 ID。换账号必须传入另一个 `installation_id` 映射出的值。桥不生成源码没有的逐请求指纹头，也不从访问令牌推导账号 ID。OAuth client ID 和安装 host ID 不在这条调用上。Codex `scope_headers` 同时映射连字符 `session-id` 和 pi 的下划线 `session_id`。这条桥不调用 `normalize_codex_request_body`，也不根据模型目录改写档位。账号上的 Fast 冻结仍留在请求路径。
 
 pi 的 `apiKey` 是调用方传入的账号访问令牌。令牌不以 `sk-` 开头时源码省略 `max_output_tokens`、`temperature` 和长缓存字段，仍写入 `service_tier`；以 `sk-` 开头时保留这些字段。桥不用占位 `unused` 或下游 API key 代替账号令牌。
 

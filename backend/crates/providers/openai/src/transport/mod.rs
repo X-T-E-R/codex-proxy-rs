@@ -9,6 +9,7 @@ mod client_live;
 mod client_sse;
 pub(crate) mod connection;
 mod correlation;
+pub use correlation::account_scoped_id;
 pub mod diagnostics;
 mod downstream;
 pub mod endpoints;
