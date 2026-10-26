@@ -364,9 +364,87 @@ fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
         temperature: Some(0.0),
         service_tier: None,
         identity: ResponsesRequestIdentity::default(),
+        downstream_headers: Vec::new(),
         body_window: 4096,
         timeout: Duration::from_secs(90),
     }
+}
+
+#[tokio::test]
+async fn pi_branch_follows_account_token_not_downstream_authorization() {
+    const API_KEY: &str = "sk-bridge-branch-key";
+    const DOWNSTREAM_KEY: &str = "sk-downstream-client";
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let downstream = vec![
+        (
+            "Authorization".to_owned(),
+            format!("Bearer {DOWNSTREAM_KEY}"),
+        ),
+        (
+            "CF-AIG-Authorization".to_owned(),
+            "downstream-aig".to_owned(),
+        ),
+        ("x-request-id".to_owned(), "req_keep_downstream".to_owned()),
+    ];
+
+    let mut oauth = sample_call(ResponsesHarness::Pi, TOKEN);
+    oauth.service_tier = Some("priority".to_owned());
+    oauth.downstream_headers = downstream.clone();
+    let oauth_result = complete(&session, oauth).await;
+    let oauth_body = json_body(&oauth_result.request.body);
+    assert!(oauth_body.get("max_output_tokens").is_none());
+    assert!(oauth_body.get("temperature").is_none());
+    assert!(oauth_body.get("prompt_cache_retention").is_none());
+    assert_eq!(oauth_body["service_tier"].as_str(), Some("priority"));
+    assert_account_token(&oauth_result.request.headers, TOKEN);
+    assert_kept_downstream_header(&oauth_result.request.headers);
+    assert_eq!(
+        header(&oauth_result.request.headers, "session_id"),
+        Some(SESSION)
+    );
+    assert_clean(&session, TOKEN);
+
+    let mut api_key = sample_call(ResponsesHarness::Pi, API_KEY);
+    api_key.service_tier = Some("flex".to_owned());
+    api_key.downstream_headers = downstream.clone();
+    let api_key_result = complete(&session, api_key).await;
+    let api_key_body = json_body(&api_key_result.request.body);
+    assert_eq!(api_key_body["max_output_tokens"].as_u64(), Some(20));
+    assert_eq!(api_key_body["temperature"].as_f64(), Some(0.0));
+    assert_eq!(api_key_body["service_tier"].as_str(), Some("flex"));
+    assert_account_token(&api_key_result.request.headers, API_KEY);
+    assert_kept_downstream_header(&api_key_result.request.headers);
+    assert_clean(&session, API_KEY);
+
+    let mut opencode_call = sample_call(ResponsesHarness::OpenCode, TOKEN);
+    opencode_call.downstream_headers = downstream;
+    let opencode_result = complete(&session, opencode_call).await;
+    let opencode_body = json_body(&opencode_result.request.body);
+    assert_eq!(opencode_body["max_output_tokens"].as_u64(), Some(20));
+    assert_account_token(&opencode_result.request.headers, TOKEN);
+    assert_kept_downstream_header(&opencode_result.request.headers);
+    assert_eq!(
+        header(&opencode_result.request.headers, "session-id"),
+        Some(SESSION)
+    );
+    assert_clean(&session, TOKEN);
+    let stderr = session.stderr_snapshot();
+    assert!(!stderr.contains("unused"));
+    assert!(!stderr.contains(DOWNSTREAM_KEY));
+    session.shutdown().await.expect("shutdown");
+}
+
+fn assert_account_token(headers: &[(String, String)], token: &str) {
+    let authorization = header(headers, "authorization").unwrap_or("");
+    assert_eq!(authorization, format!("Bearer {token}"));
+    assert!(!authorization.contains("unused"));
+    assert!(header(headers, "cf-aig-authorization").is_none());
+}
+
+fn assert_kept_downstream_header(headers: &[(String, String)]) {
+    assert_eq!(header(headers, "x-request-id"), Some("req_keep_downstream"));
 }
 
 #[tokio::test]
@@ -468,6 +546,13 @@ async fn service_tier_and_request_identity_follow_both_sources() {
         Some(SESSION)
     );
     session.shutdown().await.expect("shutdown");
+}
+
+async fn complete(session: &HarnessSession, call: ResponsesCall) -> ParsedResponses {
+    match session.responses(call, &CancellationToken::new()).await {
+        Ok(parsed) => parsed,
+        Err(error) => panic!("{error}; stderr={}", session.stderr_snapshot()),
+    }
 }
 
 async fn call_with(

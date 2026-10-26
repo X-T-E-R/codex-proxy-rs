@@ -85,7 +85,13 @@ pub struct ResponsesCall {
     /// 非空值进入 OpenCode `providerOptions.serviceTier` 与 pi `options.serviceTier`
     pub service_tier: Option<String>,
     pub identity: ResponsesRequestIdentity,
+    /// 选定账号的访问令牌，pi 原样当作 `apiKey`
+    /// `provider` 为 openai、`base_url` 精确为 `https://api.openai.com/v1` 且令牌不以 `sk-` 开头时，源码走 ChatGPT 分支
+    /// 桥不改写成 `unused`，也不改用下游 `Authorization`
     pub bearer: SecretString,
+    /// 下游原请求头
+    /// 只去掉 `authorization` 与 `cf-aig-authorization`，其余交给源库
+    pub downstream_headers: Vec<(String, String)>,
     pub prompt: String,
     pub instructions: Option<String>,
     pub max_output_tokens: Option<u64>,

@@ -206,6 +206,7 @@ impl HarnessSession {
             session_affinity_id: session_affinity_id.as_deref(),
             thread_id: thread_id.as_deref(),
             client_request_id: client_request_id.as_deref(),
+            downstream_headers: &call.downstream_headers,
         };
         protocol::write_json(&self.stdin, protocol::CALL, 1, &payload).await?;
         let mut request = None;

@@ -97,6 +97,7 @@ pub(crate) struct CallPayload<'a> {
     pub(crate) thread_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_request_id: Option<&'a str>,
+    pub(crate) downstream_headers: &'a [(String, String)],
 }
 
 pub(crate) struct BodyWindow {

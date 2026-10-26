@@ -1,5 +1,6 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import { downstreamHeaders } from "./downstream-headers.mjs";
 import { managedFetch } from "./managed-fetch.mjs";
 
 function text(value) {
@@ -29,6 +30,8 @@ export async function runPi(input, emit, signal) {
   if (input.instructions) messages.push({ role: "system", content: input.instructions, timestamp: 1 });
   messages.push({ role: "user", content: input.prompt, timestamp: 2 });
   const serviceTier = text(input.service_tier);
+  const headers = downstreamHeaders(input.downstream_headers);
+  // apiKey 是账号访问令牌，不能省，也不能换成 unused 或下游 Authorization
   // 源码在 ChatGPT 省略字段之后仍写入 serviceTier；无档位时不传，避免空字符串进正文
   const stream = responses.stream(model, { messages }, {
     apiKey: input.bearer,
@@ -36,6 +39,7 @@ export async function runPi(input, emit, signal) {
     ...(serviceTier !== undefined ? { serviceTier } : {}),
     ...(input.max_output_tokens != null ? { maxTokens: input.max_output_tokens } : {}),
     ...(input.temperature != null ? { temperature: input.temperature } : {}),
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
     fetch: managedFetch,
     signal,
     maxRetries: 0,

@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { Effect, Fiber, Layer, Stream } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { downstreamHeaders } from "./downstream-headers.mjs";
 import { managedFetch } from "./managed-fetch.mjs";
 
 function text(value) {
@@ -67,6 +68,7 @@ export async function runOpenCode(input, emit, signal) {
     ...(serviceTier ? { providerOptions: { serviceTier } } : {}),
     http: {
       headers: {
+        ...downstreamHeaders(input.downstream_headers),
         "session-id": text(input.session_affinity_id) ?? sessionId,
         "thread-id": text(input.thread_id) ?? sessionId,
         "x-client-request-id": text(input.client_request_id) ?? sessionId,
