@@ -276,10 +276,16 @@ fn retry_after_seconds_field(value: &Value) -> Option<u64> {
 }
 
 fn retry_after_seconds_header(value: &Value) -> Option<u64> {
+    let header = retry_after_header_from_value(value)?;
+    super::headers::parse_retry_after_seconds(header.to_str().ok()?)
+}
+
+/// 读取事件 headers 中的 Retry-After，保留原值并遵守 HTTP 头的校验与覆盖规则
+pub(super) fn retry_after_header_from_value(value: &Value) -> Option<http::HeaderValue> {
     let headers = value.get("headers")?.as_object()?;
     // 官方先按 HTTP 头值校验，再覆盖大小写不同的同名头；最后才解释重试时间
     // 合法但无法解析为时间的末项也会覆盖前值，非法头值和数组不参与覆盖
-    let header = headers
+    headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
         .filter_map(|(_, value)| match value {
@@ -289,8 +295,7 @@ fn retry_after_seconds_header(value: &Value) -> Option<u64> {
             }
             Value::Null | Value::Array(_) | Value::Object(_) => None,
         })
-        .next_back()?;
-    super::headers::parse_retry_after_seconds(header.to_str().ok()?)
+        .next_back()
 }
 
 /// 标准化的单个限流窗口

@@ -268,7 +268,17 @@ fn client_payload(wire: &ProtocolWireEvent) -> Option<Value> {
         effective_event_type(wire),
         Some("error" | "response.failed")
     ) {
-        return capacity_error_for_client(wire.data());
+        let mut projected = capacity_error_for_client(wire.data());
+        if effective_event_type(wire) == Some("response.failed") {
+            let capacity_projected = projected.is_some();
+            let mut data = projected.take().unwrap_or_else(|| wire.data().clone());
+            if gateway_protocol::openai::sse::set_response_failed_retry_after(&mut data, None)
+                || capacity_projected
+            {
+                projected = Some(data);
+            }
+        }
+        return projected;
     }
     if !matches!(
         effective_event_type(wire),

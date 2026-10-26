@@ -1,5 +1,7 @@
 //! OpenAI 客户端协议的稳定错误响应
 
+use std::time::Duration;
+
 use axum::{
     Json,
     body::Body,
@@ -8,14 +10,45 @@ use axum::{
 };
 use gateway_core::{
     engine::EngineError,
-    error::{GatewayError, GatewayErrorKind, ProviderErrorKind},
+    error::{GatewayError, GatewayErrorKind, ProviderError, ProviderErrorKind},
     policy::{ClientVersionRejection, CodexClientKind},
 };
 use serde_json::{Value, json};
 
-pub use gateway_core::engine::execution::gateway_error_from_engine;
-
 use super::responses::ProtocolErrorBody;
+
+/// 保留显式客户端响应自身的等待建议，供已开流后的协议投影使用
+pub fn gateway_error_from_engine(error: &EngineError) -> GatewayError {
+    match error {
+        EngineError::Provider(error) => gateway_error_from_provider(error),
+        _ => gateway_core::engine::execution::gateway_error_from_engine(error),
+    }
+}
+
+pub(super) fn gateway_error_from_provider(error: &ProviderError) -> GatewayError {
+    let gateway = GatewayError::from_provider(error);
+    let delay = error
+        .client_visible_upstream_response()
+        .and_then(|response| {
+            response
+                .headers()
+                .iter()
+                .rev()
+                .find(|header| header.name().eq_ignore_ascii_case("retry-after"))
+        })
+        .and_then(|header| HeaderValue::from_bytes(header.value()).ok())
+        .and_then(|header| {
+            header
+                .to_str()
+                .ok()
+                .and_then(gateway_protocol::openai::parse_retry_after_seconds)
+        })
+        .map(Duration::from_secs);
+    match delay {
+        Some(delay) => gateway.with_retry_after(delay),
+        None => gateway,
+    }
+}
 
 /// OpenAI 风格错误响应
 pub fn openai_error_response(
@@ -72,6 +105,14 @@ pub(super) fn capacity_error_for_client(data: &Value) -> Option<Value> {
         }
     }
     Some(projected)
+}
+
+/// HTTP 与 WS 包装错误共用秒数头，零延迟仍是有效建议
+pub(super) fn retry_after_header(delay: Duration) -> String {
+    delay
+        .as_secs()
+        .saturating_add(u64::from(delay.subsec_nanos() != 0))
+        .to_string()
 }
 
 /// 严格协议 decoder/encoder 返回的安全错误 body
@@ -161,13 +202,7 @@ pub fn gateway_error_response(error: &GatewayError) -> Response {
     )
     .into_response();
     if let Some(delay) = error.retry_after()
-        && let Ok(value) = HeaderValue::from_str(
-            &delay
-                .as_secs()
-                .saturating_add(u64::from(delay.subsec_nanos() > 0))
-                .max(1)
-                .to_string(),
-        )
+        && let Ok(value) = HeaderValue::from_str(&retry_after_header(delay))
     {
         response
             .headers_mut()

@@ -880,6 +880,66 @@ fn transparent_encoder_should_use_identical_json_for_sse_and_websocket() {
 }
 
 #[test]
+fn retry_after_is_consumable_after_error_transport_projection() {
+    for header in [json!("10"), json!("0"), json!("invalid"), Value::Null] {
+        for status in [None, Some(429)] {
+            let mut raw = json!({
+                "type":"error", "headers":{"retry-after":header, "x-future":"keep"},
+                "error":{"code":"turn_rate_limit_exceeded", "type":"rate_limit_error", "message":"busy", "future":{"keep":true}},
+                "sequence_number":7
+            });
+            if let Some(status) = status {
+                raw["status"] = json!(status);
+            }
+            let event = openai_wire_event(Vec::new(), "error", raw.clone());
+            let frames = OpenAiResponsesEncoder::new().push_sse(&event);
+            let events = parse_sse_events(std::str::from_utf8(&frames[0]).unwrap()).unwrap();
+            let sse: Value = serde_json::from_str(&events[0].data).unwrap();
+            let ws: Value =
+                serde_json::from_str(&OpenAiResponsesEncoder::new().push_websocket(&event)[0])
+                    .unwrap();
+            let expected = header.as_str().filter(|value| value.parse::<u64>().is_ok());
+            for data in [&sse, &ws] {
+                if data["type"] == "response.failed" {
+                    assert_eq!(
+                        data.pointer("/response/error/headers/retry-after")
+                            .and_then(Value::as_str),
+                        expected
+                    );
+                    assert_eq!(data["response"]["error"]["future"], raw["error"]["future"]);
+                    assert!(data.pointer("/response/error/headers/x-future").is_none());
+                } else {
+                    // WS status 包装错误本来就能消费，继续保留原封套
+                    assert_eq!(data, &raw);
+                }
+                assert_eq!(data["sequence_number"], 7);
+            }
+            assert_eq!(event.wire_event().unwrap().data(), &raw);
+        }
+    }
+    for nested_header in [false, true] {
+        let mut raw = json!({"type":"response.failed", "headers":{"retry-after":"10"}, "response":{"id":"resp_failed","status":"failed","error":{"code":"turn_rate_limit_exceeded","message":"busy","future":true}}});
+        if nested_header {
+            raw["response"]["error"]["headers"] = json!({"retry-after":"20"});
+        }
+        let event = openai_wire_event(Vec::new(), "response.failed", raw.clone());
+        let frames = OpenAiResponsesEncoder::new().push_sse(&event);
+        let events = parse_sse_events(std::str::from_utf8(&frames[0]).unwrap()).unwrap();
+        let sse: Value = serde_json::from_str(&events[0].data).unwrap();
+        let ws: Value =
+            serde_json::from_str(&OpenAiResponsesEncoder::new().push_websocket(&event)[0]).unwrap();
+        assert_eq!(sse, ws);
+        assert_eq!(
+            sse["response"]["error"]["headers"]["retry-after"],
+            if nested_header { "20" } else { "10" }
+        );
+        assert_eq!(sse["response"]["id"], "resp_failed");
+        assert_eq!(sse["response"]["error"]["future"], true);
+        assert_eq!(event.wire_event().unwrap().data(), &raw);
+    }
+}
+
+#[test]
 fn transparent_encoder_should_translate_error_wire_to_response_failed_for_websocket() {
     // codex 的 WS 端点只消费带 status 的包装错误帧；上游缺少 status 的裸
     // `error` 帧会被静默忽略，客户端只能空等到 idle 超时

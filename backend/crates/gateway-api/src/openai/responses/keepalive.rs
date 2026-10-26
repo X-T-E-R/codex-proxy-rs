@@ -134,17 +134,10 @@ async fn stream_failure(response: Response) -> Body {
             )
         });
     // HTTP 头已提交，按官方 SSE 错误合同保留允许下发的重试建议
-    if let Some(retry_after) = retry_after
-        && let Some(error) = data["response"]["error"].as_object_mut()
-        && let Some(headers) = error
-            .entry("headers")
-            .or_insert_with(|| serde_json::json!({}))
-            .as_object_mut()
-    {
-        headers
-            .entry("retry-after")
-            .or_insert(Value::String(retry_after));
-    }
+    gateway_protocol::openai::sse::set_response_failed_retry_after(
+        &mut data,
+        retry_after.as_deref(),
+    );
     let mut event = encode_sse_event("response.failed", &data.to_string());
     event.push_str(DONE_SSE_FRAME);
     Body::from(event)

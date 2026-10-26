@@ -411,6 +411,62 @@ async fn initial_error_headers_apply_the_response_security_boundary() {
 }
 
 #[tokio::test]
+async fn retry_after_is_delivered_on_initial_and_committed_websocket_errors() {
+    for committed in [false, true] {
+        for (delay, expected) in [
+            (Some(Duration::from_secs(10)), Some("10")),
+            (Some(Duration::ZERO), Some("0")),
+            (None, None),
+        ] {
+            let mut provider =
+                ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Sent)
+                    .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                        "Codex is at capacity, please try again later",
+                        Some("turn_rate_limit_exceeded".to_owned()),
+                        Some("rate_limit_error".to_owned()),
+                    ));
+            if let Some(delay) = delay {
+                provider = provider.with_retry_after(delay);
+            }
+            let failure = EngineError::Provider(provider);
+            let error = if committed {
+                let started = ProviderEvent::wire(ProtocolWireEvent::json("openai", Some("response.created".to_owned()), json!({"type":"response.created","response":{"id":"resp_retry","status":"in_progress"}})).unwrap());
+                let trace = Arc::new(AtomicFailureTrace {
+                    first_batch: Mutex::new(Some(
+                        CoordinatedEvent::try_batch(
+                            vec![started],
+                            CommitRequirement::CommitBeforeDelivery,
+                        )
+                        .unwrap(),
+                    )),
+                    terminal_error: Mutex::new(Some(failure)),
+                    ..AtomicFailureTrace::default()
+                });
+                let (mut socket, _server) = connect(Arc::clone(&trace), Vec::new()).await;
+                send_request(&mut socket).await;
+                assert_eq!(next_event(&mut socket).await["type"], "response.metadata");
+                assert_eq!(next_event(&mut socket).await["type"], "response.created");
+                let error = next_error(&mut socket).await;
+                assert!(trace.committed.load(Ordering::Acquire));
+                assert_no_duplicate_failure(&mut socket).await;
+                socket.close(None).await.unwrap();
+                error
+            } else {
+                initial_error(failure, Vec::new()).await
+            };
+            assert_eq!(error["status"], 429);
+            assert_eq!(error["error"]["code"], "turn_rate_limit_exceeded");
+            assert_eq!(
+                error
+                    .pointer("/headers/retry-after")
+                    .and_then(Value::as_str),
+                expected
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn initial_error_without_upstream_facts_keeps_the_local_contract() {
     for (error, status, code) in [
         (EngineError::Deadline, 504, "request_timeout"),

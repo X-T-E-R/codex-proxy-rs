@@ -310,6 +310,7 @@ struct AtomicFailureTrace {
     downstream_websocket_connection_ids: Mutex<Vec<String>>,
     initial_errors: Mutex<std::collections::VecDeque<EngineError>>,
     first_batch: Mutex<Option<CoordinatedEvent>>,
+    terminal_error: Mutex<Option<EngineError>>,
     session_drops: Arc<AtomicUsize>,
     middleware: Option<gateway_core::engine::middleware::FrozenMiddlewarePlan>,
 }
@@ -351,10 +352,18 @@ impl ExecutionSession for AtomicFailureSession {
                 )),
                 1 => {
                     self.trace.finalized.store(true, Ordering::Release);
-                    Err(EngineError::Provider(ProviderError::new(
-                        ProviderErrorKind::RateLimited,
-                        UpstreamSendState::Sent,
-                    )))
+                    Err(self
+                        .trace
+                        .terminal_error
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap_or_else(|| {
+                            EngineError::Provider(ProviderError::new(
+                                ProviderErrorKind::RateLimited,
+                                UpstreamSendState::Sent,
+                            ))
+                        }))
                 }
                 _ => Ok(None),
             }

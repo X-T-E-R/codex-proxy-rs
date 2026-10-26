@@ -268,6 +268,25 @@ fn provider_error_stable_snapshot_should_drop_atomic_client_events() {
 }
 
 #[test]
+fn retry_after_survives_domain_conversion_but_explicit_client_response_owns_its_advice() {
+    let delay = std::time::Duration::from_secs(10);
+    let provider = ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Sent)
+        .with_retry_after(delay);
+    assert_eq!(
+        GatewayError::from_provider(&provider.stable_snapshot()).retry_after(),
+        Some(delay)
+    );
+    let projected =
+        provider.with_client_visible_upstream_response(ClientVisibleUpstreamResponse::new(
+            400,
+            Some(b"application/json".to_vec()),
+            Bytes::from_static(br#"{"error":{"code":"previous_response_not_found"}}"#),
+        ));
+    assert_eq!(GatewayError::from_provider(&projected).retry_after(), None);
+    assert_eq!(projected.retry_after(), Some(delay));
+}
+
+#[test]
 fn gateway_error_should_keep_client_visible_upstream_fields_out_of_safe_diagnostics() {
     let message = "Your Codex quota is exhausted";
     let error = ProviderError::new(ProviderErrorKind::QuotaExhausted, UpstreamSendState::Sent)

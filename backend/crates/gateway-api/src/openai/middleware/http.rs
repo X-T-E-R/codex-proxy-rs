@@ -11,12 +11,9 @@ use axum::{
 };
 use bytes::Bytes;
 use futures::{StreamExt as _, future::BoxFuture};
-use gateway_core::{
-    engine::middleware::{
-        MiddlewareBody, MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareHeader,
-        MiddlewareResponse,
-    },
-    error::GatewayError,
+use gateway_core::engine::middleware::{
+    MiddlewareBody, MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareHeader,
+    MiddlewareResponse,
 };
 
 pub(crate) const SSE_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
@@ -241,7 +238,7 @@ pub(crate) fn error_response(error: MiddlewareError) -> Response {
             gateway_error_response(&gateway_error_from_engine(&error))
         }
         MiddlewareError::Provider(error) => {
-            gateway_error_response(&GatewayError::from_provider(&error))
+            gateway_error_response(&crate::openai::error::gateway_error_from_provider(&error))
         }
         MiddlewareError::Rejected | MiddlewareError::Remote { rejected: true, .. } => {
             openai_error_response(

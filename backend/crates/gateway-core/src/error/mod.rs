@@ -1269,6 +1269,15 @@ impl GatewayError {
             Some(diagnostic) => gateway.with_diagnostic(diagnostic.clone()),
             None => gateway,
         };
+        // 显式客户端响应可能已把额度拒绝投影为历史重建，不能混入原额度窗口的等待
+        // 此时由协议出口读取该响应自身的重试建议
+        let gateway = match (
+            error.client_visible_upstream_response(),
+            error.retry_after(),
+        ) {
+            (None, Some(delay)) => gateway.with_retry_after(delay),
+            _ => gateway,
+        };
         match error.client_visible_upstream_error() {
             Some(upstream) => gateway.with_client_visible_upstream_error(upstream.clone()),
             None => gateway,

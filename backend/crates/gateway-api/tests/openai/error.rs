@@ -179,6 +179,45 @@ async fn key_budget_errors_preserve_limit_code_and_retry_after() {
     }
 }
 
+#[tokio::test]
+async fn retry_after_survives_provider_to_http_fallback_without_changing_the_error() {
+    use std::time::Duration;
+    for (delay, expected) in [
+        (Some(Duration::from_secs(10)), Some("10")),
+        (Some(Duration::from_millis(1501)), Some("2")),
+        (Some(Duration::ZERO), Some("0")),
+        (None, None),
+    ] {
+        let mut provider =
+            ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Sent)
+                .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                    "Codex is at capacity, please try again later",
+                    Some("turn_rate_limit_exceeded".to_owned()),
+                    Some("rate_limit_error".to_owned()),
+                ));
+        if let Some(delay) = delay {
+            provider = provider.with_retry_after(delay);
+        }
+        let response = engine_error_response(&EngineError::Provider(provider));
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .map(|value| value.to_str().unwrap()),
+            expected
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], "turn_rate_limit_exceeded");
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(
+            body["error"]["message"],
+            "Codex is at capacity, please try again later"
+        );
+    }
+}
+
 #[test]
 fn invalid_request_error_should_map_to_openai_bad_request() {
     assert_eq!(

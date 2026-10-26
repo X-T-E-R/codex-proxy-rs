@@ -294,9 +294,8 @@ pub fn response_failed_sse_data_with_id(
 
 /// 将携带嵌套错误的上游事件投影为 OpenAI Responses `response.failed` 数据
 ///
-/// 该投影供客户端 SSE 兼容转换使用
-/// 原始错误对象和事件级元数据保持不透明；
-/// 已有 response 快照只更新失败终态字段
+/// 该投影供客户端 SSE 兼容转换使用，原错误与事件元数据保留
+/// 已有 response 快照只更新失败终态，并桥接明确的等待建议
 pub fn response_failed_sse_data_from_error_event(
     response: Option<&Value>,
     response_id: Option<&str>,
@@ -325,7 +324,58 @@ pub fn response_failed_sse_data_from_error_event(
         Value::String("response.failed".to_owned()),
     );
     event.insert("response".to_owned(), Value::Object(response));
-    Some(Value::Object(event))
+    let mut event = Value::Object(event);
+    set_response_failed_retry_after(&mut event, None);
+    Some(event)
+}
+
+/// 将已有等待建议放入 response.failed 消费者读取的 error.headers，不复制其他响应头
+pub fn set_response_failed_retry_after(data: &mut Value, retry_after: Option<&str>) -> bool {
+    let valid_header = |value: &Value| {
+        super::events::retry_after_header_from_value(value).filter(|header| {
+            header
+                .to_str()
+                .ok()
+                .and_then(super::parse_retry_after_seconds)
+                .is_some()
+        })
+    };
+    let Some(error) = data.pointer("/response/error") else {
+        return false;
+    };
+    if valid_header(error).is_some() {
+        return false;
+    }
+    let header = retry_after
+        .and_then(|value| http::HeaderValue::from_str(value).ok())
+        .filter(|header| {
+            header
+                .to_str()
+                .ok()
+                .and_then(super::parse_retry_after_seconds)
+                .is_some()
+        })
+        .and_then(|value| value.to_str().ok().map(str::to_owned))
+        .or_else(|| valid_header(data).and_then(|value| value.to_str().ok().map(str::to_owned)))
+        .or_else(|| {
+            super::events::retry_after_seconds_from_value(data).map(|seconds| seconds.to_string())
+        });
+    let Some(header) = header else { return false };
+    let Some(error) = data
+        .pointer_mut("/response/error")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    let Some(headers) = error
+        .entry("headers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    else {
+        return false;
+    };
+    headers.insert("retry-after".to_owned(), Value::String(header));
+    true
 }
 
 fn response_id_or_generated(response_id: Option<&str>) -> String {

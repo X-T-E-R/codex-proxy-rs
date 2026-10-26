@@ -2,7 +2,7 @@
 
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use gateway_core::engine::EngineError;
-use gateway_core::error::ProviderErrorKind;
+use gateway_core::error::{GatewayError, ProviderErrorKind};
 use gateway_core::event::ProviderResponseHeader;
 use serde_json::{Map, Value, json};
 use thiserror::Error;
@@ -173,6 +173,9 @@ pub(super) fn initial_engine_error_event(
         // 会话 opening 身份不证明当前失败属于该请求；仅保留其他允许的会话头
         headers.remove("x-request-id");
         headers.remove("x-oai-request-id");
+        // opening 的等待建议不能代表当前失败；只使用当前错误携带的等待
+        headers.remove("retry-after");
+        headers.extend(retry_after_headers(&gateway));
     }
     let status = if provider
         .is_some_and(|error| error.kind() == ProviderErrorKind::UpstreamCapacityUnavailable)
@@ -209,6 +212,17 @@ pub(super) fn initial_engine_error_event(
 
 fn has_request_id(headers: &Map<String, Value>) -> bool {
     headers.contains_key("x-request-id") || headers.contains_key("x-oai-request-id")
+}
+
+pub(super) fn retry_after_headers(error: &GatewayError) -> Map<String, Value> {
+    let mut headers = Map::new();
+    if let Some(delay) = error.retry_after() {
+        headers.insert(
+            "retry-after".to_owned(),
+            Value::String(crate::openai::error::retry_after_header(delay)),
+        );
+    }
+    headers
 }
 
 pub(super) fn error_event(

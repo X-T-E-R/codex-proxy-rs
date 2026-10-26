@@ -1378,6 +1378,115 @@ async fn streaming_error_after_initial_keepalive_should_be_a_terminal_sse_failur
 }
 
 #[tokio::test(start_paused = true)]
+async fn retry_after_survives_sse_heartbeat_and_committed_stream_failures() {
+    for after_output in [false, true] {
+        for (delay, expected) in [
+            (Some(Duration::from_secs(10)), Some("10")),
+            (Some(Duration::ZERO), Some("0")),
+            (None, None),
+        ] {
+            let mut provider =
+                ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Sent)
+                    .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                        "Codex is at capacity, please try again later",
+                        Some("turn_rate_limit_exceeded".to_owned()),
+                        Some("rate_limit_error".to_owned()),
+                    ));
+            if let Some(delay) = delay {
+                provider = provider.with_retry_after(delay);
+            }
+            let mut steps = Vec::new();
+            if after_output {
+                steps.push(NextStep::Event(delivery(
+                    started(),
+                    CommitRequirement::CommitBeforeDelivery,
+                )));
+            }
+            steps.push(NextStep::DelayedError(
+                Duration::from_secs(30),
+                EngineError::Provider(provider),
+            ));
+            let trace = Arc::new(Trace::default());
+            let session = FakeSession::streaming(Arc::clone(&trace), steps);
+            let response = stream_execution_response(Box::new(session), None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let events = parse_sse_events(std::str::from_utf8(&bytes).unwrap()).unwrap();
+            let failed = events
+                .iter()
+                .find(|event| event.event.as_deref() == Some("response.failed"))
+                .unwrap();
+            let data: Value = serde_json::from_str(&failed.data).unwrap();
+            // 固定在官方 parse_failed_response 读取的位置，不借用网关自己的提取器
+            assert_eq!(
+                data.pointer("/response/error/headers/retry-after")
+                    .and_then(Value::as_str),
+                expected
+            );
+            assert_eq!(
+                data["response"]["error"]["code"],
+                "turn_rate_limit_exceeded"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.event.as_deref() == Some("response.failed"))
+                    .count(),
+                1
+            );
+            assert!(bytes.ends_with(b"data: [DONE]\n\n"));
+            assert_eq!(trace.client_statuses(), vec![200]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn retry_after_on_a_committed_stream_uses_the_explicit_client_response() {
+    for (header, expected) in [
+        (Some("10"), Some("10")),
+        (Some("invalid"), None),
+        (None, None),
+    ] {
+        let response_headers = header
+            .map(|value| headers(&[("retry-after", value), ("x-future", "not-copied")]))
+            .unwrap_or_default();
+        let failure = ProviderError::new(ProviderErrorKind::RateLimited, UpstreamSendState::Sent)
+            .with_retry_after(Duration::from_secs(90))
+            .with_client_visible_upstream_response(
+                ClientVisibleUpstreamResponse::new(
+                    429,
+                    Some(b"application/json".to_vec()),
+                    Bytes::from_static(
+                        br#"{"error":{"code":"turn_rate_limit_exceeded","message":"busy"}}"#,
+                    ),
+                )
+                .with_headers(response_headers),
+            );
+        let session = FakeSession::streaming(
+            Arc::new(Trace::default()),
+            vec![
+                NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
+                NextStep::Error(EngineError::Provider(failure)),
+            ],
+        );
+        let response = stream_execution_response(Box::new(session), None).await;
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let events = parse_sse_events(std::str::from_utf8(&bytes).unwrap()).unwrap();
+        let failed = events
+            .iter()
+            .find(|event| event.event.as_deref() == Some("response.failed"))
+            .unwrap();
+        let data: Value = serde_json::from_str(&failed.data).unwrap();
+        assert_eq!(
+            data.pointer("/response/error/headers/retry-after")
+                .and_then(Value::as_str),
+            expected
+        );
+        assert!(data.pointer("/response/error/headers/x-future").is_none());
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn streaming_late_upstream_error_should_preserve_extended_error_fields() {
     let mut error = json!({
         "type": "invalid_request_error", "code": "misalignment_policy_violation",

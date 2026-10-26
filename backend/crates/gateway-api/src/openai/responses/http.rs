@@ -919,14 +919,25 @@ impl StreamingExecutionBody {
 
     fn push_stream_error(&mut self, error: GatewayError) {
         let (_, default_type, default_code) = gateway_error_contract(error.kind());
+        let mut data = gateway_protocol::openai::sse::response_failed_sse_data_with_id(
+            self.encoder.response_id(),
+            error.client_error_type().unwrap_or(default_type),
+            super::super::error::client_error_code(
+                error.client_error_code().unwrap_or(default_code),
+            ),
+            error.client_message(),
+        );
+        let retry_after = error
+            .retry_after()
+            .map(crate::openai::error::retry_after_header);
+        gateway_protocol::openai::sse::set_response_failed_retry_after(
+            &mut data,
+            retry_after.as_deref(),
+        );
         self.pending.push_back(MiddlewareFrame::new(
-            Bytes::from(response_failed_sse_event_with_id(
-                self.encoder.response_id(),
-                error.client_error_type().unwrap_or(default_type),
-                super::super::error::client_error_code(
-                    error.client_error_code().unwrap_or(default_code),
-                ),
-                error.client_message(),
+            Bytes::from(gateway_protocol::openai::sse::encode_sse_event(
+                "response.failed",
+                &data.to_string(),
             )),
             MiddlewareFraming::SseEvent,
             false,

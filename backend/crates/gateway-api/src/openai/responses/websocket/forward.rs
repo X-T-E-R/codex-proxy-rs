@@ -396,7 +396,9 @@ fn middleware_gateway_error(error: MiddlewareError) -> GatewayError {
     match error {
         MiddlewareError::Gateway(error) => error,
         MiddlewareError::Engine(error) => gateway_error_from_engine(&error),
-        MiddlewareError::Provider(error) => GatewayError::from_provider(&error),
+        MiddlewareError::Provider(error) => {
+            crate::openai::error::gateway_error_from_provider(&error)
+        }
         MiddlewareError::Rejected | MiddlewareError::Remote { rejected: true, .. } => {
             GatewayError::new(
                 GatewayErrorKind::PolicyDenied,
@@ -617,7 +619,7 @@ impl WebSocketExecutionBody {
                 error.client_message(),
                 None,
                 Some(&self.request_id),
-                serde_json::Map::new(),
+                super::protocol::retry_after_headers(&error),
             )),
             MiddlewareFraming::JsonDocument,
             true,
@@ -687,16 +689,16 @@ pub(super) async fn send_gateway_error(
     request_id: &Arc<str>,
 ) -> ForwardOutcome {
     let (status, default_type, default_code) = gateway_error_contract(error.kind());
-    send_error(
-        connection,
+    let message = error_event(
         status,
         error.client_error_type().unwrap_or(default_type),
         error.client_error_code().unwrap_or(default_code),
         error.client_message(),
         None,
-        request_id,
-    )
-    .await
+        Some(request_id),
+        super::protocol::retry_after_headers(error),
+    );
+    send_error_message(connection, message, request_id).await
 }
 
 pub(super) async fn send_protocol_error(
@@ -736,6 +738,14 @@ async fn send_error(
         Some(request_id),
         serde_json::Map::new(),
     );
+    send_error_message(connection, message, request_id).await
+}
+
+async fn send_error_message(
+    connection: &mut ResponsesWebSocketConnection,
+    message: String,
+    request_id: &Arc<str>,
+) -> ForwardOutcome {
     if connection
         .send_text(
             message,

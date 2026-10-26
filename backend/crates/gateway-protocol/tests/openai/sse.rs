@@ -6,7 +6,7 @@ use gateway_protocol::openai::sse::{
     response_failed_sse_data_from_error_event, response_failed_sse_event,
     response_failed_sse_event_with_id, sse_frame_end, sse_frame_is_done,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn sse_body_has_done(body: &str) -> bool {
     body.trim_end_matches(['\r', '\n'])
@@ -440,6 +440,55 @@ fn response_failed_projection_should_preserve_response_error_and_event_metadata(
             "future_event_field": {"keep": true}
         })
     );
+}
+
+#[test]
+fn retry_after_projection_preserves_official_header_units_and_nested_precedence() {
+    use gateway_protocol::openai::sse::set_response_failed_retry_after;
+    for (header, expected) in [
+        (json!("10"), Some("10")),
+        (json!("0"), Some("0")),
+        (json!(10), Some("10")),
+        (
+            json!("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some("Sun, 06 Nov 1994 08:49:37 GMT"),
+        ),
+        (json!("invalid"), None),
+        (json!("-1"), None),
+        (json!("1.5"), None),
+        (json!(["10"]), None),
+        (json!(null), None),
+    ] {
+        let original = json!({"type":"error", "headers":{"ReTrY-AfTeR":header,"authorization":"not-copied"}, "error":{"code":"turn_rate_limit_exceeded","message":"busy","future":true}});
+        let projected =
+            response_failed_sse_data_from_error_event(None, Some("resp_retry"), &original).unwrap();
+        assert_eq!(
+            projected
+                .pointer("/response/error/headers/retry-after")
+                .and_then(Value::as_str),
+            expected
+        );
+        assert!(
+            projected
+                .pointer("/response/error/headers/authorization")
+                .is_none()
+        );
+        assert_eq!(projected["headers"], original["headers"]);
+        assert_eq!(projected["response"]["error"]["future"], true);
+    }
+    let mut data = json!({"type":"response.failed", "headers":{"retry-after":"10"}, "response":{"error":{"code":"turn_rate_limit_exceeded","headers":{"Retry-After":"20"}}}});
+    assert!(!set_response_failed_retry_after(&mut data, Some("30")));
+    assert_eq!(
+        data["response"]["error"]["headers"],
+        json!({"Retry-After":"20"})
+    );
+    data["response"]["error"]["headers"] = json!({"Retry-After":"invalid"});
+    assert!(set_response_failed_retry_after(&mut data, None));
+    assert_eq!(data["response"]["error"]["headers"]["retry-after"], "10");
+    let mut data = json!({"type":"response.failed", "response":{"error":{"code":"turn_rate_limit_exceeded", "retry_after_ms":10000}}});
+    let original = data.clone();
+    assert!(!set_response_failed_retry_after(&mut data, None));
+    assert_eq!(data, original);
 }
 
 #[test]
