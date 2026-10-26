@@ -4,14 +4,25 @@
 # 版本严格一致。升级数据库版本时只需同步修改这里与 deploy/compose.yaml。
 ARG POSTGRES_IMAGE=postgres:18-bookworm@sha256:d9c83446333daec3f0588cc709adb80c26090b7f9f0f7ec8d43c243385d79818
 
-FROM node:26.12.0-bookworm-slim@sha256:298992629d69bbd5b2b03ad57094d8e4fcb3a8eeb7c4e25d29de656519568913 AS frontend-builder
+FROM node:26.12.0-bookworm-slim@sha256:298992629d69bbd5b2b03ad57094d8e4fcb3a8eeb7c4e25d29de656519568913 AS node-runtime
 
+FROM node-runtime AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN npm install --global "$(node -p 'require("./package.json").packageManager')" \
     && pnpm install --frozen-lockfile
 COPY frontend ./
 RUN pnpm build
+
+FROM node-runtime AS harness-builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/harness-sources ./deploy/harness-sources
+COPY backend/crates/providers/openai/harness-worker ./backend/crates/providers/openai/harness-worker
+RUN python3 deploy/harness-sources/assemble.py assemble --output /app/bin/openai-harness \
+    && npm ci --ignore-scripts --omit=dev --prefix /app/bin/openai-harness/worker \
+    && python3 deploy/harness-sources/assemble.py seal --output /app/bin/openai-harness
 
 FROM rust:1.99.1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS backend-builder
 
@@ -49,7 +60,7 @@ ENV TZ=UTC
 # 更新基础镜像已有的系统包，使固定 digest 的镜像也能获取 Debian 安全更新。
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tzdata libpq5 \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl tzdata libpq5 libatomic1 libstdc++6 \
     && install -d /usr/lib/postgresql/18/bin \
     && ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime \
     && printf '%s\n' "${TZ}" > /etc/timezone \
@@ -61,11 +72,17 @@ RUN apt-get update \
 
 COPY --from=pg-client /usr/lib/postgresql/18/bin/pg_dump /usr/lib/postgresql/18/bin/pg_dump
 COPY --from=pg-client /usr/lib/postgresql/18/bin/pg_restore /usr/lib/postgresql/18/bin/pg_restore
+COPY --from=node-runtime /usr/local/bin/node /app/bin/node
+COPY --from=node-runtime /usr/local/LICENSE /app/bin/node-LICENSE
 RUN /usr/lib/postgresql/18/bin/pg_dump --version \
-    && /usr/lib/postgresql/18/bin/pg_restore --version
+    && /usr/lib/postgresql/18/bin/pg_restore --version \
+    && /app/bin/node --version
 
 WORKDIR /app
 ENV CPR_DEPLOYMENT_MODE=docker
+ENV CPR_OPENAI_HARNESS_WORKER_DIR=/app/bin/openai-harness/worker
+ENV CPR_OPENCODE_SOURCE=/app/bin/openai-harness/sources/opencode
+ENV CPR_PI_SOURCE=/app/bin/openai-harness/sources/pi
 ENV PATH="/app/bin:/usr/lib/postgresql/18/bin:${PATH}"
 
 EXPOSE 8080
@@ -80,6 +97,7 @@ FROM runtime-base AS runtime
 
 COPY --from=backend-builder --chown=cpr:cpr /tmp/codex-proxy-rs /app/bin/codex-proxy-rs
 COPY --from=frontend-builder --chown=cpr:cpr /app/frontend/dist ./web/dist
+COPY --from=harness-builder --chown=cpr:cpr /app/bin/openai-harness /app/bin/openai-harness
 USER cpr
 
 FROM runtime-base AS runtime-prebuilt
@@ -89,6 +107,7 @@ ARG CPR_PREBUILT_DIR=dist/docker
 
 COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/linux-${TARGETARCH}/codex-proxy-rs /app/bin/codex-proxy-rs
 COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/web/dist ./web/dist
+COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/openai-harness /app/bin/openai-harness
 COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/linux-${TARGETARCH}/plugins/official /app/bin/plugins/official
 RUN chmod +x /app/bin/codex-proxy-rs \
     && find /app/bin/plugins/official -type f -exec chmod 0444 '{}' + \

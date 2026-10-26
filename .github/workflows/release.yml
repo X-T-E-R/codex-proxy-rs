@@ -203,8 +203,43 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  harness-assets:
+    needs: release-info
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.12.0'
+
+      - name: Assemble locked harness
+        run: |
+          python3 deploy/harness-sources/assemble.py assemble --output dist/harness-bundle/openai-harness
+          npm ci --ignore-scripts --omit=dev --prefix dist/harness-bundle/openai-harness/worker
+          python3 deploy/harness-sources/assemble.py seal --output dist/harness-bundle/openai-harness
+          python3 deploy/harness-sources/assemble.py verify-bundle --output dist/harness-bundle/openai-harness
+          node deploy/harness-sources/smoke.mjs dist/harness-bundle/openai-harness
+
+      - name: Check source-build harness stage
+        run: docker build --target harness-builder -f deploy/Dockerfile -t cpr-harness-source-check .
+
+      - name: Upload harness assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openai-harness-assets
+          path: dist/harness-bundle/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
   package-assets:
-    needs: [release-info, frontend, build-docker-binary, build-binary]
+    needs: [release-info, frontend, build-docker-binary, build-binary, harness-assets]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -236,6 +271,18 @@ jobs:
           name: plugin-release-assets
           path: dist/plugin-release-assets
 
+      - name: Download locked harness assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: openai-harness-assets
+          path: dist/harness-bundle
+
+      - name: Install platform Node.js executables
+        run: |
+          python3 deploy/harness-sources/fetch-node.py linux amd64 dist/node/linux-amd64
+          python3 deploy/harness-sources/fetch-node.py linux arm64 dist/node/linux-arm64
+          python3 deploy/harness-sources/fetch-node.py darwin arm64 dist/node/darwin-arm64
+
       - name: Package release assets
         shell: bash
         env:
@@ -261,7 +308,7 @@ jobs:
 
   build-docker-image:
     name: build-docker-image (${{ matrix.dockerPlatform }})
-    needs: [release-info, frontend, build-docker-binary]
+    needs: [release-info, frontend, build-docker-binary, harness-assets]
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.release-info.outputs.docker_matrix) }}
@@ -299,6 +346,12 @@ jobs:
         with:
           name: plugin-release-assets
           path: dist/plugin-release-assets
+
+      - name: Download locked harness assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: openai-harness-assets
+          path: dist/harness-bundle
 
       - name: Prepare Docker prebuilt assets
         shell: bash
@@ -342,6 +395,21 @@ jobs:
             org.opencontainers.image.revision=${{ needs.release-info.outputs.git_sha }}
             org.opencontainers.image.source=https://github.com/zyycn/codex-proxy-rs
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.release-info.outputs.git_sha }}-${{ matrix.arch }}
+
+      - name: Verify packaged Node and pinned sources
+        shell: bash
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-and-push.outputs.digest }}
+          PLATFORM: ${{ matrix.dockerPlatform }}
+        run: |
+          docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -ec '
+            test "$(node --version)" = v26.12.0
+            test -f /app/bin/node-LICENSE
+            test -f "$CPR_OPENAI_HARNESS_WORKER_DIR/node_modules/effect/package.json"
+            test -f "$CPR_OPENCODE_SOURCE/packages/core/src/plugin/provider/chatgpt.ts"
+            test -f "$CPR_PI_SOURCE/packages/ai/src/auth/oauth/openai-chatgpt.ts"
+            test -f /app/bin/openai-harness/bundle-manifest.json
+          '
 
       - name: Verify exact app image digest
         uses: ./.github/actions/verify-container

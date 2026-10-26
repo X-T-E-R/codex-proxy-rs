@@ -6,6 +6,32 @@ require 'json'
 module ReleasePackage
   APP_NAME = 'codex-proxy-rs'
   MANIFEST = 'dist/plugin-release-assets/plugin-release-manifest.json'
+  HARNESS = 'dist/harness-bundle/openai-harness'
+
+  def self.install_harness(directory)
+    raise 'Harness bundle integrity check failed' unless system(
+      'python3', 'deploy/harness-sources/assemble.py', 'verify-bundle', '--output', HARNESS
+    )
+    FileUtils.mkdir_p(directory)
+    FileUtils.cp_r("#{HARNESS}/.", directory)
+  end
+
+  def self.install_node(name, root)
+    source = "dist/node/#{name}"
+    version = JSON.parse(File.read("#{HARNESS}/bundle-manifest.json")).fetch('node_version')
+    raise 'Missing pinned Node.js executable or license' unless File.file?("#{source}/node") && File.file?("#{source}/node-LICENSE")
+    FileUtils.cp("#{source}/node", "#{root}/node")
+    FileUtils.cp("#{source}/node-LICENSE", "#{root}/node-LICENSE")
+    File.chmod(0o755, "#{root}/node")
+    manifest = {
+      schema_version: 1,
+      node_version: version,
+      node_sha256: Digest::SHA256.file("#{root}/node").hexdigest,
+      node_license_sha256: Digest::SHA256.file("#{root}/node-LICENSE").hexdigest,
+      harness_manifest_sha256: Digest::SHA256.file("#{root}/openai-harness/bundle-manifest.json").hexdigest
+    }
+    File.write("#{root}/runtime-manifest.json", JSON.pretty_generate(manifest) + "\n")
+  end
 
   def self.install_manifest(directory)
     manifest = JSON.parse(File.read(MANIFEST))
@@ -46,6 +72,8 @@ module ReleasePackage
       File.chmod(0o755, "#{root}/#{binary}")
       FileUtils.cp_r('dist/frontend/.', "#{root}/web/dist")
       FileUtils.cp(config, "#{root}/deploy")
+      install_harness("#{root}/openai-harness")
+      install_node(name, root)
       install_manifest("#{root}/plugins/official")
       archive = "#{release_dir}/#{APP_NAME}_#{ENV.fetch('VERSION')}_#{platform['os']}_#{platform['arch']}.tar.gz"
       raise "Failed to create #{archive}" unless system('tar', '-czf', archive, '-C', File.dirname(root), APP_NAME)
@@ -61,6 +89,7 @@ module ReleasePackage
     FileUtils.mkdir_p(target)
     FileUtils.cp("dist/docker-artifacts/#{APP_NAME}-#{platform}/#{ENV.fetch('MATRIX_BINARY')}", "#{target}/#{APP_NAME}")
     File.chmod(0o755, "#{target}/#{APP_NAME}")
+    install_harness('dist/docker/openai-harness')
     install_manifest("#{target}/plugins/official")
   end
 end

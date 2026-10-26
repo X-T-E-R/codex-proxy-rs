@@ -8,6 +8,9 @@ frontend/.vite/
 dist/*
 !dist/docker/
 !dist/docker/**
+# 预构建镜像消费的 worker 锁定依赖是发行输入，不能按开发缓存排除。
+!dist/docker/openai-harness/worker/node_modules/
+!dist/docker/openai-harness/worker/node_modules/**
 
 # Application runtime state.
 .runtime/

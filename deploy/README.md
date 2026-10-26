@@ -623,12 +623,33 @@ docker compose -f deploy/compose.yaml pull codex-proxy-rs
 docker compose -f deploy/compose.yaml up -d --no-build --wait codex-proxy-rs
 ```
 
-源码构建需要克隆源码仓库并准备配置与数据目录，构建过程自动准备前端依赖，无需初始化子模块或准备额外 build context。`runtime` 与 `runtime-prebuilt` 镜像包含网关二进制、管理端静态资源和预置插件，不包含 Node.js，也不包含 `backend/crates/providers/openai/harness-worker`。这两类镜像不能执行 OpenCode / pi Responses worker。该 worker 需要 Node.js 22.19.0 或更高版本，以及按锁文件安装的 `effect`、`openai` 和 `partial-json`。以下命令从仓库根目录执行：
+源码构建需要克隆 CPR 仓库并准备配置与数据目录，构建过程自动准备前端依赖和锁定的 worker 依赖，
+无需初始化上游子模块或准备额外 build context。`runtime` 与 `runtime-prebuilt` 镜像均内置 Node.js 26.12.0、
+OpenAI harness worker 及固定 OpenCode/pi 源码，分别位于 `/app/bin/node` 与 `/app/bin/openai-harness/`。
+两种镜像均设置 worker 和源码路径环境变量，不依赖运行主机的上游源码 checkout；
+源码快照的 164 个文件在构建时按固定提交和内容摘要验证。以下命令从仓库根目录执行：
 
 ```bash
 docker compose -f deploy/compose.yaml build codex-proxy-rs
 docker compose -f deploy/compose.yaml up -d --no-build --wait
 ```
+
+Linux amd64/arm64 与 macOS arm64 归档将对应平台的 `node`、`node-LICENSE`、`openai-harness/`
+与网关二进制放在同一目录。直接运行归档时，从该目录设置运行路径；
+在服务管理器中使用展开后的绝对路径，而不是依赖启动器的当前目录：
+
+```bash
+PATH="$PWD:$PATH" \
+CPR_OPENAI_HARNESS_WORKER_DIR="$PWD/openai-harness/worker" \
+CPR_OPENCODE_SOURCE="$PWD/openai-harness/sources/opencode" \
+CPR_PI_SOURCE="$PWD/openai-harness/sources/pi" \
+./codex-proxy-rs
+```
+
+归档内 `runtime-manifest.json` 记录 Node、Node 许可证及 worker 封口清单的摘要；
+`openai-harness/bundle-manifest.json` 记录锁定源码、worker 与依赖文件。
+更换归档版本时保持这组目录同版，不要只替换二进制。
+管理端在线更新的 Node/worker 同组替换与回滚须由对应版本的系统更新模块支持，否则使用完整归档或镜像手动升级
 
 升级后通过管理端版本接口或容器 image digest 确认运行实例的版本和 revision
 

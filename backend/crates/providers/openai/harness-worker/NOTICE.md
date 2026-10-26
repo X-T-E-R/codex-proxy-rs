@@ -1,11 +1,13 @@
 # OpenAI harness worker notices
 
-This directory is the Provider-owned Node worker. It executes the pinned upstream
-sources in place and does not vendor their trees.
+This directory is the Provider-owned Node worker. Runtime bundles include exactly the
+pinned source files it executes, plus the required upstream license texts. The source
+snapshot is checked against `source-manifest.json` and the OAuth source hashes in
+`deploy/harness-sources/assemble.py`.
 
 | Source | Commit | License | Copyright |
 | --- | --- | --- | --- |
-| OpenCode `packages/ai`, `packages/schema` | `ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17` | MIT | Copyright (c) 2025 opencode |
+| OpenCode `packages/ai`, `packages/schema`, `packages/core/src/plugin/provider/chatgpt.ts` | `ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17` | MIT | Copyright (c) 2025 opencode |
 | pi `packages/ai`, `packages/telemetry` | `f9daca3480732d0042b1df3a6e27221f597a620d` | MIT | Copyright (c) 2025 Mario Zechner |
 
 Runtime packages installed from `package-lock.json`:
@@ -16,12 +18,15 @@ Runtime packages installed from `package-lock.json`:
 | `openai` | 7.19.0 | Apache-2.0, Copyright OpenAI |
 | `partial-json` | 0.1.7 | MIT, Copyright Muspi Merol |
 
-Node.js >= 22.19.0 is required. Install the locked packages with
+Node.js >= 22.19.0 is required. Official runtime images and release archives include
+Node.js 26.12.0, the worker with packages installed by `npm ci --ignore-scripts
+--omit=dev`, and a pinned OpenCode/pi source snapshot. `node-LICENSE` travels with
+the Node executable; upstream `LICENSE` files travel under `sources/opencode` and
+`sources/pi`. The installed packages retain their own license files in `node_modules`.
+For local development, install the locked packages with
 `npm ci --ignore-scripts --prefix backend/crates/providers/openai/harness-worker`.
-The Docker `runtime` and `runtime-prebuilt` images do not include Node.js or this
-worker. Full license texts for the installed packages are in those packages after
-installation. The MIT grants above require the copyright and permission notice to
-travel with substantial portions of the corresponding software.
+The MIT grants above require the copyright and permission notice to travel with
+substantial portions of the corresponding software.
 
 ```
 MIT License
