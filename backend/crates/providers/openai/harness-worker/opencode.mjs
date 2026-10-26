@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { Effect, Fiber, Layer, Stream } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { downstreamHeaders } from "./downstream-headers.mjs";
+import { openCodeInput } from "./input.mjs";
 import { managedFetch } from "./managed-fetch.mjs";
 
 function text(value) {
@@ -53,6 +54,7 @@ export async function runOpenCode(input, emit, signal, callId) {
   const client = await import(source(root, `${ai}/route/client.ts`));
   const executor = await import(source(root, `${ai}/route/executor.ts`));
   const auth = await import(source(root, `${ai}/route/auth.ts`));
+  const media = await import(source(root, `${ai}/media.ts`));
   // route 默认 transport 是 WebSocket channel；这条 harness 使用同一协议导出的 HTTP/SSE transport
   const model = responses.route
     .with({
@@ -61,22 +63,29 @@ export async function runOpenCode(input, emit, signal, callId) {
       transport: responses.httpTransport,
     })
     .model({ id: input.model });
+  const body = input.responses_body;
+  const mapped = body ? openCodeInput(body, media) : { system: input.instructions, prompt: input.prompt };
   const generation = {};
-  if (input.max_output_tokens != null) generation.maxTokens = input.max_output_tokens;
-  if (input.temperature != null) generation.temperature = input.temperature;
+  if (body?.max_output_tokens != null || input.max_output_tokens != null) generation.maxTokens = body?.max_output_tokens ?? input.max_output_tokens;
+  if (body?.temperature != null || input.temperature != null) generation.temperature = body?.temperature ?? input.temperature;
   const sessionId = text(input.session_id);
   const requestId = text(input.request_id);
   const serviceTier = text(input.service_tier);
   if (!sessionId || !requestId) throw new Error("missing session or request id");
-  // request id 只进入 LLMRequest.id；session-id 用 affinity，thread 和 client request 重复当前会话
+  const providerOptions = { ...(serviceTier ? { serviceTier } : {}),
+    ...(body?.reasoning?.effort ? { reasoningEffort: body.reasoning.effort } : {}),
+    ...(body?.reasoning?.summary ? { reasoningSummary: body.reasoning.summary } : {}),
+    store: body?.store === true,
+  };
+  // request id 只进入 LLMRequest.id；历史、工具与 reasoning 仍由源码 lowering
   const request = llm.request({
     id: requestId,
     model,
-    ...(input.instructions ? { system: input.instructions } : {}),
-    prompt: input.prompt,
+    ...mapped,
     ...(Object.keys(generation).length > 0 ? { generation } : {}),
-    ...(serviceTier ? { providerOptions: { serviceTier } } : {}),
+    providerOptions,
     http: {
+      ...(body?.previous_response_id ? { body: { previous_response_id: body.previous_response_id } } : {}),
       headers: {
         ...downstreamHeaders(input.downstream_headers),
         "session-id": text(input.session_affinity_id) ?? sessionId,
@@ -106,6 +115,7 @@ export async function runOpenCode(input, emit, signal, callId) {
             },
             callId,
             requestId,
+            emit,
           ),
         );
         return HttpClientResponse.fromWeb(httpRequest, response);

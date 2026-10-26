@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gateway_core::{account::OutboundProxy, lifecycle::CancellationToken};
 use provider_openai::{
     HarnessError, HarnessEvent, HarnessSession, HarnessWorkerConfig, OPENCODE_SOURCE_COMMIT,
@@ -433,6 +434,7 @@ fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
         session_id: SESSION.to_owned(),
         request_id: REQUEST.to_owned(),
         bearer: SecretString::from(token.to_owned()),
+        responses_body: None,
         prompt: PROMPT.to_owned(),
         instructions: Some(INSTRUCTIONS.to_owned()),
         max_output_tokens: Some(20),
@@ -442,7 +444,7 @@ fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
         downstream_headers: Vec::new(),
         body_window: 4096,
         event_window: 8,
-        timeout: Duration::from_secs(90),
+        timeout: Some(Duration::from_secs(90)),
     }
 }
 
@@ -1278,7 +1280,7 @@ async fn timeout_isolates_the_call_before_the_next_request() {
     let mut first = sample_call(ResponsesHarness::Pi, TOKEN);
     first.prompt = "prompt-a".to_owned();
     first.request_id = "req_attempt_a".to_owned();
-    first.timeout = Duration::from_secs(5);
+    first.timeout = Some(Duration::from_secs(5));
     let mut stream = session
         .open_responses(first, &CancellationToken::new())
         .await
@@ -1541,7 +1543,7 @@ async fn upstream_permit_rejects_other_hosts_and_conflicting_auth() {
         let mut call = sample_call(ResponsesHarness::OpenCode, TOKEN);
         call.base_url = base_url.to_owned();
         call.downstream_headers = headers;
-        call.timeout = Duration::from_secs(20);
+        call.timeout = Some(Duration::from_secs(20));
         let error = drive_call(&session, call, &CancellationToken::new())
             .await
             .expect_err(base_url);
@@ -2104,4 +2106,98 @@ fn sse_body() -> Vec<u8> {
     }
     body.push_str("data: [DONE]\n\n");
     body.into_bytes()
+}
+
+#[tokio::test]
+async fn complete_transcript_uses_each_sources_history_tools_and_wire_events() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    for (harness, bearer) in [
+        (ResponsesHarness::OpenCode, TOKEN),
+        (ResponsesHarness::Pi, TOKEN_PI),
+    ] {
+        let mut request = sample_call(harness, bearer);
+        request.prompt.clear();
+        request.service_tier = Some("priority".to_owned());
+        request.responses_body = Some(json!({
+            "model": MODEL,
+            "instructions": "Work with prior context",
+            "input": [
+                {"type":"message","role":"system","content":[{"type":"input_text","text":"System update"}]},
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"Earlier user"}]},
+                {"type":"reasoning","id":"rs_history","encrypted_content":"encrypted-history","summary":[]},
+                {"type":"function_call","id":"fc_history","call_id":"call_history","name":"lookup","arguments":"{\"query\":\"before\"}"},
+                {"type":"function_call_output","call_id":"call_history","output":"previous result"},
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"Current turn"}]}
+            ],
+            "tools": [{"type":"function","name":"lookup","description":"Look up a value","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}],
+            "tool_choice": "auto",
+            "reasoning": {"effort":"low","summary":"auto"},
+            "service_tier": "priority"
+        }));
+        let result = complete(&session, request).await;
+        let sent = json_body(&result.request.body);
+        assert_eq!(sent["service_tier"], "priority");
+        assert!(
+            sent["input"].as_array().expect("input").len() >= 5,
+            "{sent}"
+        );
+        assert!(sent.to_string().contains("Earlier user"));
+        assert!(sent.to_string().contains("Current turn"));
+        assert!(sent.to_string().contains("call_history"));
+        assert!(sent.to_string().contains("encrypted-history"));
+        assert_eq!(sent["tool_choice"], "auto");
+        assert_eq!(sent["tools"][0]["name"], "lookup");
+        let outbound_wire = result
+            .events
+            .iter()
+            .filter(|event| event.kind == "wire")
+            .flat_map(|event| {
+                STANDARD
+                    .decode(event.payload["frame_base64"].as_str().expect("raw frame"))
+                    .expect("base64 SSE frame")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outbound_wire,
+            sse_body(),
+            "upstream SSE bytes must be preserved"
+        );
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|event| event.kind == "head" && event.payload["status"] == 200)
+        );
+        assert_clean(&session, bearer);
+    }
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn unsupported_response_input_fails_before_dial_for_both_sources() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    for (harness, bearer) in [
+        (ResponsesHarness::OpenCode, TOKEN),
+        (ResponsesHarness::Pi, TOKEN_PI),
+    ] {
+        let mut request = sample_call(harness, bearer);
+        request.prompt.clear();
+        request.responses_body = Some(json!({
+            "model": MODEL,
+            "input": [{"type":"message","role":"user","content":[{"type":"input_audio","data":"not-a-supported-inline-part"}]}],
+        }));
+        let error = drive_call(&session, request, &CancellationToken::new())
+            .await
+            .expect_err("unsupported input must fail before request reaches origin");
+        assert!(
+            matches!(error, HarnessError::InvalidInput { .. }),
+            "{error}"
+        );
+    }
+    assert!(origin.recorded.lock().expect("origin requests").is_empty());
+    session.shutdown().await.expect("shutdown");
 }

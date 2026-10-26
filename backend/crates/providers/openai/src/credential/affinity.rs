@@ -113,6 +113,23 @@ impl CodexSessionAffinity {
         self
     }
 
+    /// 仅用原会话身份重算新认证域的绑定，旧域的原键保持不变
+    pub(crate) fn in_domain(
+        &self,
+        client_api_key_id: &ClientApiKeyId,
+        domain: OpenAiSelectionDomain,
+    ) -> Option<Self> {
+        let session_id = self.session_id.as_ref()?;
+        session_affinity(
+            "root-session",
+            session_id.clone(),
+            Some(session_id.clone()),
+            client_api_key_id,
+            domain,
+        )
+        .map(|affinity| affinity.with_follow_only(self.follow_only))
+    }
+
     #[must_use]
     pub(crate) const fn key(&self) -> &ProviderSessionAffinityKey {
         &self.key

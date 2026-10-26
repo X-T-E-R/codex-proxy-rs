@@ -291,3 +291,55 @@ async fn api_key_account_keeps_native_group_tier_without_querying_oauth_priority
     );
     assert_eq!(policy.calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn harness_account_priority_policy_freezes_per_account_before_runtime_failure() {
+    for kind in [
+        provider_openai::credential::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+        provider_openai::credential::CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+    ] {
+        for (account_mode, group, effective) in [
+            (
+                AccountPriorityMode::Inherit,
+                FastMode::Default,
+                FastMode::Enabled,
+            ),
+            (
+                AccountPriorityMode::Disabled,
+                FastMode::Default,
+                FastMode::Disabled,
+            ),
+            (
+                AccountPriorityMode::Enabled,
+                FastMode::Disabled,
+                FastMode::Disabled,
+            ),
+        ] {
+            let store = Arc::new(MemoryAccountStore::default());
+            super::harness::seed_harness(&store, kind).await;
+            let policy = Arc::new(AccountPolicy {
+                mode: Mutex::new(account_mode),
+                calls: AtomicUsize::new(0),
+            });
+            let context = context_with_fast_policy(
+                "req_harness_priority_policy",
+                CancellationToken::new(),
+                group,
+            );
+            let error = priority_provider(&store, OFFICIAL_CODEX_BASE_URL.to_owned(), &policy)
+                .execute(request(false, None), context.clone())
+                .await
+                .err()
+                .expect("missing harness worker runtime");
+            assert_eq!(
+                error.kind(),
+                ProviderErrorKind::ProviderInfrastructureUnavailable
+            );
+            assert_eq!(
+                context.account_fast_mode("acct_provider_contract"),
+                Some(effective)
+            );
+            assert_eq!(policy.calls.load(Ordering::SeqCst), 1);
+        }
+    }
+}

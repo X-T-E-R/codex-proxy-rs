@@ -103,6 +103,7 @@ use crate::transport::{
 
 mod execution;
 mod failure;
+mod harness;
 mod live;
 mod observation;
 mod upstream_adapter;
@@ -154,6 +155,7 @@ pub struct CodexProvider {
     search_url: Url,
     live_calls_url: Url,
     session_identity: Option<CodexSessionIdentity>,
+    harness_runtime: Result<crate::config::HarnessRuntimePaths, crate::HarnessError>,
     session_transport_recovery: CodexSessionTransportRecovery,
     stream_max_retries: u32,
     live_registry: Arc<CodexLiveRegistry>,
@@ -330,6 +332,9 @@ impl CodexProvider {
             search_url,
             live_calls_url,
             session_identity: None,
+            harness_runtime: Err(crate::HarnessError::Startup {
+                detail: "harness runtime is not configured".to_owned(),
+            }),
             session_transport_recovery: CodexSessionTransportRecovery::default(),
             stream_max_retries,
             live_registry: Arc::new(CodexLiveRegistry::default()),
@@ -348,6 +353,14 @@ impl CodexProvider {
 
     pub(crate) fn with_session_identity(mut self, identity: CodexSessionIdentity) -> Self {
         self.session_identity = Some(identity);
+        self
+    }
+
+    pub(crate) fn with_harness_runtime(
+        mut self,
+        runtime: Result<crate::config::HarnessRuntimePaths, crate::HarnessError>,
+    ) -> Self {
+        self.harness_runtime = runtime;
         self
     }
 
@@ -607,6 +620,13 @@ impl Provider for CodexProvider {
         if let Some(prepared) = preselection.as_ref() {
             prepared.checked_native_continuation_scope(&context)?;
         }
+        // 源库的非持久化 HTTP/SSE 只消费完整新链；预热和增量续接仍由原传输处理
+        let allow_harness = !guardian
+            && preselection.as_ref().is_some_and(|prepared| {
+                prepared.upstream.generate()
+                    && !prepared.continuation_requested
+                    && prepared.upstream.previous_response_id().is_none()
+            });
         let (selection_session_affinity, requires_websocket) =
             preselection.map_or((None, false), |prepared| {
                 let requires_websocket =
@@ -621,22 +641,33 @@ impl Provider for CodexProvider {
             });
         let selection_started_at = Instant::now();
         let selection = async {
-            self.selector
-                .select_with_context(
-                    &SelectCodexCredential {
-                        upstream_model: upstream_model.as_str(),
-                        request_url: &self.responses_url,
-                        attempt: &context,
-                        session_affinity_key: selection_session_affinity
-                            .as_ref()
-                            .map(|affinity| affinity.key()),
-                    },
-                    selection_session_affinity.as_ref(),
-                    requires_websocket,
-                    guardian,
-                )
-                .await
-                .map_err(map_selection_error)
+            let request = SelectCodexCredential {
+                upstream_model: upstream_model.as_str(),
+                request_url: &self.responses_url,
+                attempt: &context,
+                session_affinity_key: selection_session_affinity
+                    .as_ref()
+                    .map(|affinity| affinity.key()),
+            };
+            let result = if allow_harness {
+                self.selector
+                    .select_responses_with_context(
+                        &request,
+                        selection_session_affinity.as_ref(),
+                        requires_websocket,
+                    )
+                    .await
+            } else {
+                self.selector
+                    .select_with_context(
+                        &request,
+                        selection_session_affinity.as_ref(),
+                        requires_websocket,
+                        guardian,
+                    )
+                    .await
+            };
+            result.map_err(map_selection_error)
         };
         // 恢复期间排队也消耗启动窗口；只包住选账号，不限制业务响应时长
         let lease = if let Some(remaining) = context.connection_budget().startup_remaining() {
@@ -791,6 +822,42 @@ impl CodexProvider {
         let previous_session = processed.previous_session;
         let continuation_requested = processed.continuation_requested;
         let session_affinity = processed.session_affinity;
+        if crate::credential::harness_oauth::is_harness_kind(lease.account().authentication_kind())
+        {
+            if continuation_requested
+                || upstream_request.previous_response_id().is_some()
+                || !upstream_request.generate()
+            {
+                return Err(continuation_replay_required_error("scope_unavailable"));
+            }
+            if !context.is_diagnostic_required_account() {
+                let domain = crate::credential::OpenAiSelectionDomain::from_authentication_kind(
+                    lease.account().authentication_kind(),
+                )
+                .ok_or_else(|| {
+                    provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent)
+                })?;
+                let affinity = session_affinity
+                    .as_ref()
+                    .and_then(|affinity| affinity.in_domain(context.client_api_key_ref(), domain));
+                self.selector
+                    .validate_translated_selection(
+                        &mut lease,
+                        affinity.as_ref(),
+                        context.account_selection_policy(),
+                    )
+                    .await
+                    .map_err(map_selection_error)?;
+            }
+            return self.execute_harness_generate(
+                generate,
+                middleware_headers,
+                upstream_model,
+                context,
+                lease,
+                account_selection_wait_ms,
+            );
+        }
         if !context.is_diagnostic_required_account() {
             self.selector
                 .validate_translated_selection(

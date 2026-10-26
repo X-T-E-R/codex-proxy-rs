@@ -157,7 +157,7 @@ impl HarnessSession {
             || trimmed(Some(call.installation_id.as_str())).is_none()
             || trimmed(Some(call.session_id.as_str())).is_none()
             || trimmed(Some(call.request_id.as_str())).is_none()
-            || call.prompt.is_empty()
+            || (call.responses_body.is_none() && call.prompt.is_empty())
             || call.bearer.expose_secret().is_empty()
             || !(1..=1_048_576).contains(&call.body_window)
             || !(1..=1_024).contains(&call.event_window)
@@ -321,6 +321,7 @@ impl Drop for HarnessSession {
         {
             let _ = child.start_kill();
         }
+        let _ = std::fs::remove_file(&self.state.load_log);
     }
 }
 
@@ -353,7 +354,9 @@ async fn spawn_worker(
     for (key, value) in child_env(launch, load_log) {
         command.env(key, value);
     }
-    let mut child = command.spawn().map_err(|_| HarnessError::Spawn)?;
+    let mut child = command.spawn().map_err(|error| HarnessError::Startup {
+        detail: format!("cannot start Node harness worker: {error}"),
+    })?;
     let pid = child.id().unwrap_or(0);
     let stdin = child.stdin.take().ok_or(HarnessError::Spawn)?;
     let stdout = child.stdout.take().ok_or(HarnessError::Spawn)?;
@@ -419,6 +422,7 @@ async fn drive(
         session_id: &session_id,
         request_id: &request_id,
         bearer: call.bearer.expose_secret(),
+        responses_body: call.responses_body.as_ref(),
         prompt: &call.prompt,
         instructions: call.instructions.as_deref(),
         max_output_tokens: call.max_output_tokens,
@@ -431,15 +435,23 @@ async fn drive(
     let stdin = stdin_handle(state);
     protocol::write_json(&stdin, protocol::CALL, call_id, &payload).await?;
     let mut request_seen = false;
-    let deadline = Instant::now() + call.timeout;
+    let deadline = call
+        .timeout
+        .and_then(|duration| Instant::now().checked_add(duration));
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        let remaining = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        if remaining.is_some_and(|remaining| remaining.is_zero()) {
             return isolate(state, call_id, HarnessError::Timeout).await;
         }
         let frame = tokio::select! {
             biased;
-            _ = tokio::time::sleep(remaining) => {
+            _ = async {
+                if let Some(remaining) = remaining {
+                    tokio::time::sleep(remaining).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
                 return isolate(state, call_id, HarnessError::Timeout).await;
             }
             _ = user_cancel.cancelled() => {
@@ -566,9 +578,14 @@ async fn drive(
                 if failure.cancelled || user_cancel.is_cancelled() || local_cancel.is_cancelled() {
                     return Err(HarnessError::Cancelled);
                 }
-                return Err(HarnessError::Worker {
-                    detail: detail_from(&redact(state, &failure.message)),
-                });
+                let detail = detail_from(&redact(state, &failure.message));
+                return Err(
+                    if failure.kind.as_deref() == Some("invalid_input") && !request_seen {
+                        HarnessError::InvalidInput { detail }
+                    } else {
+                        HarnessError::Worker { detail }
+                    },
+                );
             }
             _ => {}
         }

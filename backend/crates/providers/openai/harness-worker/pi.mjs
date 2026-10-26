@@ -1,6 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { downstreamHeaders } from "./downstream-headers.mjs";
+import { piInput } from "./input.mjs";
 import { managedFetch } from "./managed-fetch.mjs";
 
 function text(value) {
@@ -14,21 +15,26 @@ function source(root, relative) {
 export async function runPi(input, emit, signal, callId) {
   const root = process.env.CPR_HARNESS_PI_ROOT;
   const responses = await import(source(root, "packages/ai/src/api/openai-responses.ts"));
+  const body = input.responses_body;
+  const transcript = body ? piInput(body, input.model) : {
+    messages: [
+      ...(input.instructions ? [{ role: "system", content: input.instructions, timestamp: 1 }] : []),
+      { role: "user", content: input.prompt, timestamp: 2 },
+    ],
+    hasImage: false,
+  };
   const model = {
     id: input.model,
     name: input.model,
     api: "openai-responses",
     provider: "openai",
     baseUrl: input.base_url,
-    reasoning: false,
-    input: ["text"],
+    reasoning: Boolean(body?.reasoning),
+    input: transcript.hasImage ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 4096,
   };
-  const messages = [];
-  if (input.instructions) messages.push({ role: "system", content: input.instructions, timestamp: 1 });
-  messages.push({ role: "user", content: input.prompt, timestamp: 2 });
   const serviceTier = text(input.service_tier);
   const requestId = text(input.request_id);
   const sessionId = text(input.session_id);
@@ -36,14 +42,17 @@ export async function runPi(input, emit, signal, callId) {
   const headers = downstreamHeaders(input.downstream_headers);
   // apiKey 是账号访问令牌，不能省，也不能换成 unused 或下游 Authorization
   // 源码在 ChatGPT 省略字段之后仍写入 serviceTier；无档位时不传，避免空字符串进正文
-  const stream = responses.stream(model, { messages }, {
+  const stream = responses.stream(model, { messages: transcript.messages }, {
     apiKey: input.bearer,
     sessionId,
     ...(serviceTier !== undefined ? { serviceTier } : {}),
-    ...(input.max_output_tokens != null ? { maxTokens: input.max_output_tokens } : {}),
-    ...(input.temperature != null ? { temperature: input.temperature } : {}),
+    ...(body?.reasoning?.effort ? { reasoningEffort: body.reasoning.effort } : {}),
+    ...(body?.reasoning?.summary ? { reasoningSummary: body.reasoning.summary } : {}),
+    ...(body?.tool_choice != null ? { toolChoice: body.tool_choice } : {}),
+    ...(body?.max_output_tokens != null || input.max_output_tokens != null ? { maxTokens: body?.max_output_tokens ?? input.max_output_tokens } : {}),
+    ...(body?.temperature != null || input.temperature != null ? { temperature: body?.temperature ?? input.temperature } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
-    fetch: (url, init) => managedFetch(url, init, callId, requestId),
+    fetch: (url, init) => managedFetch(url, init, callId, requestId, emit),
     signal,
     maxRetries: 0,
   });

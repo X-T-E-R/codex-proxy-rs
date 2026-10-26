@@ -112,6 +112,61 @@ impl OpenAiConfig {
     ) -> Result<CodexSessionIdentity, CodexSessionIdentityError> {
         CodexSessionIdentity::load_or_create(&self.identity_secret_path)
     }
+
+    pub(crate) fn harness_paths(&self) -> Result<HarnessRuntimePaths, crate::HarnessError> {
+        fn required(name: &str) -> Result<PathBuf, crate::HarnessError> {
+            let path = std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| crate::HarnessError::Startup {
+                    detail: format!("missing {name}"),
+                })?;
+            if !path.is_dir() {
+                return Err(crate::HarnessError::Startup {
+                    detail: format!("{name} is not a directory"),
+                });
+            }
+            Ok(path)
+        }
+        let worker_dir = required("CPR_OPENAI_HARNESS_WORKER_DIR")?;
+        let opencode_checkout = required("CPR_OPENCODE_SOURCE")?;
+        let pi_checkout = required("CPR_PI_SOURCE")?;
+        for (label, path) in [
+            ("worker.mjs", worker_dir.join("worker.mjs")),
+            ("register.mjs", worker_dir.join("register.mjs")),
+            (
+                "OpenCode pinned source",
+                opencode_checkout.join("packages/ai/src/protocols/openai-responses.ts"),
+            ),
+            (
+                "pi pinned source",
+                pi_checkout.join("packages/ai/src/api/openai-responses.ts"),
+            ),
+        ] {
+            if !path.is_file() {
+                return Err(crate::HarnessError::Startup {
+                    detail: format!("missing {label} in configured harness runtime"),
+                });
+            }
+        }
+        if !worker_dir.join("node_modules").is_dir() {
+            return Err(crate::HarnessError::Startup {
+                detail: "missing harness worker node_modules".to_owned(),
+            });
+        }
+        Ok(HarnessRuntimePaths {
+            worker_dir,
+            opencode_checkout,
+            pi_checkout,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct HarnessRuntimePaths {
+    pub(crate) worker_dir: PathBuf,
+    pub(crate) opencode_checkout: PathBuf,
+    pub(crate) pi_checkout: PathBuf,
 }
 
 impl Default for OpenAiConfig {

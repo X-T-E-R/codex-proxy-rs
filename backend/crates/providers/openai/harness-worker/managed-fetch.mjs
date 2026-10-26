@@ -118,7 +118,37 @@ function openChannel(id, callId) {
   };
 }
 
-async function exchange(method, url, headers, body, signal, callId, requestId) {
+// 出站 SSE 原文与源库共用同一条受管响应流，不能解码后再编码或独立 fetch 重放
+function frameEnd(bytes, start) {
+  for (let index = start; index < bytes.length; index += 1) {
+    if (bytes[index] !== 10) continue;
+    const next = bytes[index + 1] === 13 ? index + 2 : index + 1;
+    if (bytes[next] === 10) return next + 1;
+  }
+  return null;
+}
+
+class WireFrames {
+  constructor(emit) {
+    this.emit = emit;
+    this.pending = Buffer.alloc(0);
+  }
+
+  async push(bytes) {
+    const received = Buffer.concat([this.pending, Buffer.from(bytes)]);
+    let offset = 0;
+    for (let end; (end = frameEnd(received, offset)) !== null;) {
+      const frame = received.subarray(offset, end);
+      if (frame.length > 8 * 1024 * 1024) throw new Error("Responses SSE frame exceeds worker limit");
+      await this.emit({ kind: "wire", frame_base64: frame.toString("base64") });
+      offset = end;
+    }
+    this.pending = received.subarray(offset);
+    if (this.pending.length > 8 * 1024 * 1024) throw new Error("Responses SSE frame exceeds worker limit");
+  }
+}
+
+async function exchange(method, url, headers, body, signal, callId, requestId, onWire) {
   const id = takeId();
   const channel = openChannel(id, callId);
   let detached = false;
@@ -148,11 +178,16 @@ async function exchange(method, url, headers, body, signal, callId, requestId) {
       request_id: requestId,
     });
     const head = await channel.head;
+    if (onWire) await onWire({ kind: "head", status: head.status,
+      headers: (head.headers ?? []).filter(([name]) => ["x-request-id", "x-oai-request-id", "retry-after"].includes(name.toLowerCase())) });
+    const frames = onWire && (head.headers ?? []).some(([name, value]) => name.toLowerCase() === "content-type" && value.toLowerCase().includes("text/event-stream"))
+      ? new WireFrames(onWire) : null;
     const stream = new ReadableStream({
       async pull(controller) {
         const chunk = await channel.pull();
         if (chunk.bytes.length > 0) {
           controller.enqueue(new Uint8Array(chunk.bytes));
+          if (frames) await frames.push(chunk.bytes);
           await writeJson(CREDIT, id, { bytes: chunk.bytes.length, call_id: callId, request_id: requestId });
         }
         if (chunk.fin) {
@@ -200,7 +235,7 @@ export function headerEntries(input) {
   return headers;
 }
 
-export async function managedFetch(url, init = {}, callId = 0, requestId = "") {
+export async function managedFetch(url, init = {}, callId = 0, requestId = "", onWire) {
   const method = init.method ?? "GET";
   const headers = headerEntries(init.headers);
   let body = new Uint8Array();
@@ -209,5 +244,5 @@ export async function managedFetch(url, init = {}, callId = 0, requestId = "") {
     else if (init.body instanceof Uint8Array) body = init.body;
     else body = new Uint8Array(await new Response(init.body).arrayBuffer());
   }
-  return exchange(method, String(url), headers, body, init.signal, callId, requestId);
+  return exchange(method, String(url), headers, body, init.signal, callId, requestId, onWire);
 }

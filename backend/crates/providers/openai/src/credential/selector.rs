@@ -191,12 +191,29 @@ struct CredentialSelectionInput<'a> {
     requires_websocket: bool,
     requires_oauth: bool,
     domain: OpenAiSelectionDomain,
+    allow_harness: bool,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
     session_affinity_observation: Option<&'a CodexSessionAffinity>,
     /// Codex Guardian 自动审批请求；仅在配置独立额度时使用审批容量池
     guardian: bool,
+}
+
+impl CredentialSelectionInput<'_> {
+    fn admits(&self, kind: &str) -> bool {
+        self.domain.admits(kind, self.requires_oauth)
+            || (self.allow_harness && is_harness_kind(kind))
+    }
+
+    fn allows_model(&self, model: CodexSelectionModel<'_>, account: &ProviderAccount) -> bool {
+        if self.allow_harness && is_harness_kind(account.authentication_kind()) {
+            matches!(model, CodexSelectionModel::Requested(_))
+                && !model.model().is_some_and(is_grok_model)
+        } else {
+            model.allows_account_in(account, self.domain)
+        }
+    }
 }
 
 pub struct CodexCredentialSelector {
@@ -378,6 +395,7 @@ impl CodexCredentialSelector {
             requires_websocket: false,
             requires_oauth: false,
             domain,
+            allow_harness: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -402,11 +420,37 @@ impl CodexCredentialSelector {
             requires_websocket,
             requires_oauth: false,
             domain: OpenAiSelectionDomain::ProviderDefault,
+            allow_harness: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
             session_affinity_observation,
             guardian,
+        };
+        self.select_inner(
+            &input,
+            CodexSelectionModel::Requested(request.upstream_model),
+        )
+        .await
+    }
+
+    /// 只有普通 Responses 新链可让两种新认证参与同一轮真实选号
+    pub(crate) async fn select_responses_with_context(
+        &self,
+        request: &SelectCodexCredential<'_>,
+        session_affinity_observation: Option<&CodexSessionAffinity>,
+        requires_websocket: bool,
+    ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        let input = CredentialSelectionInput {
+            requires_websocket,
+            requires_oauth: false,
+            domain: OpenAiSelectionDomain::ProviderDefault,
+            allow_harness: true,
+            request_url: request.request_url,
+            attempt: request.attempt,
+            session_affinity_key: request.session_affinity_key,
+            session_affinity_observation,
+            guardian: false,
         };
         self.select_inner(
             &input,
@@ -465,6 +509,7 @@ impl CodexCredentialSelector {
             requires_websocket: false,
             requires_oauth: request.requires_oauth,
             domain: OpenAiSelectionDomain::ProviderDefault,
+            allow_harness: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
@@ -519,6 +564,19 @@ impl CodexCredentialSelector {
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let diagnostic = request.attempt.is_diagnostic_required_account();
         let binding_key = request.session_affinity_key.filter(|_| !diagnostic);
+        let harness_affinities = if request.allow_harness && !diagnostic {
+            [OpenAiSelectionDomain::OpenCode, OpenAiSelectionDomain::Pi]
+                .into_iter()
+                .filter_map(|domain| {
+                    request
+                        .session_affinity_observation?
+                        .in_domain(request.attempt.client_api_key_ref(), domain)
+                        .map(|affinity| (domain, affinity))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let affinity_mode = request
             .attempt
             .account_selection_policy()
@@ -614,6 +672,20 @@ impl CodexCredentialSelector {
                     binding_key = None;
                 }
             }
+            let legacy_binding_key = binding_key;
+            let legacy_binding = binding.clone();
+            let mut harness_bindings = Vec::with_capacity(harness_affinities.len());
+            for (domain, affinity) in &harness_affinities {
+                let current = self.lookup_session_affinity(affinity.key()).await?;
+                harness_bindings.push((*domain, affinity.key(), current));
+            }
+            if binding.is_none()
+                && let Some((_, _, Some(found))) = harness_bindings
+                    .iter()
+                    .find(|(_, _, found)| found.is_some())
+            {
+                binding = Some(found.clone());
+            }
             // 非严格模式的续写可以归属分流账号；严格绑定迁移后才拒绝旧 owner
             if affinity_mode == AccountAffinity::Strict
                 && binding
@@ -649,10 +721,8 @@ impl CodexCredentialSelector {
                                 .attempt
                                 .account_scope()
                                 .is_some_and(|scope| scope.allows(account.id())))
-                        && request
-                            .domain
-                            .admits(account.authentication_kind(), request.requires_oauth)
-                        && model.allows_account_in(account, request.domain)
+                        && request.admits(account.authentication_kind())
+                        && request.allows_model(model, account)
                         && (diagnostic || {
                             let allowed = request
                                 .attempt
@@ -668,6 +738,7 @@ impl CodexCredentialSelector {
             let mut eligible = Vec::with_capacity(accounts.len());
             for account in accounts {
                 if request.requires_websocket
+                    && !is_harness_kind(account.authentication_kind())
                     && pinned_account.as_ref().is_none_or(|id| id == account.id())
                 {
                     let runtime = match self.repository.reload_selected_credential(&account).await {
@@ -995,13 +1066,9 @@ impl CodexCredentialSelector {
                     }
                     Err(error) => return Err(error.into()),
                 };
-                if !request
-                    .domain
-                    .admits(account.authentication_kind(), request.requires_oauth)
-                    || !request
-                        .domain
-                        .admits(&runtime.authentication_kind, request.requires_oauth)
-                    || !model.allows_account_in(&account, request.domain)
+                if runtime.authentication_kind != account.authentication_kind()
+                    || !request.admits(account.authentication_kind())
+                    || !request.allows_model(model, &account)
                 {
                     excluded.insert(account.id().clone());
                     continue;
@@ -1036,14 +1103,30 @@ impl CodexCredentialSelector {
                         busy_accounts.insert(account.id().clone());
                     }
                     ProviderLeaseAcquisition::Acquired(guard) => {
-                        if let Some(key) = binding_key
+                        let (admission_key, admission_binding) =
+                            match OpenAiSelectionDomain::from_authentication_kind(
+                                account.authentication_kind(),
+                            ) {
+                                Some(domain)
+                                    if request.allow_harness
+                                        && is_harness_kind(account.authentication_kind()) =>
+                                {
+                                    harness_bindings
+                                        .iter()
+                                        .find(|(candidate, _, _)| *candidate == domain)
+                                        .map_or((None, None), |(_, key, current)| {
+                                            (Some(*key), current.as_ref())
+                                        })
+                                }
+                                _ => (legacy_binding_key, legacy_binding.as_ref()),
+                            };
+                        if let Some(key) = admission_key
                             && !self
                                 .admit_session(
                                     key,
-                                    binding.as_ref(),
-                                    // 分流只改变本次租约，CAS 续期仍保留会话主账号
-                                    binding
-                                        .as_ref()
+                                    admission_binding,
+                                    // 分流只改变本次租约，CAS 续期仍保留该授权域的会话主账号
+                                    admission_binding
                                         .filter(|_| affinity_mode == AccountAffinity::Preferred)
                                         .map_or(account.id(), ProviderSessionBinding::account_id),
                                     request
@@ -1111,7 +1194,7 @@ impl CodexCredentialSelector {
                             cookies,
                             allows_account_state_mutation,
                             affinity_telemetry,
-                            admitted_session: binding_key.cloned(),
+                            admitted_session: admission_key.cloned(),
                             capacity: capacity.map(AccountCapacitySnapshot::with_acquired_request),
                             _guard: guard,
                         });
@@ -1193,8 +1276,8 @@ impl CodexCredentialSelector {
         };
         let kind = data.authentication_kind();
         Ok(kind != account.authentication_kind()
-            || !request.domain.admits(kind, request.requires_oauth)
-            || !model.allows_account_in(account, request.domain))
+            || !request.admits(kind)
+            || !request.allows_model(model, account))
     }
 
     async fn admit_session(

@@ -198,6 +198,7 @@ pub async fn initialize(
         )
         .map_err(OpenAiInitializeError::Provider)?
         .with_session_identity(session_identity)
+        .with_harness_runtime(config.harness_paths())
         .with_timezone(config.timezone)
         .with_live_support(repository.clone()),
     );

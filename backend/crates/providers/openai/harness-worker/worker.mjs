@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { deliverHttp, failHttp } from "./managed-fetch.mjs";
+import { UnsupportedInput } from "./input.mjs";
 import { runOpenCode } from "./opencode.mjs";
 import { runPi } from "./pi.mjs";
 import {
@@ -235,6 +236,7 @@ async function handleCall(id, payload, controller, gate, secret) {
     const cancelled = controller.signal.aborted || String(error?.message || error) === "cancelled";
     await writeJson(FAILURE, id, {
       cancelled,
+      kind: error instanceof UnsupportedInput ? "invalid_input" : "worker",
       message: cancelled ? "cancelled" : redact(secret, error).slice(0, 1500),
       request_id: payload.request_id,
     });

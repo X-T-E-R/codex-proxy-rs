@@ -2,7 +2,7 @@
 //!
 //! 调用方传入已经决定的有效 `service_tier` 和原请求会话身份
 //! 模型目录是否支持 priority，以及 Fast `enabled` / `disabled` 如何改写，都不在这里
-//! 账号选择、凭据事务、管理端和发行镜像都还没有调用这里
+//! Provider 按账号认证种类选择本桥；缺少部署 Node 或固定源码时新账号在发送前不可用
 //! Codex OAuth 仍走 `encode_generate_request`，不能靠换 User-Agent 进入这条路径
 
 mod exchange;
@@ -34,6 +34,8 @@ pub enum HarnessError {
     Source,
     #[error("harness worker failed: {detail}")]
     Worker { detail: String },
+    #[error("unsupported Responses input: {detail}")]
+    InvalidInput { detail: String },
     #[error("harness worker exited")]
     Exited,
     #[error("harness call timed out")]
@@ -107,7 +109,9 @@ pub struct ResponsesCall {
     /// 身份、会话、传输和 hop-by-hop 不进入源库，也不改写源码自己的会话头
     /// 只有源码本来就要发送的非身份扩展头才能透传，当前没有这种头
     pub downstream_headers: Vec<(String, String)>,
-    /// 当前文本轮次，历史和工具轮次在这个结构上追加
+    /// 来自本次已选号终端的完整 Responses 请求，源库负责历史和工具 lowering
+    /// 文本 prompt 仅供旧桥的隔离回归向量使用
+    pub responses_body: Option<Value>,
     pub prompt: String,
     pub instructions: Option<String>,
     pub max_output_tokens: Option<u64>,
@@ -115,7 +119,8 @@ pub struct ResponsesCall {
     pub body_window: usize,
     /// 调用方尚未取走的事件上限，worker 在该窗口耗尽时等待
     pub event_window: usize,
-    pub timeout: Duration,
+    /// 仅调用方显式限制的总时限；模型请求默认不设总时限
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Clone, PartialEq, Eq)]

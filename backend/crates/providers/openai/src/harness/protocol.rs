@@ -89,6 +89,8 @@ pub(crate) struct WorkerFailure {
     pub(crate) cancelled: bool,
     pub(crate) message: String,
     #[serde(default)]
+    pub(crate) kind: Option<String>,
+    #[serde(default)]
     pub(crate) request_id: String,
 }
 
@@ -100,6 +102,8 @@ pub(crate) struct CallPayload<'a> {
     pub(crate) session_id: &'a str,
     pub(crate) request_id: &'a str,
     pub(crate) bearer: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) responses_body: Option<&'a Value>,
     pub(crate) prompt: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) instructions: Option<&'a str>,

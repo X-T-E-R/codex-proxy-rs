@@ -1,7 +1,7 @@
 //! 统一配额快照到快速模式代次观察的投影与发送前配置解析
 
 use super::*;
-use crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH;
+use crate::credential::{CODEX_AUTHENTICATION_KIND_OAUTH, harness_oauth::is_harness_kind};
 use chrono::{DateTime, Utc};
 use gateway_core::{account::FastMode, provider_ports::priority_policy::*};
 
@@ -18,7 +18,9 @@ impl CodexCredentialQuotaService {
         group: FastMode,
     ) -> Result<FastMode, PriorityPolicyError> {
         // 新配置仅管理 OAuth，其他认证方式继续原请求/分组合同，不进入不支持的 Store 读取
-        if account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH {
+        if account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH
+            && !is_harness_kind(account.authentication_kind())
+        {
             return Ok(group);
         }
         match self.priority_policy.as_ref() {
