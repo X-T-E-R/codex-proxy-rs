@@ -68,7 +68,7 @@ async function oauthSmoke(harness) {
 
 async function responsesSmoke(harness) {
   const logs = path.join(scratch, `${harness}.log`);
-  const child = spawn(node, ["--import", path.join(worker, "register.mjs"), path.join(worker, "worker.mjs")], {
+  const child = spawn(node, ["--experimental-transform-types", "--import", pathToFileURL(path.join(worker, "register.mjs")).href, path.join(worker, "worker.mjs")], {
     env: { ...env, CPR_HARNESS_LOAD_LOG: logs },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -89,6 +89,7 @@ async function responsesSmoke(harness) {
   const body = Buffer.from(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n");
   try {
     const hello = await Promise.race([reader.read(), new Promise((_, reject) => setTimeout(() => reject(new Error(errors || "worker HELLO timeout")), 15000))]);
+    assert.ok(hello, `${harness} worker exited before HELLO: ${errors}`);
     assert.equal(hello.type, protocol.HELLO, errors);
     const loaded = JSON.parse(hello.payload);
     assert.ok(loaded.sources.length >= 158, `${harness} loaded ${loaded.sources.length} sources`);
@@ -97,6 +98,7 @@ async function responsesSmoke(harness) {
     let gotRequest = false;
     let gotTool = false;
     let gotDone = false;
+    const projected = [];
     for (;;) {
       const next = await reader.read();
       assert.ok(next, `${harness} worker exited early: ${errors}`);
@@ -109,14 +111,15 @@ async function responsesSmoke(harness) {
         child.stdin.write(protocol.encodeFrame(protocol.HTTP_BODY, next.id, Buffer.concat([Buffer.from([1]), body])));
       } else if (next.type === protocol.EVENT) {
         const event = JSON.parse(next.payload);
-        if (event.kind === "tool" && event.id === "call_bridge") gotTool = true;
+        projected.push({ kind: event.kind, type: event.type, id: event.id, response_id: event.response_id });
+        if (event.kind === "tool" && event.id === (harness === "pi" ? "call_bridge|fc_item" : "call_bridge")) gotTool = true;
         if (event.kind === "done" && event.response_id === "resp_bridge") gotDone = true;
       } else if (next.type === protocol.RESULT || next.type === protocol.FAILURE) {
         assert.equal(next.type, protocol.RESULT, `${harness} ${next.payload.toString()} ${errors}`);
         break;
       }
     }
-    assert.ok(gotRequest && gotTool && gotDone, `${harness} Responses missing request/tool/done`);
+    assert.ok(gotRequest && gotTool && gotDone, `${harness} Responses missing request/tool/done: ${JSON.stringify({ gotRequest, gotTool, gotDone, projected })}`);
   } finally {
     clearTimeout(watchdog);
     child.stdin.end();
