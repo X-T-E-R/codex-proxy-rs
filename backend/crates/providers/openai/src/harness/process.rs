@@ -536,6 +536,7 @@ async fn drive(
                 return Ok(ResponseDone {
                     credit_waits: window.waits(),
                     event_waits: state.event_waits.load(Ordering::SeqCst),
+                    abort_listeners: result.abort_listeners,
                 });
             }
             protocol::FAILURE => {

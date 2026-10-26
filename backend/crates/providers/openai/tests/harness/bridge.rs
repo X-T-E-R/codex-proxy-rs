@@ -780,6 +780,7 @@ async fn drive_call(
                     events,
                     credit_waits: done.credit_waits,
                     event_waits: done.event_waits,
+                    abort_listeners: done.abort_listeners,
                 });
             }
         }
@@ -938,6 +939,22 @@ async fn same_session_calls_keep_attempt_and_account_apart() {
     session.shutdown().await.expect("shutdown");
 }
 
+fn assert_upstream_ids(events: &[HarnessEvent], pi: bool) {
+    let tool = tool_event(events);
+    assert_eq!(
+        tool.id.as_deref(),
+        Some(if pi {
+            "call_bridge|fc_item"
+        } else {
+            "call_bridge"
+        })
+    );
+    assert_eq!(
+        done_event(events).response_id.as_deref(),
+        Some("resp_bridge")
+    );
+}
+
 fn assert_scoped_pi(parsed: &ParsedResponses, scoped: &str, token: &str) {
     assert_account_token(&parsed.request.headers, token);
     assert_eq!(header(&parsed.request.headers, "session_id"), Some(scoped));
@@ -1005,6 +1022,7 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     first.downstream_headers = downstream.clone();
     let parsed_first = complete(&session, first).await;
     assert_scoped_pi(&parsed_first, &scoped_a, TOKEN);
+    assert_upstream_ids(&parsed_first.events, true);
     assert_attempt_stays_off_the_wire(&parsed_first.request.headers, "req_scope_a");
 
     let mut second = sample_call(ResponsesHarness::Pi, TOKEN);
@@ -1014,6 +1032,7 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     second.downstream_headers = downstream.clone();
     let parsed_second = complete(&session, second).await;
     assert_scoped_pi(&parsed_second, &scoped_a, TOKEN);
+    assert_upstream_ids(&parsed_second.events, true);
     assert!(json_body_text(&parsed_second.request.body).contains("prompt-scope-a2"));
     assert!(!json_body_text(&parsed_second.request.body).contains("prompt-scope-a\""));
 
@@ -1024,6 +1043,7 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     third.downstream_headers = downstream.clone();
     let parsed_third = complete(&session, third).await;
     assert_scoped_pi(&parsed_third, &scoped_b, TOKEN_PI);
+    assert_upstream_ids(&parsed_third.events, true);
     assert_ne!(
         header(&parsed_third.request.headers, "session_id"),
         Some(scoped_a.as_str())
@@ -1052,6 +1072,7 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
         Some(scoped_a.as_str())
     );
     assert_raw_scope_absent(&parsed_fourth.request.headers, &parsed_fourth.request.body);
+    assert_upstream_ids(&parsed_fourth.events, false);
     assert_attempt_stays_off_the_wire(&parsed_fourth.request.headers, "req_scope_oc");
 
     let records = origin.recorded.lock().expect("records").clone();
@@ -1276,6 +1297,62 @@ async fn event_window_waits_until_the_caller_pulls() {
     let parsed = call(&session, ResponsesHarness::OpenCode, TOKEN).await;
     assert_contract(&parsed, false);
     assert!(parsed.events.len() > 3, "events={}", parsed.events.len());
+    assert_clean(&session, TOKEN);
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn event_credit_drops_the_abort_listener() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let mut limited = sample_call(ResponsesHarness::OpenCode, TOKEN);
+    limited.event_window = 1;
+    let cancel = CancellationToken::new();
+    let mut stream = session
+        .open_responses(limited, &cancel)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let mut request = None;
+    let mut events = Vec::new();
+    let mut done = None;
+    let mut credited = 0usize;
+    timeout(Duration::from_secs(40), async {
+        loop {
+            if done.is_some() {
+                break;
+            }
+            let ahead = session.event_waits() > credited;
+            if ahead || credited >= 3 {
+                match stream.next().await {
+                    Ok(ResponseItem::Request(value)) => request = Some(value),
+                    Ok(ResponseItem::Event(event)) => {
+                        if ahead {
+                            credited += 1;
+                        }
+                        events.push(event);
+                    }
+                    Ok(ResponseItem::Done(value)) => done = Some(value),
+                    Err(error) => panic!("{error}; stderr={}", session.stderr_snapshot()),
+                }
+            } else {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        }
+    })
+    .await
+    .expect("event credits did not finish");
+    assert!(
+        credited >= 3,
+        "credited={credited} waits={}",
+        session.event_waits()
+    );
+    let done = done.expect("done");
+    assert!(done.event_waits >= 3, "waits={}", done.event_waits);
+    assert_eq!(done.abort_listeners, 0);
+    assert!(request.is_some());
+    assert_upstream_ids(&events, false);
+    assert_account_token(&request.expect("request").headers, TOKEN);
     assert_clean(&session, TOKEN);
     session.shutdown().await.expect("shutdown");
 }

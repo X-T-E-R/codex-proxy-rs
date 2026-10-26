@@ -110,6 +110,7 @@ class EventWindow {
   constructor(capacity) {
     this.remaining = capacity;
     this.waiters = [];
+    this.attached = 0;
   }
 
   credit(slots) {
@@ -134,17 +135,38 @@ class EventWindow {
       return;
     }
     await new Promise((resolve, reject) => {
-      const waiter = { resolve, reject };
+      let settled = false;
+      let listening = false;
+      const detach = () => {
+        if (!listening) return;
+        listening = false;
+        signal.removeEventListener("abort", onAbort);
+        this.attached -= 1;
+      };
+      const settle = (action) => {
+        if (settled) return;
+        settled = true;
+        detach();
+        action();
+      };
+      const waiter = {
+        resolve: () => settle(resolve),
+        reject: (error) => settle(() => reject(error)),
+      };
       this.waiters.push(waiter);
       const onAbort = () => {
         this.waiters = this.waiters.filter((item) => item !== waiter);
-        reject(new Error("cancelled"));
+        waiter.reject(new Error("cancelled"));
       };
       if (signal?.aborted) {
         onAbort();
         return;
       }
-      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal) {
+        signal.addEventListener("abort", onAbort, { once: true });
+        listening = true;
+        this.attached += 1;
+      }
     });
   }
 }
@@ -203,7 +225,12 @@ async function handleCall(id, payload, controller, gate, secret) {
       });
       return;
     }
-    await writeJson(RESULT, id, { ok: true, events, request_id: payload.request_id });
+    await writeJson(RESULT, id, {
+      ok: true,
+      events,
+      request_id: payload.request_id,
+      abort_listeners: gate.attached,
+    });
   } catch (error) {
     const cancelled = controller.signal.aborted || String(error?.message || error) === "cancelled";
     await writeJson(FAILURE, id, {

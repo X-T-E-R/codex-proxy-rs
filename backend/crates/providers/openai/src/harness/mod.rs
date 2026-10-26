@@ -159,6 +159,8 @@ pub enum ResponseItem {
 pub struct ResponseDone {
     pub credit_waits: usize,
     pub event_waits: usize,
+    /// 调用结束时仍挂在取消信号上的等待监听
+    pub abort_listeners: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +176,7 @@ pub struct ParsedResponses {
     pub events: Vec<HarnessEvent>,
     pub credit_waits: usize,
     pub event_waits: usize,
+    pub abort_listeners: usize,
 }
 
 fn redacted_headers(headers: &[(String, String)]) -> Vec<(String, String)> {

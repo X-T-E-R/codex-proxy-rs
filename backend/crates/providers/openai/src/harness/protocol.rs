@@ -74,6 +74,8 @@ pub(crate) struct Credit {
 pub(crate) struct WorkerResult {
     #[serde(default)]
     pub(crate) request_id: String,
+    #[serde(default)]
+    pub(crate) abort_listeners: usize,
 }
 
 #[derive(Debug, Deserialize)]
