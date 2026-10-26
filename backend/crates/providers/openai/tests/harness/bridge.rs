@@ -32,6 +32,11 @@ use tokio::{
 const TOKEN: &str = "bridge-sentinel-token";
 const TOKEN_PI: &str = "bridge-sentinel-token-b";
 const SESSION: &str = "ses_harness_bridge";
+const INSTALLATION: &str = "inst_harness_bridge";
+
+fn scoped(original: &str) -> String {
+    account_scoped_id(INSTALLATION, original)
+}
 const REQUEST: &str = "req_harness_bridge";
 const MODEL: &str = "gpt-4.1-mini";
 const PROMPT: &str = "Say hello.";
@@ -111,18 +116,20 @@ async fn pinned_sources_complete_opencode_and_pi_responses() {
         done_event(&opencode_result.events).response_id.as_deref(),
         Some("resp_bridge")
     );
+    let scoped_session = scoped(SESSION);
     assert!(header(&opencode_result.request.headers, "openai-beta").is_none());
+    assert!(header(&opencode_result.request.headers, "x-stainless-lang").is_none());
     assert_eq!(
         header(&opencode_result.request.headers, "session-id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     assert_eq!(
         header(&opencode_result.request.headers, "thread-id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     assert_eq!(
         header(&opencode_result.request.headers, "x-client-request-id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     assert_clean(&session, TOKEN);
 
@@ -132,17 +139,23 @@ async fn pinned_sources_complete_opencode_and_pi_responses() {
     assert!(pi_body.get("max_output_tokens").is_none());
     assert!(pi_body.get("temperature").is_none());
     assert!(pi_body.get("prompt_cache_retention").is_none());
-    assert_eq!(pi_body["prompt_cache_key"].as_str(), Some(SESSION));
+    assert_eq!(
+        pi_body["prompt_cache_key"].as_str(),
+        Some(scoped_session.as_str())
+    );
     let user_agent = header(&pi_result.request.headers, "user-agent").unwrap_or("");
     assert!(user_agent.starts_with("pi/1.4.0 ("), "{user_agent}");
     assert!(user_agent.contains("node/"), "{user_agent}");
+    assert!(header(&pi_result.request.headers, "x-stainless-lang").is_some());
+    assert!(header(&pi_result.request.headers, "x-stainless-package-version").is_some());
+    assert!(header(&pi_result.request.headers, "x-stainless-runtime").is_some());
     assert_eq!(
         header(&pi_result.request.headers, "session_id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     assert_eq!(
         header(&pi_result.request.headers, "x-client-request-id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     assert_eq!(
         tool_event(&pi_result.events).id.as_deref(),
@@ -416,6 +429,7 @@ fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
         harness,
         model: MODEL.to_owned(),
         base_url: "https://api.openai.com/v1".to_owned(),
+        installation_id: INSTALLATION.to_owned(),
         session_id: SESSION.to_owned(),
         request_id: REQUEST.to_owned(),
         bearer: SecretString::from(token.to_owned()),
@@ -461,11 +475,13 @@ async fn pi_branch_follows_account_token_not_downstream_authorization() {
     assert!(oauth_body.get("prompt_cache_retention").is_none());
     assert_eq!(oauth_body["service_tier"].as_str(), Some("priority"));
     assert_account_token(&oauth_result.request.headers, TOKEN);
+    let scoped_session = scoped(SESSION);
     assert!(header(&oauth_result.request.headers, "x-request-id").is_none());
     assert_eq!(
         header(&oauth_result.request.headers, "session_id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
+    assert!(header(&oauth_result.request.headers, "x-stainless-lang").is_some());
     assert_clean(&session, TOKEN);
 
     let mut api_key = sample_call(ResponsesHarness::Pi, API_KEY);
@@ -489,8 +505,9 @@ async fn pi_branch_follows_account_token_not_downstream_authorization() {
     assert!(header(&opencode_result.request.headers, "x-request-id").is_none());
     assert_eq!(
         header(&opencode_result.request.headers, "session-id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
+    assert!(header(&opencode_result.request.headers, "openai-beta").is_none());
     assert_clean(&session, TOKEN);
     let stderr = session.stderr_snapshot();
     assert!(!stderr.contains("unused"));
@@ -506,19 +523,34 @@ fn assert_account_token(headers: &[(String, String)], token: &str) {
 }
 
 fn assert_source_session(headers: &[(String, String)], pi: bool) {
+    let session = scoped(SESSION);
     if pi {
-        assert_eq!(header(headers, "session_id"), Some(SESSION));
-        assert_eq!(header(headers, "x-client-request-id"), Some(SESSION));
+        assert_eq!(header(headers, "session_id"), Some(session.as_str()));
+        assert_eq!(
+            header(headers, "x-client-request-id"),
+            Some(session.as_str())
+        );
         let user_agent = header(headers, "user-agent").unwrap_or("");
         assert!(user_agent.starts_with("pi/1.4.0 ("), "{user_agent}");
+        assert!(header(headers, "x-stainless-lang").is_some());
+        assert!(header(headers, "x-stainless-package-version").is_some());
+        assert!(header(headers, "x-stainless-runtime").is_some());
         assert!(header(headers, "session-id").is_none());
         assert!(header(headers, "thread-id").is_none());
     } else {
-        assert_eq!(header(headers, "session-id"), Some(SESSION));
-        assert_eq!(header(headers, "thread-id"), Some(SESSION));
-        assert_eq!(header(headers, "x-client-request-id"), Some(SESSION));
+        assert_eq!(header(headers, "session-id"), Some(session.as_str()));
+        assert_eq!(header(headers, "thread-id"), Some(session.as_str()));
+        assert_eq!(
+            header(headers, "x-client-request-id"),
+            Some(session.as_str())
+        );
         assert!(header(headers, "session_id").is_none());
+        assert!(header(headers, "openai-beta").is_none());
     }
+    assert!(headers.iter().all(|(name, _)| {
+        let lower = name.to_ascii_lowercase();
+        !lower.starts_with("x-openai-") && !lower.starts_with("openai-")
+    }));
 }
 
 fn assert_no_downstream_identity(headers: &[(String, String)]) {
@@ -635,17 +667,19 @@ async fn service_tier_and_request_identity_follow_both_sources() {
         assert_eq!(opencode_body["service_tier"].as_str(), Some(tier));
         assert_eq!(opencode_body["max_output_tokens"].as_u64(), Some(20));
         assert_eq!(opencode_body["temperature"].as_f64(), Some(0.0));
+        let parent = scoped("ses_parent_affinity");
+        let scoped_session = scoped(SESSION);
         assert_eq!(
             header(&opencode_result.request.headers, "session-id"),
-            Some("ses_parent_affinity")
+            Some(parent.as_str())
         );
         assert_eq!(
             header(&opencode_result.request.headers, "thread-id"),
-            Some(SESSION)
+            Some(scoped_session.as_str())
         );
         assert_eq!(
             header(&opencode_result.request.headers, "x-client-request-id"),
-            Some(SESSION)
+            Some(scoped_session.as_str())
         );
         assert_attempt_stays_off_the_wire(&opencode_result.request.headers, &opencode_request);
         assert!(!json_body_text(&opencode_result.request.body).contains(&opencode_request));
@@ -667,15 +701,20 @@ async fn service_tier_and_request_identity_follow_both_sources() {
         assert!(pi_body.get("max_output_tokens").is_none());
         assert!(pi_body.get("temperature").is_none());
         assert!(pi_body.get("prompt_cache_retention").is_none());
-        assert_eq!(pi_body["prompt_cache_key"].as_str(), Some(SESSION));
+        let scoped_session = scoped(SESSION);
+        assert_eq!(
+            pi_body["prompt_cache_key"].as_str(),
+            Some(scoped_session.as_str())
+        );
         assert_eq!(
             header(&pi_result.request.headers, "session_id"),
-            Some(SESSION)
+            Some(scoped_session.as_str())
         );
         assert_eq!(
             header(&pi_result.request.headers, "x-client-request-id"),
-            Some(SESSION)
+            Some(scoped_session.as_str())
         );
+        assert!(header(&pi_result.request.headers, "x-stainless-lang").is_some());
         assert!(header(&pi_result.request.headers, "thread-id").is_none());
         assert!(header(&pi_result.request.headers, "session-id").is_none());
         let user_agent = header(&pi_result.request.headers, "user-agent").unwrap_or("");
@@ -695,11 +734,18 @@ async fn service_tier_and_request_identity_follow_both_sources() {
     )
     .await;
     assert!(json_body(&blank.request.body).get("service_tier").is_none());
-    assert_eq!(header(&blank.request.headers, "session-id"), Some(SESSION));
-    assert_eq!(header(&blank.request.headers, "thread-id"), Some(SESSION));
+    let scoped_session = scoped(SESSION);
+    assert_eq!(
+        header(&blank.request.headers, "session-id"),
+        Some(scoped_session.as_str())
+    );
+    assert_eq!(
+        header(&blank.request.headers, "thread-id"),
+        Some(scoped_session.as_str())
+    );
     assert_eq!(
         header(&blank.request.headers, "x-client-request-id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     assert_attempt_stays_off_the_wire(&blank.request.headers, "req_oc_blank");
     let blank_pi = call_with(
@@ -718,11 +764,11 @@ async fn service_tier_and_request_identity_follow_both_sources() {
     );
     assert_eq!(
         json_body(&blank_pi.request.body)["prompt_cache_key"].as_str(),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     assert_eq!(
         header(&blank_pi.request.headers, "x-client-request-id"),
-        Some(SESSION)
+        Some(scoped_session.as_str())
     );
     session.shutdown().await.expect("shutdown");
 }
@@ -834,6 +880,15 @@ async fn same_session_calls_keep_attempt_and_account_apart() {
         matches!(rejected, Err(HarnessError::Protocol)),
         "blank request id started a call"
     );
+    let mut missing_installation = sample_call(ResponsesHarness::OpenCode, TOKEN);
+    missing_installation.installation_id = " ".to_owned();
+    let rejected = session
+        .open_responses(missing_installation, &CancellationToken::new())
+        .await;
+    assert!(
+        matches!(rejected, Err(HarnessError::Protocol)),
+        "blank installation id started a call"
+    );
     assert!(origin.recorded.lock().expect("records").is_empty());
 
     let identity = ResponsesRequestIdentity {
@@ -844,40 +899,46 @@ async fn same_session_calls_keep_attempt_and_account_apart() {
     first.prompt = "prompt-a".to_owned();
     first.identity = identity.clone();
     let parsed_a = complete(&session, first).await;
+    let parent_a = scoped("ses_parent_affinity");
+    let session_a = scoped(SESSION);
     assert_account_token(&parsed_a.request.headers, TOKEN);
     assert_eq!(
         header(&parsed_a.request.headers, "session-id"),
-        Some("ses_parent_affinity")
+        Some(parent_a.as_str())
     );
     assert_eq!(
         header(&parsed_a.request.headers, "thread-id"),
-        Some(SESSION)
+        Some(session_a.as_str())
     );
     assert_eq!(
         header(&parsed_a.request.headers, "x-client-request-id"),
-        Some(SESSION)
+        Some(session_a.as_str())
     );
     assert!(json_body_text(&parsed_a.request.body).contains("prompt-a"));
     assert!(!json_body_text(&parsed_a.request.body).contains("prompt-b"));
     assert_attempt_stays_off_the_wire(&parsed_a.request.headers, "req_attempt_a");
 
     let mut second = sample_call(ResponsesHarness::OpenCode, TOKEN_PI);
+    second.installation_id = "inst_account_b".to_owned();
     second.request_id = "req_attempt_b".to_owned();
     second.prompt = "prompt-b".to_owned();
     second.identity = identity;
     let parsed_b = complete(&session, second).await;
+    let parent_b = account_scoped_id("inst_account_b", "ses_parent_affinity");
+    let session_b = account_scoped_id("inst_account_b", SESSION);
+    assert_ne!(session_a, session_b);
     assert_account_token(&parsed_b.request.headers, TOKEN_PI);
     assert_eq!(
         header(&parsed_b.request.headers, "session-id"),
-        Some("ses_parent_affinity")
+        Some(parent_b.as_str())
     );
     assert_eq!(
         header(&parsed_b.request.headers, "thread-id"),
-        Some(SESSION)
+        Some(session_b.as_str())
     );
     assert_eq!(
         header(&parsed_b.request.headers, "x-client-request-id"),
-        Some(SESSION)
+        Some(session_b.as_str())
     );
     assert!(json_body_text(&parsed_b.request.body).contains("prompt-b"));
     assert!(!json_body_text(&parsed_b.request.body).contains("prompt-a"));
@@ -891,15 +952,15 @@ async fn same_session_calls_keep_attempt_and_account_apart() {
     assert_account_token(&parsed_c.request.headers, TOKEN);
     assert_eq!(
         header(&parsed_c.request.headers, "session_id"),
-        Some(SESSION)
+        Some(session_a.as_str())
     );
     assert_eq!(
         header(&parsed_c.request.headers, "x-client-request-id"),
-        Some(SESSION)
+        Some(session_a.as_str())
     );
     assert_eq!(
         json_body(&parsed_c.request.body)["prompt_cache_key"].as_str(),
-        Some(SESSION)
+        Some(session_a.as_str())
     );
     assert!(json_body_text(&parsed_c.request.body).contains("prompt-c"));
     assert!(!json_body_text(&parsed_c.request.body).contains("prompt-b"));
@@ -1016,7 +1077,8 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     ];
 
     let mut first = sample_call(ResponsesHarness::Pi, TOKEN);
-    first.session_id = scoped_a.clone();
+    first.installation_id = "inst_account_a".to_owned();
+    first.session_id = RAW_SESSION.to_owned();
     first.request_id = "req_scope_a".to_owned();
     first.prompt = "prompt-scope-a".to_owned();
     first.downstream_headers = downstream.clone();
@@ -1026,7 +1088,8 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     assert_attempt_stays_off_the_wire(&parsed_first.request.headers, "req_scope_a");
 
     let mut second = sample_call(ResponsesHarness::Pi, TOKEN);
-    second.session_id = scoped_a.clone();
+    second.installation_id = "inst_account_a".to_owned();
+    second.session_id = RAW_SESSION.to_owned();
     second.request_id = "req_scope_a2".to_owned();
     second.prompt = "prompt-scope-a2".to_owned();
     second.downstream_headers = downstream.clone();
@@ -1037,7 +1100,8 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     assert!(!json_body_text(&parsed_second.request.body).contains("prompt-scope-a\""));
 
     let mut third = sample_call(ResponsesHarness::Pi, TOKEN_PI);
-    third.session_id = scoped_b.clone();
+    third.installation_id = "inst_account_b".to_owned();
+    third.session_id = RAW_SESSION.to_owned();
     third.request_id = "req_scope_b".to_owned();
     third.prompt = "prompt-scope-b".to_owned();
     third.downstream_headers = downstream.clone();
@@ -1050,11 +1114,12 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     );
 
     let mut fourth = sample_call(ResponsesHarness::OpenCode, TOKEN);
-    fourth.session_id = scoped_a.clone();
+    fourth.installation_id = "inst_account_a".to_owned();
+    fourth.session_id = RAW_SESSION.to_owned();
     fourth.request_id = "req_scope_oc".to_owned();
     fourth.prompt = "prompt-scope-oc".to_owned();
     fourth.identity = ResponsesRequestIdentity {
-        session_affinity_id: Some(affinity_a.clone()),
+        session_affinity_id: Some(RAW_PARENT.to_owned()),
     };
     fourth.downstream_headers = downstream;
     let parsed_fourth = complete(&session, fourth).await;
@@ -1205,8 +1270,15 @@ async fn timeout_isolates_the_call_before_the_next_request() {
             header(&records[1].headers, "authorization"),
             Some(bearer_b.as_str())
         );
-        assert_eq!(header(&records[0].headers, "session_id"), Some(SESSION));
-        assert_eq!(header(&records[1].headers, "session_id"), Some(SESSION));
+        let scoped_session = scoped(SESSION);
+        assert_eq!(
+            header(&records[0].headers, "session_id"),
+            Some(scoped_session.as_str())
+        );
+        assert_eq!(
+            header(&records[1].headers, "session_id"),
+            Some(scoped_session.as_str())
+        );
         assert_attempt_stays_off_the_wire(&records[0].headers, "req_attempt_a");
         assert_attempt_stays_off_the_wire(&records[0].headers, "req_attempt_b");
         assert_attempt_stays_off_the_wire(&records[1].headers, "req_attempt_a");

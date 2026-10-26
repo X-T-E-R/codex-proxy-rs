@@ -31,6 +31,7 @@ use crate::harness::{
     exchange::{self, DialPlan},
     protocol::{self, BodyWindow, Hello, HttpRequest},
 };
+use crate::transport::account_scoped_id;
 use crate::transport::client::build_account_http_client;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
@@ -153,7 +154,8 @@ impl HarnessSession {
             return Err(HarnessError::Protocol);
         }
         if call.model.is_empty()
-            || call.session_id.is_empty()
+            || trimmed(Some(call.installation_id.as_str())).is_none()
+            || trimmed(Some(call.session_id.as_str())).is_none()
             || trimmed(Some(call.request_id.as_str())).is_none()
             || call.prompt.is_empty()
             || call.bearer.expose_secret().is_empty()
@@ -380,7 +382,17 @@ async fn drive(
     let window = Arc::new(BodyWindow::new(call.body_window));
     let temperature = call.temperature.and_then(json_temperature);
     let service_tier = trimmed(call.service_tier.as_deref());
-    let session_affinity_id = trimmed(call.identity.session_affinity_id.as_deref());
+    let Some(installation_id) = trimmed(Some(call.installation_id.as_str())) else {
+        return Err(HarnessError::Protocol);
+    };
+    let Some(raw_session) = trimmed(Some(call.session_id.as_str())) else {
+        return Err(HarnessError::Protocol);
+    };
+    let raw_affinity = trimmed(call.identity.session_affinity_id.as_deref());
+    let session_id = account_scoped_id(&installation_id, &raw_session);
+    let session_affinity_id = raw_affinity
+        .as_deref()
+        .map(|raw| account_scoped_id(&installation_id, raw));
     let Some(request_id) = trimmed(Some(call.request_id.as_str())) else {
         return Err(HarnessError::Protocol);
     };
@@ -388,14 +400,14 @@ async fn drive(
     let source_headers = exchange::SourceHeaders {
         pi,
         session_id: if pi {
-            call.session_id.clone()
+            session_id.clone()
         } else {
             session_affinity_id
                 .clone()
-                .unwrap_or_else(|| call.session_id.clone())
+                .unwrap_or_else(|| session_id.clone())
         },
-        thread_id: call.session_id.clone(),
-        client_request_id: call.session_id.clone(),
+        thread_id: session_id.clone(),
+        client_request_id: session_id.clone(),
     };
     let payload = protocol::CallPayload {
         harness: match call.harness {
@@ -404,7 +416,7 @@ async fn drive(
         },
         model: &call.model,
         base_url: &call.base_url,
-        session_id: &call.session_id,
+        session_id: &session_id,
         request_id: &request_id,
         bearer: call.bearer.expose_secret(),
         prompt: &call.prompt,
