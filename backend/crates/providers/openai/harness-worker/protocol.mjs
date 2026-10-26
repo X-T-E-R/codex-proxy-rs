@@ -11,6 +11,8 @@ export const EVENT = 8;
 export const RESULT = 9;
 export const CANCEL = 10;
 export const FAILURE = 11;
+export const EVENT_CREDIT = 12;
+export const EVENT_WAIT = 13;
 
 const MAX_FRAME = 8 * 1024 * 1024;
 

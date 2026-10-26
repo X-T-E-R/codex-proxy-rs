@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -67,4 +67,15 @@ export async function resolve(specifier, context, nextResolve) {
     return nextResolve(specifier, { ...context, parentURL: workerPackage });
   }
   return nextResolve(specifier, context);
+}
+
+const loadLog = process.env.CPR_HARNESS_LOAD_LOG;
+
+export async function load(url, context, nextLoad) {
+  const loaded = await nextLoad(url, context);
+  const file = filePath(url.split("?")[0]);
+  if (loadLog && (under(opencodeRoot, file) || under(piRoot, file))) {
+    appendFileSync(loadLog, `${file}\n`);
+  }
+  return loaded;
 }

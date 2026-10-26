@@ -1,18 +1,24 @@
 //! 固定上游源码的离线请求、SSE 解析、取消和进程回收
 //! 有效 `service_tier` 与原请求会话身份也在这里对照两边真实请求
+//! 超时隔离、失败后的同会话重试、事件窗口、发送核对和源码清单也在这里
 
 use std::{
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
-    process::Command,
-    sync::{Arc, Mutex},
+    process::{Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
 use gateway_core::{account::OutboundProxy, lifecycle::CancellationToken};
 use provider_openai::{
     HarnessError, HarnessEvent, HarnessSession, HarnessWorkerConfig, OPENCODE_SOURCE_COMMIT,
-    PI_SOURCE_COMMIT, ParsedResponses, ResponsesCall, ResponsesHarness, ResponsesRequestIdentity,
+    PI_SOURCE_COMMIT, ParsedResponses, ResponseItem, ResponsesCall, ResponsesHarness,
+    ResponsesRequestIdentity,
 };
 use secrecy::SecretString;
 use serde_json::{Value, json};
@@ -39,9 +45,46 @@ async fn pinned_sources_complete_opencode_and_pi_responses() {
     let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
     assert!(node_at_least(&session.node_version(), 22, 19, 0));
     let sources = session.loaded_sources();
-    assert_eq!(sources.len(), 3);
-    for source in &sources {
-        assert_eq!(source.sha256, file_sha256(&source.path), "{}", source.id);
+    assert!(sources.len() > 3, "loaded {}", sources.len());
+    let manifest = source_manifest();
+    assert_eq!(
+        manifest["opencode_commit"].as_str(),
+        Some(OPENCODE_SOURCE_COMMIT)
+    );
+    assert_eq!(manifest["pi_commit"].as_str(), Some(PI_SOURCE_COMMIT));
+    let files = manifest["files"].as_array().expect("manifest files");
+    assert_eq!(files.len(), sources.len());
+    for required in [
+        "opencode:packages/ai/src/protocols/openai-responses.ts",
+        "opencode:packages/ai/src/llm.ts",
+        "pi:packages/ai/src/api/openai-responses.ts",
+        "pi:packages/ai/src/api/openai-responses-shared.ts",
+    ] {
+        assert!(
+            sources.iter().any(|source| source.id == required),
+            "{required}"
+        );
+    }
+    let hashes = sha256_files(
+        &sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(hashes.len(), sources.len());
+    for (source, digest) in sources.iter().zip(hashes) {
+        let (root, relative) = source.id.split_once(':').expect("source id");
+        let pinned = files
+            .iter()
+            .find(|file| file["root"] == root && file["path"] == relative)
+            .unwrap_or_else(|| panic!("manifest missing {}", source.id));
+        assert_eq!(
+            pinned["sha256"].as_str(),
+            Some(digest.as_str()),
+            "{}",
+            source.id
+        );
+        assert_eq!(source.sha256, digest, "{}", source.id);
     }
 
     let opencode_result = call(&session, ResponsesHarness::OpenCode, TOKEN).await;
@@ -163,10 +206,13 @@ async fn cancel_leaves_no_authorization_holder() {
             .expect("origin did not observe the request");
         cancel.cancel();
     });
-    let error = session
-        .responses(sample_call(ResponsesHarness::Pi, TOKEN), &cancel_call)
-        .await
-        .expect_err("stall should not complete");
+    let error = drive_call(
+        &session,
+        sample_call(ResponsesHarness::Pi, TOKEN),
+        &cancel_call,
+    )
+    .await
+    .expect_err("stall should not complete");
     cancel_task.await.expect("cancel task");
     assert!(matches!(error, HarnessError::Cancelled), "{error}");
     assert_eq!(session.authorization_holders(), 0);
@@ -194,13 +240,13 @@ async fn worker_exit_releases_authorization_holder() {
             .expect("origin did not observe the request");
         kill_pid(pid);
     });
-    let error = session
-        .responses(
-            sample_call(ResponsesHarness::OpenCode, TOKEN),
-            &CancellationToken::new(),
-        )
-        .await
-        .expect_err("killed worker should not complete");
+    let error = drive_call(
+        &session,
+        sample_call(ResponsesHarness::OpenCode, TOKEN),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect_err("killed worker should not complete");
     killer.await.expect("killer");
     assert_eq!(session.authorization_holders(), 0);
     assert!(!session.stderr_snapshot().contains(TOKEN));
@@ -252,13 +298,13 @@ async fn disabled_remote_dial_does_not_leave_authorization() {
     config.dial_loopback = None;
     config.allow_remote_dial = false;
     let session = open_session(config).await;
-    let error = session
-        .responses(
-            sample_call(ResponsesHarness::OpenCode, TOKEN),
-            &CancellationToken::new(),
-        )
-        .await
-        .expect_err("remote dial should fail");
+    let error = drive_call(
+        &session,
+        sample_call(ResponsesHarness::OpenCode, TOKEN),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect_err("remote dial should fail");
     assert!(matches!(error, HarnessError::RemoteDial), "{error}");
     assert_eq!(session.authorization_holders(), 0);
     assert!(!session.stderr_snapshot().contains(TOKEN));
@@ -342,13 +388,15 @@ fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
 }
 
 async fn call(session: &HarnessSession, harness: ResponsesHarness, token: &str) -> ParsedResponses {
-    match session
-        .responses(sample_call(harness, token), &CancellationToken::new())
-        .await
-    {
-        Ok(parsed) => parsed,
-        Err(error) => panic!("{error}; stderr={}", session.stderr_snapshot()),
-    }
+    expect_call(
+        session,
+        drive_call(
+            session,
+            sample_call(harness, token),
+            &CancellationToken::new(),
+        )
+        .await,
+    )
 }
 
 fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
@@ -366,6 +414,7 @@ fn sample_call(harness: ResponsesHarness, token: &str) -> ResponsesCall {
         identity: ResponsesRequestIdentity::default(),
         downstream_headers: Vec::new(),
         body_window: 4096,
+        event_window: 8,
         timeout: Duration::from_secs(90),
     }
 }
@@ -549,10 +598,10 @@ async fn service_tier_and_request_identity_follow_both_sources() {
 }
 
 async fn complete(session: &HarnessSession, call: ResponsesCall) -> ParsedResponses {
-    match session.responses(call, &CancellationToken::new()).await {
-        Ok(parsed) => parsed,
-        Err(error) => panic!("{error}; stderr={}", session.stderr_snapshot()),
-    }
+    expect_call(
+        session,
+        drive_call(session, call, &CancellationToken::new()).await,
+    )
 }
 
 async fn call_with(
@@ -565,9 +614,346 @@ async fn call_with(
     let mut call = sample_call(harness, token);
     call.service_tier = service_tier.map(str::to_owned);
     call.identity = identity;
-    match session.responses(call, &CancellationToken::new()).await {
+    expect_call(
+        session,
+        drive_call(session, call, &CancellationToken::new()).await,
+    )
+}
+
+fn expect_call(
+    session: &HarnessSession,
+    result: Result<ParsedResponses, HarnessError>,
+) -> ParsedResponses {
+    match result {
         Ok(parsed) => parsed,
         Err(error) => panic!("{error}; stderr={}", session.stderr_snapshot()),
+    }
+}
+
+async fn drive_call(
+    session: &HarnessSession,
+    call: ResponsesCall,
+    cancel: &CancellationToken,
+) -> Result<ParsedResponses, HarnessError> {
+    let mut stream = session.open_responses(call, cancel).await?;
+    let mut request = None;
+    let mut events = Vec::new();
+    loop {
+        match stream.next().await? {
+            ResponseItem::Request(value) => request = Some(value),
+            ResponseItem::Event(event) => events.push(event),
+            ResponseItem::Done(done) => {
+                return Ok(ParsedResponses {
+                    request: request.ok_or(HarnessError::Protocol)?,
+                    events,
+                    credit_waits: done.credit_waits,
+                    event_waits: done.event_waits,
+                });
+            }
+        }
+    }
+}
+
+fn source_manifest() -> Value {
+    serde_json::from_str(include_str!("../../harness-worker/source-manifest.json"))
+        .expect("source manifest")
+}
+
+fn sha256_files(paths: &[PathBuf]) -> Vec<String> {
+    let mut child = Command::new(node_binary())
+        .arg("-e")
+        .arg("const fs=require('node:fs');const crypto=require('node:crypto');const data=fs.readFileSync(0,'utf8');for (const line of data.split(/\\r?\\n/)) { if (!line) continue; process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(line)).digest('hex')+'\\n'); }")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("hash sources");
+    {
+        let stdin = child.stdin.as_mut().expect("hash stdin");
+        for path in paths {
+            writeln!(stdin, "{}", path.display()).expect("hash path");
+        }
+    }
+    let output = child.wait_with_output().expect("hash sources");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("utf8")
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn timeout_isolates_the_call_before_the_next_request() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::HoldFirst).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let mut first = sample_call(ResponsesHarness::Pi, TOKEN);
+    first.prompt = "prompt-a".to_owned();
+    first.timeout = Duration::from_secs(5);
+    let mut stream = session
+        .open_responses(first, &CancellationToken::new())
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if !origin.recorded.lock().expect("records").is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("origin did not see the first request");
+    let error = timeout(Duration::from_secs(20), async {
+        loop {
+            match stream.next().await {
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
+    })
+    .await
+    .expect("timed out call did not finish");
+    assert!(matches!(error, HarnessError::Timeout), "{error}");
+    assert_eq!(session.authorization_holders(), 0);
+    assert!(!session.stderr_snapshot().contains(TOKEN));
+    drop(stream);
+
+    {
+        let mut second = sample_call(ResponsesHarness::Pi, TOKEN_PI);
+        second.prompt = "prompt-b".to_owned();
+        let cancel_second = CancellationToken::new();
+        let second_call = drive_call(&session, second, &cancel_second);
+        tokio::pin!(second_call);
+        let mut released = false;
+        let outcome = timeout(Duration::from_secs(30), async {
+            loop {
+                if !released && origin.recorded.lock().expect("records").len() >= 2 {
+                    origin.release.notify_one();
+                    released = true;
+                }
+                tokio::select! {
+                    biased;
+                    result = &mut second_call => return result,
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("second call hung");
+        assert!(
+            released,
+            "second request was not sent before the late release"
+        );
+        let parsed =
+            outcome.unwrap_or_else(|error| panic!("{error}; stderr={}", session.stderr_snapshot()));
+        let body = String::from_utf8_lossy(&parsed.request.body);
+        assert!(body.contains("prompt-b"), "{body}");
+        assert!(!body.contains("prompt-a"), "{body}");
+        let bearer_a = format!("Bearer {TOKEN}");
+        let bearer_b = format!("Bearer {TOKEN_PI}");
+        assert_eq!(
+            header(&parsed.request.headers, "authorization"),
+            Some(bearer_b.as_str())
+        );
+        assert_eq!(
+            done_event(&parsed.events).response_id.as_deref(),
+            Some("resp_bridge")
+        );
+        let rendered = format!("{parsed:?}");
+        assert!(!rendered.contains("resp_late_a"), "{rendered}");
+        let records = origin.recorded.lock().expect("records").clone();
+        assert!(records.len() >= 2, "records={}", records.len());
+        assert!(String::from_utf8_lossy(&records[0].body).contains("prompt-a"));
+        assert_eq!(
+            header(&records[0].headers, "authorization"),
+            Some(bearer_a.as_str())
+        );
+        assert!(String::from_utf8_lossy(&records[1].body).contains("prompt-b"));
+        assert!(!String::from_utf8_lossy(&records[1].body).contains("prompt-a"));
+        assert_eq!(
+            header(&records[1].headers, "authorization"),
+            Some(bearer_b.as_str())
+        );
+        assert_clean(&session, TOKEN);
+        assert_clean(&session, TOKEN_PI);
+    }
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn upstream_failure_allows_another_call_on_the_same_session() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::DropFirst).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let started = std::time::Instant::now();
+    let error = timeout(
+        Duration::from_secs(20),
+        drive_call(
+            &session,
+            sample_call(ResponsesHarness::OpenCode, TOKEN),
+            &CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("failed upstream hung")
+    .expect_err("dropped upstream should fail");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "elapsed {:?}",
+        started.elapsed()
+    );
+    assert!(
+        matches!(error, HarnessError::Worker { .. } | HarnessError::Upstream),
+        "{error}"
+    );
+    assert_eq!(session.authorization_holders(), 0);
+    let parsed = call(&session, ResponsesHarness::OpenCode, TOKEN).await;
+    assert_contract(&parsed, false);
+    assert_eq!(
+        tool_event(&parsed.events).id.as_deref(),
+        Some("call_bridge")
+    );
+    assert_clean(&session, TOKEN);
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn event_window_waits_until_the_caller_pulls() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let mut limited = sample_call(ResponsesHarness::OpenCode, TOKEN);
+    limited.event_window = 1;
+    let cancel = CancellationToken::new();
+    let mut stream = session
+        .open_responses(limited, &cancel)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    timeout(Duration::from_secs(30), async {
+        loop {
+            if session.event_waits() >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("event window did not wait");
+    cancel.cancel();
+    let mut events = 0usize;
+    let error = timeout(Duration::from_secs(20), async {
+        loop {
+            match stream.next().await {
+                Ok(ResponseItem::Event(_)) => events += 1,
+                Ok(_) => {}
+                Err(error) => return error,
+            }
+        }
+    })
+    .await
+    .expect("cancel did not finish the waiting call");
+    assert!(matches!(error, HarnessError::Cancelled), "{error}");
+    assert!(events <= 3, "buffered events={events}");
+    assert_eq!(session.authorization_holders(), 0);
+    let parsed = call(&session, ResponsesHarness::OpenCode, TOKEN).await;
+    assert_contract(&parsed, false);
+    assert!(parsed.events.len() > 3, "events={}", parsed.events.len());
+    assert_clean(&session, TOKEN);
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn upstream_permit_rejects_other_hosts_and_conflicting_auth() {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .expect("bind permit listener");
+    let addr = listener.local_addr().expect("permit addr");
+    let (opencode, pi) = checkouts();
+    let session = open_session(worker_config(&opencode, &pi, addr, None)).await;
+    let cases = [
+        ("https://evil.example/v1", Vec::new()),
+        ("https://api.openai.com.evil.example/v1", Vec::new()),
+        ("http://api.openai.com/v1", Vec::new()),
+        (
+            "https://api.openai.com/v1",
+            vec![
+                ("x-api-key".to_owned(), "sk-conflict-header".to_owned()),
+                ("api-key".to_owned(), "second-auth".to_owned()),
+            ],
+        ),
+    ];
+    for (base_url, headers) in cases {
+        let mut call = sample_call(ResponsesHarness::OpenCode, TOKEN);
+        call.base_url = base_url.to_owned();
+        call.downstream_headers = headers;
+        call.timeout = Duration::from_secs(20);
+        let error = drive_call(&session, call, &CancellationToken::new())
+            .await
+            .expect_err(base_url);
+        assert!(
+            matches!(error, HarnessError::RemoteDial),
+            "{base_url}: {error}"
+        );
+        assert!(
+            timeout(Duration::from_millis(300), listener.accept())
+                .await
+                .is_err(),
+            "{base_url} dialed the test listener"
+        );
+        assert_eq!(session.authorization_holders(), 0);
+        assert!(!session.stderr_snapshot().contains(TOKEN));
+        assert!(!error.to_string().contains(TOKEN));
+    }
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn drifted_checkout_is_rejected() {
+    let (opencode, pi) = checkouts();
+    let manifest = source_manifest();
+    let files = manifest["files"].as_array().expect("manifest files");
+    let opencode_dir = tempfile::tempdir().expect("opencode copy");
+    let pi_dir = tempfile::tempdir().expect("pi copy");
+    copy_manifest_files(files, "opencode", &opencode, opencode_dir.path());
+    copy_manifest_files(files, "pi", &pi, pi_dir.path());
+    let target = pi_dir
+        .path()
+        .join("packages/ai/src/api/openai-responses.ts");
+    let mut bytes = std::fs::read(&target).expect("read pinned pi source");
+    bytes.push(b'\n');
+    std::fs::write(&target, bytes).expect("drift pinned pi source");
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let config = worker_config(opencode_dir.path(), pi_dir.path(), origin.addr, None);
+    match HarnessSession::open(config).await {
+        Ok(session) => {
+            let stderr = session.stderr_snapshot();
+            let _ = session.shutdown().await;
+            panic!("drifted checkout started a session: {stderr}");
+        }
+        Err(error) => {
+            assert!(matches!(error, HarnessError::Source), "{error}");
+            assert!(!error.to_string().contains(TOKEN));
+        }
+    }
+    assert!(origin.recorded.lock().expect("records").is_empty());
+}
+
+fn copy_manifest_files(files: &[Value], root_name: &str, source: &Path, dest: &Path) {
+    for file in files {
+        if file["root"].as_str() != Some(root_name) {
+            continue;
+        }
+        let relative = file["path"].as_str().expect("manifest path");
+        let from = source.join(relative);
+        let to = dest.join(relative);
+        std::fs::create_dir_all(to.parent().expect("parent")).expect("create source dir");
+        std::fs::copy(&from, &to).unwrap_or_else(|error| panic!("copy {relative}: {error}"));
     }
 }
 
@@ -646,21 +1032,6 @@ fn git_head(path: &Path) -> String {
         .to_owned()
 }
 
-fn file_sha256(path: &Path) -> String {
-    let output = Command::new(node_binary())
-        .arg("-e")
-        .arg("const fs=require('node:fs');const crypto=require('node:crypto');process.stdout.write(crypto.createHash('sha256').update(fs.readFileSync(process.argv[1])).digest('hex'))")
-        .arg(path)
-        .output()
-        .expect("hash source");
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("utf8")
-}
-
 fn node_at_least(version: &str, major: u64, minor: u64, patch: u64) -> bool {
     let mut parts = version.trim().trim_start_matches('v').split('.');
     let parsed = (
@@ -715,17 +1086,22 @@ fn kill_pid(pid: u32) {
 enum OriginMode {
     Sse,
     Stall,
+    HoldFirst,
+    DropFirst,
 }
 
 struct Origin {
     addr: SocketAddr,
     seen: Arc<Notify>,
     disconnected: Arc<Notify>,
+    release: Arc<Notify>,
     recorded: Arc<Mutex<Vec<RecordedRequest>>>,
 }
 
+#[derive(Clone)]
 struct RecordedRequest {
     headers: Vec<(String, String)>,
+    body: Vec<u8>,
 }
 
 impl Origin {
@@ -736,10 +1112,13 @@ impl Origin {
         let addr = listener.local_addr().expect("origin addr");
         let seen = Arc::new(Notify::new());
         let disconnected = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
         let recorded = Arc::new(Mutex::new(Vec::new()));
         let seen_task = Arc::clone(&seen);
         let disconnected_task = Arc::clone(&disconnected);
+        let release_task = Arc::clone(&release);
         let recorded_task = Arc::clone(&recorded);
+        let arrivals = Arc::new(AtomicUsize::new(0));
         tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else {
@@ -747,13 +1126,17 @@ impl Origin {
                 };
                 let seen_task = Arc::clone(&seen_task);
                 let disconnected_task = Arc::clone(&disconnected_task);
+                let release_task = Arc::clone(&release_task);
                 let recorded_task = Arc::clone(&recorded_task);
+                let arrivals = Arc::clone(&arrivals);
                 tokio::spawn(handle_origin(
                     socket,
                     mode,
                     seen_task,
                     disconnected_task,
+                    release_task,
                     recorded_task,
+                    arrivals,
                 ));
             }
         });
@@ -761,6 +1144,7 @@ impl Origin {
             addr,
             seen,
             disconnected,
+            release,
             recorded,
         }
     }
@@ -780,25 +1164,22 @@ async fn handle_origin(
     mode: OriginMode,
     seen: Arc<Notify>,
     disconnected: Arc<Notify>,
+    release: Arc<Notify>,
     recorded: Arc<Mutex<Vec<RecordedRequest>>>,
+    arrivals: Arc<AtomicUsize>,
 ) {
     let Ok(message) = read_http_request(&mut socket).await else {
         return;
     };
+    let arrival = arrivals.fetch_add(1, Ordering::SeqCst);
     recorded.lock().expect("records").push(RecordedRequest {
         headers: message.headers,
+        body: message.body,
     });
     match mode {
         OriginMode::Sse => {
             seen.notify_one();
-            let body = sse_body();
-            let header = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = socket.write_all(header.as_bytes()).await;
-            let _ = socket.write_all(&body).await;
-            let _ = socket.shutdown().await;
+            write_sse(&mut socket).await;
         }
         OriginMode::Stall => {
             let _ = socket
@@ -809,7 +1190,54 @@ async fn handle_origin(
             let _ = socket.read(&mut buffer).await;
             disconnected.notify_one();
         }
+        OriginMode::HoldFirst if arrival == 0 => {
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
+                .await;
+            seen.notify_one();
+            let mut buffer = [0; 8];
+            tokio::select! {
+                _ = release.notified() => {
+                    let _ = socket.write_all(late_sse().as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                }
+                _ = socket.read(&mut buffer) => {}
+            }
+            disconnected.notify_one();
+        }
+        OriginMode::DropFirst if arrival == 0 => {
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
+                .await;
+            seen.notify_one();
+            drop(socket);
+            disconnected.notify_one();
+        }
+        OriginMode::HoldFirst => {
+            seen.notify_one();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            write_sse(&mut socket).await;
+        }
+        OriginMode::DropFirst => {
+            seen.notify_one();
+            write_sse(&mut socket).await;
+        }
     }
+}
+
+async fn write_sse(socket: &mut TcpStream) {
+    let body = sse_body();
+    let header = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = socket.write_all(header.as_bytes()).await;
+    let _ = socket.write_all(&body).await;
+    let _ = socket.shutdown().await;
+}
+
+fn late_sse() -> String {
+    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_late_a\",\"status\":\"completed\",\"output\":[]}}\n\n".to_owned()
 }
 
 struct Proxy {

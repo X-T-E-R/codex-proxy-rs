@@ -37,7 +37,8 @@ pub use config::{OpenAiConfig, OpenAiConfigError};
 pub use harness::{
     HarnessError, HarnessEvent, HarnessSession, HarnessWorkerConfig, LoadedSource,
     MINIMUM_NODE_VERSION, OPENCODE_SOURCE_COMMIT, ObservedUpstreamRequest, PI_SOURCE_COMMIT,
-    ParsedResponses, ResponsesCall, ResponsesHarness, ResponsesRequestIdentity,
+    ParsedResponses, ResponseDone, ResponseItem, ResponseStream, ResponsesCall, ResponsesHarness,
+    ResponsesRequestIdentity,
 };
 #[doc(hidden)]
 pub use jitter::{

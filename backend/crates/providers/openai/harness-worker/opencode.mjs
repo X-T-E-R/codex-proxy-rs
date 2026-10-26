@@ -24,7 +24,13 @@ function responseId(metadata) {
 function project(event) {
   const type = event?.type;
   if (type === "tool-call" || type === "tool-input-error") {
-    return { kind: "tool", type, id: event.id ?? null, name: event.name ?? null };
+    return {
+      kind: "tool",
+      type,
+      id: event.id ?? null,
+      name: event.name ?? null,
+      arguments: event.input ?? event.arguments,
+    };
   }
   if (type === "finish" || type === "step-finish") {
     return {
@@ -32,12 +38,14 @@ function project(event) {
       type,
       finish: event.reason?.normalized ?? null,
       response_id: responseId(event.providerMetadata),
+      usage: event.usage,
+      text: event.text,
     };
   }
-  return type ? { kind: "trace", type } : null;
+  return type ? { kind: "trace", type, text: event.delta ?? event.text } : null;
 }
 
-export async function runOpenCode(input, emit, signal) {
+export async function runOpenCode(input, emit, signal, callId) {
   const root = process.env.CPR_HARNESS_OPENCODE_ROOT;
   const ai = "packages/ai/src";
   const responses = await import(source(root, `${ai}/protocols/openai-responses.ts`));
@@ -86,12 +94,16 @@ export async function runOpenCode(input, emit, signal) {
           headers.push([name, value]);
         });
         const response = yield* Effect.promise(() =>
-          managedFetch(web.url, {
-            method: web.method,
-            headers,
-            body: bytes,
-            signal,
-          }),
+          managedFetch(
+            web.url,
+            {
+              method: web.method,
+              headers,
+              body: bytes,
+              signal,
+            },
+            callId,
+          ),
         );
         return HttpClientResponse.fromWeb(httpRequest, response);
       }),
@@ -101,9 +113,9 @@ export async function runOpenCode(input, emit, signal) {
   const llmClientLayer = client.LLMClient.layer.pipe(Layer.provide(requestExecutorLayer));
   const runtime = Layer.mergeAll(requestExecutorLayer, llmClientLayer);
   const program = Stream.runForEach(client.LLMClient.stream(request), (event) =>
-    Effect.sync(() => {
+    Effect.promise(async () => {
       const projected = project(event);
-      if (projected) emit(projected);
+      if (projected) await emit(projected);
     }),
   ).pipe(Effect.provide(runtime));
   const fiber = Effect.runFork(program);

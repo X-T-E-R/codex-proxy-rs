@@ -9,9 +9,11 @@ mod exchange;
 mod process;
 mod protocol;
 
-pub use process::HarnessSession;
+pub use process::{HarnessSession, ResponseStream};
 
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
+
+use serde_json::Value;
 
 use gateway_core::account::OutboundProxy;
 use secrecy::SecretString;
@@ -20,7 +22,7 @@ pub const OPENCODE_SOURCE_COMMIT: &str = "ab4d1f3ab1a05278b4d0392124b9e7f1c8131f
 pub const PI_SOURCE_COMMIT: &str = "f9daca3480732d0042b1df3a6e27221f597a620d";
 pub const MINIMUM_NODE_VERSION: (u64, u64, u64) = (22, 19, 0);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum HarnessError {
     #[error("harness node process failed to start")]
     Spawn,
@@ -92,11 +94,14 @@ pub struct ResponsesCall {
     /// 下游原请求头
     /// 只去掉 `authorization` 与 `cf-aig-authorization`，其余交给源库
     pub downstream_headers: Vec<(String, String)>,
+    /// 当前文本轮次，历史和工具轮次在这个结构上追加
     pub prompt: String,
     pub instructions: Option<String>,
     pub max_output_tokens: Option<u64>,
     pub temperature: Option<f64>,
     pub body_window: usize,
+    /// 调用方尚未取走的事件上限，worker 在该窗口耗尽时等待
+    pub event_window: usize,
     pub timeout: Duration,
 }
 
@@ -128,6 +133,21 @@ pub struct HarnessEvent {
     pub name: Option<String>,
     pub finish: Option<String>,
     pub response_id: Option<String>,
+    /// 源事件原文，后续字段从这里读取
+    pub payload: Value,
+}
+
+#[derive(Debug)]
+pub enum ResponseItem {
+    Request(ObservedUpstreamRequest),
+    Event(HarnessEvent),
+    Done(ResponseDone),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResponseDone {
+    pub credit_waits: usize,
+    pub event_waits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +162,7 @@ pub struct ParsedResponses {
     pub request: ObservedUpstreamRequest,
     pub events: Vec<HarnessEvent>,
     pub credit_waits: usize,
+    pub event_waits: usize,
 }
 
 fn redacted_headers(headers: &[(String, String)]) -> Vec<(String, String)> {

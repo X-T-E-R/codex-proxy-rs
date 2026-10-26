@@ -23,6 +23,10 @@ pub(crate) const EVENT: u8 = 8;
 pub(crate) const RESULT: u8 = 9;
 pub(crate) const CANCEL: u8 = 10;
 pub(crate) const FAILURE: u8 = 11;
+pub(crate) const EVENT_CREDIT: u8 = 12;
+pub(crate) const EVENT_WAIT: u8 = 13;
+pub(crate) const BODY_FIN: u8 = 1;
+pub(crate) const BODY_FAILED: u8 = 2;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -51,28 +55,21 @@ pub(crate) struct HttpRequest {
     pub(crate) url: String,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body_base64: String,
+    #[serde(default)]
+    pub(crate) call_id: u32,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct Credit {
     pub(crate) bytes: usize,
+    #[serde(default)]
+    pub(crate) call_id: u32,
 }
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WorkerFailure {
     pub(crate) cancelled: bool,
     pub(crate) message: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct WorkerEvent {
-    pub(crate) kind: String,
-    #[serde(rename = "type")]
-    pub(crate) event_type: Option<String>,
-    pub(crate) id: Option<String>,
-    pub(crate) name: Option<String>,
-    pub(crate) finish: Option<String>,
-    pub(crate) response_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -98,6 +95,7 @@ pub(crate) struct CallPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_request_id: Option<&'a str>,
     pub(crate) downstream_headers: &'a [(String, String)],
+    pub(crate) event_window: usize,
 }
 
 pub(crate) struct BodyWindow {

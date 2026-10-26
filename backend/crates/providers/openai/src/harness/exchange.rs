@@ -1,6 +1,7 @@
 //! 把 worker 交出的上游请求送到账号 HTTP 客户端
 //!
 //! 认证头只活在这一次发送里，连接中断或任务结束时随请求值一起释放
+//! 发送前核对原始 URL 和唯一账号认证头，回环改写发生在核对之后
 
 use std::{
     net::SocketAddr,
@@ -76,7 +77,13 @@ pub(crate) async fn forward(
     observed: &ObservedUpstreamRequest,
     dial: &DialPlan,
     http_id: u32,
+    bearer: &str,
 ) -> Result<(), HarnessError> {
+    if let Err(error) = permit_upstream(observed, bearer) {
+        io.remote_refusal.store(1, Ordering::SeqCst);
+        let _ = send_head(io.stdin, http_id, 0, &[]).await;
+        return Err(error);
+    }
     let target = match dial_url(&observed.url, dial) {
         Ok(target) => target,
         Err(error) => {
@@ -121,27 +128,84 @@ pub(crate) async fn forward(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("text/event-stream");
-    send_head(
+    if send_head(
         io.stdin,
         http_id,
         status,
         &[(String::from("content-type"), content_type.to_owned())],
     )
-    .await?;
+    .await
+    .is_err()
+    {
+        return Err(HarnessError::Upstream);
+    }
     let mut stream = response.bytes_stream();
     loop {
         let next = tokio::select! {
             biased;
-            _ = io.cancel.cancelled() => return Err(HarnessError::Cancelled),
+            _ = io.cancel.cancelled() => {
+                let _ = fail_body(io.stdin, http_id).await;
+                return Err(HarnessError::Cancelled);
+            }
             next = stream.next() => next,
         };
         let Some(next) = next else {
             break;
         };
-        let chunk = next.map_err(|_| HarnessError::Upstream)?;
-        write_chunk(io.stdin, http_id, io.window, io.cancel, &chunk, false).await?;
+        let chunk = match next {
+            Ok(chunk) => chunk,
+            Err(_) => {
+                let _ = fail_body(io.stdin, http_id).await;
+                return Err(HarnessError::Upstream);
+            }
+        };
+        if let Err(error) =
+            write_chunk(io.stdin, http_id, io.window, io.cancel, &chunk, false).await
+        {
+            let _ = fail_body(io.stdin, http_id).await;
+            return Err(error);
+        }
     }
     write_chunk(io.stdin, http_id, io.window, io.cancel, &Bytes::new(), true).await
+}
+
+fn permit_upstream(observed: &ObservedUpstreamRequest, bearer: &str) -> Result<(), HarnessError> {
+    let url = Url::parse(&observed.url).map_err(|_| HarnessError::RemoteDial)?;
+    let path = url.path();
+    if url.scheme() != "https"
+        || url.host_str() != Some("api.openai.com")
+        || !(path == "/v1" || path.starts_with("/v1/"))
+    {
+        return Err(HarnessError::RemoteDial);
+    }
+    let expected = format!("Bearer {bearer}");
+    let mut authorizations = 0;
+    for (name, value) in &observed.headers {
+        if !is_auth_header(name) {
+            continue;
+        }
+        if !name.eq_ignore_ascii_case("authorization") || value != &expected {
+            return Err(HarnessError::RemoteDial);
+        }
+        authorizations += 1;
+    }
+    if authorizations != 1 {
+        Err(HarnessError::RemoteDial)
+    } else {
+        Ok(())
+    }
+}
+
+fn is_auth_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "cf-aig-authorization"
+            | "x-api-key"
+            | "api-key"
+            | "proxy-authorization"
+            | "x-openai-actor-authorization"
+    )
 }
 
 fn hop(name: &str) -> bool {
@@ -200,6 +264,19 @@ async fn send_head(
     .await
 }
 
+async fn fail_body(
+    stdin: &tokio::sync::Mutex<ChildStdin>,
+    http_id: u32,
+) -> Result<(), HarnessError> {
+    protocol::write_frame(
+        stdin,
+        protocol::HTTP_BODY,
+        http_id,
+        &[protocol::BODY_FIN | protocol::BODY_FAILED],
+    )
+    .await
+}
+
 async fn write_chunk(
     stdin: &tokio::sync::Mutex<ChildStdin>,
     http_id: u32,
@@ -222,7 +299,7 @@ async fn write_chunk(
         let end = offset + room.min(chunk.len() - offset);
         let mut payload = Vec::with_capacity(1 + end - offset);
         let last = fin && end == chunk.len();
-        payload.push(u8::from(last));
+        payload.push(if last { protocol::BODY_FIN } else { 0 });
         payload.extend_from_slice(&chunk[offset..end]);
         protocol::write_frame(stdin, protocol::HTTP_BODY, http_id, &payload).await?;
         offset = end;

@@ -508,6 +508,16 @@ OpenCode route 的默认 transport 是 WebSocket。这条路径改用同一协�
 
 pi 的 `apiKey` 是调用方传入的账号访问令牌。令牌不以 `sk-` 开头时源码省略 `max_output_tokens`、`temperature` 和长缓存字段，仍写入 `service_tier`；以 `sk-` 开头时保留这些字段。下游 `authorization` 与 `cf-aig-authorization` 不进入源库，其他下游头保留。桥不用占位 `unused` 或下游 API key 代替账号令牌。
 
+一次调用超时或取消后，桥取消该次 worker 调用和它已经发出的上游流，并等到该次调用的帧结束，才允许同一会话开始下一次调用。旧调用没有在限时内结束时，桥重启 worker。下一次调用不读取上一轮的帧、流或令牌。
+
+事件按调用方给出的窗口交付。窗口耗尽时 worker 等待，调用方取走一条事件后才继续，取消会打断这次等待。响应体窗口只限制尚未消费的响应字节，不代替事件窗口。调用方通过响应流逐条取走事件，桥不在内存里累计整次响应。
+
+发往上游之前，Rust 核对原始 URL 的协议是 `https`、主机是 `api.openai.com`，路径是 `/v1` 或以 `/v1/` 开头，并且请求里恰好有一个值为该次账号令牌的 `Authorization`。其他认证头或重复的认证头会拒绝发送。测试回环地址只在这道核对通过之后替换目标。
+
+worker 启动时报告实际加载的源码文件。Rust 用仓库里的 `source-manifest.json` 核对 OpenCode 与 pi 的提交，以及每个加载文件的路径和 sha256。文件不在清单中或内容不一致时拒绝启动。清单包含这条路径会动态导入的源码，不只是入口文件。
+
+当前调用携带一轮文本提示。事件保留源码给出的原文，历史、工具参数、reasoning 和 usage 仍从该原文读取，完整接入不更换调用入口。
+
 账号选择、凭据事务、管理端和发行镜像都还没有调用该 worker。运行需要 Node.js 22.19.0 或更高版本，以及 worker 目录里按锁文件安装的 `effect`、`openai`、`partial-json`。`runtime` 与 `runtime-prebuilt` 镜像不包含 Node.js 和该 worker。
 
 ### 后台账号导入
