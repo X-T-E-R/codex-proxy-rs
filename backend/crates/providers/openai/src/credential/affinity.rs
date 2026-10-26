@@ -1,4 +1,7 @@
 //! 逻辑会话账号绑定与线程传输隔离键的单向派生
+//!
+//! 旧 Codex 键只含客户端 API Key 与原会话
+//! OpenCode 与 pi 在同一材料后追加各自认证种类，不使用 installation_id 或安装级 host/device ID
 
 use gateway_core::operation::RawJsonPayload;
 use gateway_core::policy::ClientApiKeyId;
@@ -11,6 +14,49 @@ use crate::transport::protocol::responses::CodexResponsesRequest;
 use crate::transport::request::derive_conversation_anchor;
 
 const AFFINITY_KEY_HASH_LENGTH: usize = 12;
+
+/// 同一客户端会话在不同 OpenAI 授权上的选号域
+///
+/// `ProviderDefault` 保持既有 Codex 与 API Key 池，不改变已有亲和键
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenAiSelectionDomain {
+    ProviderDefault,
+    OpenCode,
+    Pi,
+}
+
+impl OpenAiSelectionDomain {
+    #[must_use]
+    pub fn from_authentication_kind(kind: &str) -> Option<Self> {
+        match kind {
+            super::types::CODEX_AUTHENTICATION_KIND_OAUTH => Some(Self::ProviderDefault),
+            super::types::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING => Some(Self::OpenCode),
+            super::types::CODEX_AUTHENTICATION_KIND_PI_OPENAI => Some(Self::Pi),
+            _ => None,
+        }
+    }
+
+    /// `requires_oauth` 只收紧旧池；OpenCode 与 pi 只接受自己的认证种类
+    #[must_use]
+    pub fn admits(self, kind: &str, requires_oauth: bool) -> bool {
+        match self {
+            Self::ProviderDefault => {
+                !super::harness_oauth::is_harness_kind(kind)
+                    && (!requires_oauth || kind == super::types::CODEX_AUTHENTICATION_KIND_OAUTH)
+            }
+            Self::OpenCode => kind == super::types::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+            Self::Pi => kind == super::types::CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+        }
+    }
+
+    fn affinity_label(self) -> Option<&'static str> {
+        match self {
+            Self::ProviderDefault => None,
+            Self::OpenCode => Some(super::types::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING),
+            Self::Pi => Some(super::types::CODEX_AUTHENTICATION_KIND_PI_OPENAI),
+        }
+    }
+}
 
 /// 一次请求派生出的账号亲和键及其结构化日志上下文
 pub(crate) struct CodexSessionAffinity {
@@ -133,8 +179,27 @@ pub(crate) fn derive_codex_session_affinity(
         session_id.to_owned(),
         Some(session_id.to_owned()),
         client_api_key_id,
+        OpenAiSelectionDomain::ProviderDefault,
     )
     .map(|affinity| affinity.with_follow_only(request.client_account_follow_only))
+}
+
+/// 与 [`derive_codex_session_affinity`] 使用同一原会话材料，并按选号域分开绑定
+#[must_use]
+pub fn open_ai_client_session_key(
+    client_api_key_id: &ClientApiKeyId,
+    session_id: &str,
+    domain: OpenAiSelectionDomain,
+) -> Option<ProviderSessionAffinityKey> {
+    let session_id = non_empty(Some(session_id))?.to_owned();
+    session_affinity(
+        "root-session",
+        session_id.clone(),
+        Some(session_id),
+        client_api_key_id,
+        domain,
+    )
+    .map(CodexSessionAffinity::into_key)
 }
 
 /// 原生 JSON 端点与 Responses 共用绑定命名空间，Search id 是逻辑会话身份
@@ -162,6 +227,7 @@ pub(crate) fn derive_endpoint_affinity_with_headers(
         session_id.clone(),
         Some(session_id),
         client_api_key_id,
+        OpenAiSelectionDomain::ProviderDefault,
     )
     .map(|affinity| {
         affinity.with_follow_only(follows_session_with_headers(
@@ -198,6 +264,7 @@ pub(crate) fn derive_live_session_affinity(
         session_id.clone(),
         Some(session_id),
         client_api_key_id,
+        OpenAiSelectionDomain::ProviderDefault,
     )
     .map(|affinity| {
         affinity.with_follow_only(follows_session_with_headers(
@@ -216,7 +283,14 @@ pub(crate) fn derive_codex_transport_key(
     let (source, anchor) = non_empty(request.client_thread_id.as_deref())
         .map(|thread| ("thread-transport", thread.to_owned()))
         .or_else(|| derive_conversation_anchor(request))?;
-    session_affinity(source, anchor, None, client_api_key_id).map(CodexSessionAffinity::into_key)
+    session_affinity(
+        source,
+        anchor,
+        None,
+        client_api_key_id,
+        OpenAiSelectionDomain::ProviderDefault,
+    )
+    .map(CodexSessionAffinity::into_key)
 }
 
 fn session_affinity(
@@ -224,16 +298,20 @@ fn session_affinity(
     anchor: String,
     session_id: Option<String>,
     client_api_key_id: &ClientApiKeyId,
+    domain: OpenAiSelectionDomain,
 ) -> Option<CodexSessionAffinity> {
     let session_key = opaque_affinity_key(anchor_source, &anchor)?;
-    let key = opaque_affinity_key(
-        "client-session",
-        &format!(
-            "{}\0{}",
-            client_api_key_id.as_str(),
-            session_key.expose_to_store()
-        ),
-    )?;
+    let mut material = format!(
+        "{}\0{}",
+        client_api_key_id.as_str(),
+        session_key.expose_to_store()
+    );
+    // 旧域不追加后缀，避免改写已经写入 Redis 的 Codex 绑定
+    if let Some(label) = domain.affinity_label() {
+        material.push('\0');
+        material.push_str(label);
+    }
+    let key = opaque_affinity_key("client-session", &material)?;
     let key_hash = short_key_hash(&key);
     Some(CodexSessionAffinity {
         key,

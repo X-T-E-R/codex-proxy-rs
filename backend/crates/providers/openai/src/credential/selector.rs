@@ -1,4 +1,6 @@
 //! AttemptContext 驱动的 Codex 账号选择与 Redis lease port
+//!
+//! 选号域把 OpenCode 与 pi 从旧 Codex、Grok、图片、搜索和 live 池分开
 
 use std::collections::HashMap;
 use std::fmt;
@@ -14,7 +16,7 @@ use gateway_core::account::{
     AccountErrorReason, AccountFeedbackStats, AccountModelAccessMode, AccountRuntimeSignals,
     AccountSchedulingBlocker, AccountSelectionContext, AccountSelectionPolicy, AccountSelector,
     AccountStatus, CredentialState, PreferredAccountSelection, ProviderAccount, ProviderAccountId,
-    QuotaEvidence,
+    ProviderAccountStore, QuotaEvidence,
 };
 use gateway_core::concurrency::{CapacityWait, ConcurrencyWaitQueue, QueueRejection, WaitPriority};
 use gateway_core::engine::{AttemptContext, ContinuationAttempt, policy::AccountPolicyError};
@@ -29,12 +31,13 @@ use secrecy::ExposeSecret;
 use thiserror::Error;
 use url::Url;
 
-use super::affinity::CodexSessionAffinity;
+use super::affinity::{CodexSessionAffinity, OpenAiSelectionDomain};
 use super::cookie::CodexCookiePolicy;
+use super::harness_oauth::is_harness_kind;
 use super::quota::CodexCredentialQuotaService;
 use super::refresh::refresh_recovery_deadline;
 use super::repository::{CodexCredentialRepository, CredentialRepositoryError};
-use super::security::CodexRuntimeAuthentication;
+use super::security::{CodexCredentialCodec, CodexRuntimeAuthentication};
 use super::types::{
     CODEX_AUTHENTICATION_KIND_OAUTH, CodexCookie, CodexCookieCaptureOutcome, RuntimeCodexCookie,
 };
@@ -129,18 +132,27 @@ impl<'a> CodexSelectionModel<'a> {
     }
 
     pub(crate) fn allows_account(self, account: &ProviderAccount) -> bool {
-        if account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH {
+        self.allows_account_in(account, OpenAiSelectionDomain::ProviderDefault)
+    }
+
+    pub(crate) fn allows_account_in(
+        self,
+        account: &ProviderAccount,
+        domain: OpenAiSelectionDomain,
+    ) -> bool {
+        let kind = account.authentication_kind();
+        if !domain.admits(kind, false) {
+            return false;
+        }
+        if is_harness_kind(kind) {
+            return matches!(self, Self::Requested(_)) && !self.model().is_some_and(is_grok_model);
+        }
+        if kind != CODEX_AUTHENTICATION_KIND_OAUTH {
             return true;
         }
         // API Key 兼容上游可以提供 Grok；ChatGPT OAuth 不能因共用 Provider 被选中
         // 使用路由映射后的模型，不限制未知别名或尚未被目录收录的 OpenAI 模型
-        if self.model().is_some_and(|model| {
-            let model = model.rsplit('/').next().unwrap_or(model);
-            model.eq_ignore_ascii_case("grok")
-                || model
-                    .get(..5)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("grok-"))
-        }) {
+        if self.model().is_some_and(is_grok_model) {
             return false;
         }
         // 官方 Codex 的 image_generation_available 排除 Free，API Key 不套用 ChatGPT 套餐
@@ -167,9 +179,18 @@ impl<'a> CodexSelectionModel<'a> {
     }
 }
 
+fn is_grok_model(model: &str) -> bool {
+    let model = model.rsplit('/').next().unwrap_or(model);
+    model.eq_ignore_ascii_case("grok")
+        || model
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("grok-"))
+}
+
 struct CredentialSelectionInput<'a> {
     requires_websocket: bool,
     requires_oauth: bool,
+    domain: OpenAiSelectionDomain,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
@@ -341,9 +362,22 @@ impl CodexCredentialSelector {
         &self,
         request: &SelectCodexCredential<'_>,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
+        self.select_in_domain(request, OpenAiSelectionDomain::ProviderDefault)
+            .await
+    }
+
+    /// 在指定授权域内选号
+    ///
+    /// 旧 Responses 路径继续使用 [`OpenAiSelectionDomain::ProviderDefault`]
+    pub async fn select_in_domain(
+        &self,
+        request: &SelectCodexCredential<'_>,
+        domain: OpenAiSelectionDomain,
+    ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket: false,
             requires_oauth: false,
+            domain,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -367,6 +401,7 @@ impl CodexCredentialSelector {
         let input = CredentialSelectionInput {
             requires_websocket,
             requires_oauth: false,
+            domain: OpenAiSelectionDomain::ProviderDefault,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -429,6 +464,7 @@ impl CodexCredentialSelector {
         let input = CredentialSelectionInput {
             requires_websocket: false,
             requires_oauth: request.requires_oauth,
+            domain: OpenAiSelectionDomain::ProviderDefault,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
@@ -551,11 +587,33 @@ impl CodexCredentialSelector {
         let pinned_account = required_account.or_else(|| continuation_account.clone());
         let mut snapshot_retries = 0;
         'capacity: loop {
-            let binding = if let Some(key) = binding_key {
+            let mut binding_key = binding_key;
+            let mut binding = if let Some(key) = binding_key {
                 self.lookup_session_affinity(key).await?
             } else {
                 None
             };
+            if let Some(found) = binding.as_ref() {
+                let matches_domain = match self
+                    .repository
+                    .store()
+                    .get_account(found.account_id())
+                    .await
+                {
+                    Ok(Some(account)) => request
+                        .domain
+                        .admits(account.authentication_kind(), request.requires_oauth),
+                    Ok(None) => false,
+                    Err(source) => {
+                        return Err(CredentialSelectionError::Store(ErrorSource::new(source)));
+                    }
+                };
+                // 其他授权域的绑定不能被本次选号改写；同域内的模型或套餐不合格仍走原逃逸
+                if !matches_domain {
+                    binding = None;
+                    binding_key = None;
+                }
+            }
             // 非严格模式的续写可以归属分流账号；严格绑定迁移后才拒绝旧 owner
             if affinity_mode == AccountAffinity::Strict
                 && binding
@@ -591,9 +649,10 @@ impl CodexCredentialSelector {
                                 .attempt
                                 .account_scope()
                                 .is_some_and(|scope| scope.allows(account.id())))
-                        && (!request.requires_oauth
-                            || account.authentication_kind() == CODEX_AUTHENTICATION_KIND_OAUTH)
-                        && model.allows_account(account)
+                        && request
+                            .domain
+                            .admits(account.authentication_kind(), request.requires_oauth)
+                        && model.allows_account_in(account, request.domain)
                         && (diagnostic || {
                             let allowed = request
                                 .attempt
@@ -923,8 +982,30 @@ impl CodexCredentialSelector {
                         retry_account_snapshot(request.attempt, &account, &mut snapshot_retries)?;
                         continue 'capacity;
                     }
+                    // 凭据 JSON 的认证种类偏离账号行或当前域时排除该账号，其余损坏数据仍按原错误失败
+                    Err(error @ CredentialRepositoryError::InvalidCredentialData(_)) => {
+                        if self
+                            .stored_credential_rejects_domain(&account, request, model)
+                            .await?
+                        {
+                            excluded.insert(account.id().clone());
+                            continue;
+                        }
+                        return Err(error.into());
+                    }
                     Err(error) => return Err(error.into()),
                 };
+                if !request
+                    .domain
+                    .admits(account.authentication_kind(), request.requires_oauth)
+                    || !request
+                        .domain
+                        .admits(&runtime.authentication_kind, request.requires_oauth)
+                    || !model.allows_account_in(&account, request.domain)
+                {
+                    excluded.insert(account.id().clone());
+                    continue;
+                }
                 // 凭据重读和插件选号都可能挂起，取得租约前再次让位于新队首
                 if !waiting.can_try(account.id()) {
                     busy_accounts.insert(account.id().clone());
@@ -1093,6 +1174,27 @@ impl CodexCredentialSelector {
             self.session_affinity.load(&self.provider_kind, key),
         )
         .await
+    }
+
+    async fn stored_credential_rejects_domain(
+        &self,
+        account: &ProviderAccount,
+        request: &CredentialSelectionInput<'_>,
+        model: CodexSelectionModel<'_>,
+    ) -> Result<bool, CredentialSelectionError> {
+        let loaded = ProviderAccountStore::load_current_credential(
+            self.repository.store().as_ref(),
+            account.id(),
+        )
+        .await
+        .map_err(|source| CredentialSelectionError::Store(ErrorSource::new(source)))?;
+        let Ok(data) = CodexCredentialCodec::decode_complete(&loaded.credential) else {
+            return Ok(false);
+        };
+        let kind = data.authentication_kind();
+        Ok(kind != account.authentication_kind()
+            || !request.domain.admits(kind, request.requires_oauth)
+            || !model.allows_account_in(account, request.domain))
     }
 
     async fn admit_session(

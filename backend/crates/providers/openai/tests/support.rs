@@ -81,6 +81,17 @@ impl MemoryAccountStore {
             .expect("seed test OAuth credential");
     }
 
+    pub(crate) fn set_oauth_authentication_kind(&self, id: &str, kind: &str) {
+        use provider_openai::credential::CodexCredentialCodec;
+        let mut accounts = self.accounts.lock().unwrap();
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).unwrap())
+            .unwrap();
+        let mut data = CodexCredentialCodec::decode_complete(&stored.credential).unwrap();
+        data.oauth_mut().unwrap().authentication_kind = kind.to_owned();
+        stored.credential = CodexCredentialCodec::encode_complete(data).unwrap();
+    }
+
     pub(crate) fn set_oauth_transport(
         &self,
         id: &str,

@@ -259,8 +259,10 @@ impl CodexProvider {
             })
             .await
             .map_err(map_selection_error)?;
-        if lease.authentication().oauth().is_none() {
-            // 诊断等旁路仍可能到达非 OAuth 租约；此处兜底拒绝。
+        if lease.account().authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH
+            || lease.authentication().oauth().is_none()
+        {
+            // 诊断等旁路仍可能到达非 OAuth 租约；此处兜底拒绝
             return Err(provider_error(
                 ProviderErrorKind::Unsupported,
                 UpstreamSendState::NotSent,

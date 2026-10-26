@@ -5,6 +5,7 @@ mod catalog;
 mod contract;
 mod cookie;
 mod harness_oauth;
+mod harness_selection;
 mod oauth;
 mod profile_statistics;
 mod quota;
