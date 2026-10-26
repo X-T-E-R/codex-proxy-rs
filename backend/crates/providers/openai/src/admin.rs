@@ -504,9 +504,14 @@ impl ProviderAdmin for OpenAiAdminProvider {
         if pending.provider_kind() != &self.provider_kind {
             return Err(provider_admin_error(ProviderAdminErrorKind::Invalid));
         }
-        if let gateway_admin::model::provider_credentials::AuthorizationMutationTarget::Reauthorize { account_id } = pending.target()
-            && self.account(account_id).await?.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH {
-            return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+        if let gateway_admin::model::provider_credentials::AuthorizationMutationTarget::Reauthorize { account_id } = pending.target() {
+            let kind = self.account(account_id).await?.authentication_kind().to_owned();
+            if kind == crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY
+                || (kind != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+                    && !crate::credential::harness_oauth::is_harness_kind(&kind))
+            {
+                return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
+            }
         }
         let started = self
             .oauth
@@ -642,6 +647,9 @@ impl ProviderAdmin for OpenAiAdminProvider {
         command: PrepareCredentialRefresh,
     ) -> Result<PreparedCredentialRotation, ProviderAdminError> {
         if command.account.authentication_kind != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+            && !crate::credential::harness_oauth::is_harness_kind(
+                &command.account.authentication_kind,
+            )
         {
             return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
         }
@@ -1596,6 +1604,12 @@ struct PendingDocument {
     code_verifier: String,
     installation_id: String,
     reauthorization_account_id: Option<String>,
+    #[serde(default)]
+    redirect_uri: Option<String>,
+    #[serde(default)]
+    host_id: Option<String>,
+    #[serde(default)]
+    saved_client_id: Option<String>,
     mutation: Map<String, Value>,
 }
 
@@ -1640,6 +1654,21 @@ fn encode_pending(pending: &CodexPendingAuthorization) -> Map<String, Value> {
             .reauthorization()
             .map_or(Value::Null, |target| Value::String(target.to_string())),
     );
+    if let Some(redirect_uri) = pending.redirect_uri() {
+        document.insert(
+            "redirect_uri".to_owned(),
+            Value::String(redirect_uri.to_owned()),
+        );
+    }
+    if let Some(host_id) = pending.host_id() {
+        document.insert("host_id".to_owned(), Value::String(host_id.to_owned()));
+    }
+    if let Some(saved_client_id) = pending.saved_client_id() {
+        document.insert(
+            "saved_client_id".to_owned(),
+            Value::String(saved_client_id.to_owned()),
+        );
+    }
     document.insert(
         "mutation".to_owned(),
         Value::Object(encode_mutation(pending.mutation())),
@@ -1672,6 +1701,9 @@ fn decode_pending(
         code_verifier: SecretString::from(document.code_verifier),
         installation_id: document.installation_id,
         reauthorization_account_id: document.reauthorization_account_id,
+        redirect_uri: document.redirect_uri,
+        host_id: document.host_id,
+        saved_client_id: document.saved_client_id,
         mutation: decode_mutation(document.mutation)?,
     })
 }

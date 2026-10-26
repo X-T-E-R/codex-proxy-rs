@@ -138,6 +138,9 @@ impl<'a> RefreshFailureContext<'a> {
 pub struct DueCodexCredential {
     pub account: ProviderAccount,
     pub secret: CodexOAuthSecret,
+    pub authentication_kind: String,
+    pub oauth_client_id: Option<String>,
+    pub oauth_scope: Option<String>,
 }
 
 impl std::fmt::Debug for DueCodexCredential {
@@ -193,6 +196,7 @@ pub struct CodexCredentialRefreshService {
     credential_state: Arc<dyn ProviderCredentialStatePort>,
     runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
     diagnostics: Arc<dyn gateway_core::diagnostics::OperationalDiagnostics>,
+    harness_token_origin: Option<String>,
 }
 
 impl CodexCredentialRefreshService {
@@ -211,7 +215,14 @@ impl CodexCredentialRefreshService {
             credential_state,
             runtime_policy,
             diagnostics,
+            harness_token_origin: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_harness_token_origin(mut self, origin: impl Into<String>) -> Self {
+        self.harness_token_origin = Some(origin.into());
+        self
     }
 
     pub async fn refresh_due(
@@ -301,6 +312,9 @@ impl CodexCredentialRefreshService {
                 return Ok(CodexCredentialRefreshOutcome::LeaseUnavailable { account_id });
             }
         };
+        if super::harness_oauth::is_harness_kind(&due.authentication_kind) {
+            return self.refresh_harness_account(due).await;
+        }
         let refresh_token = due
             .secret
             .refresh_token
@@ -469,6 +483,9 @@ impl CodexCredentialRefreshService {
                     due.push(DueCodexCredential {
                         account: loaded.account,
                         secret: secret.clone(),
+                        authentication_kind: runtime.authentication_kind.clone(),
+                        oauth_client_id: runtime.oauth_client_id.clone(),
+                        oauth_scope: runtime.oauth_scope.clone(),
                     });
                 }
                 Ok(_) | Err(_) => {
@@ -554,6 +571,132 @@ impl CodexCredentialRefreshService {
                 Ok(CodexCredentialRefreshOutcome::Stale {
                     account_id: due.account.id().to_string(),
                 })
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn refresh_harness_account(
+        &self,
+        due: DueCodexCredential,
+    ) -> Result<CodexCredentialRefreshOutcome, CodexCredentialRefreshError> {
+        let account_id = due.account.id().to_string();
+        let method = super::harness_oauth::method_for_kind(&due.authentication_kind)
+            .ok_or(CodexCredentialRefreshError::InvalidRefreshResponse)?;
+        let client_id = due
+            .oauth_client_id
+            .clone()
+            .filter(|value| super::harness_oauth::valid_harness_client_id(value))
+            .ok_or(CodexCredentialRefreshError::InvalidRefreshResponse)?;
+        let scopes = due
+            .oauth_scope
+            .clone()
+            .filter(|value| super::harness_oauth::valid_harness_scope(value))
+            .ok_or(CodexCredentialRefreshError::InvalidRefreshResponse)?;
+        let refresh_token = due
+            .secret
+            .refresh_token
+            .as_ref()
+            .ok_or(CodexCredentialRefreshError::InvalidRefreshResponse)?;
+        let expires_at_ms = due
+            .account
+            .access_token_expires_at()
+            .and_then(|expires_at| {
+                u64::try_from(
+                    expires_at
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()?
+                        .as_millis(),
+                )
+                .ok()
+            })
+            .unwrap_or(0);
+        let refreshed = super::harness_oauth::refresh(
+            &super::harness_oauth::HarnessCall {
+                method,
+                proxy_url: due
+                    .account
+                    .outbound_proxy()
+                    .map(|proxy| proxy.expose_url().to_owned()),
+                upstream_origin: self.harness_token_origin.clone(),
+            },
+            &client_id,
+            refresh_token.expose_secret(),
+            due.secret.access_token.expose_secret(),
+            &scopes,
+            expires_at_ms,
+        )
+        .await;
+        let tokens = match refreshed {
+            Ok(tokens) if tokens.client_id == client_id => tokens,
+            Ok(_) | Err(super::harness_oauth::HarnessRunnerError::Token) => {
+                return self
+                    .persist_terminal(
+                        &due.account,
+                        CredentialState::Expired,
+                        AccountErrorReason::CredentialExpired,
+                        RefreshFailureContext::new("refresh_invalid_grant", None, None),
+                        CodexCredentialRefreshOutcome::Invalidated { account_id },
+                    )
+                    .await;
+            }
+            Err(super::harness_oauth::HarnessRunnerError::Callback)
+            | Err(super::harness_oauth::HarnessRunnerError::Upstream) => {
+                if self
+                    .defer_refresh(&due.account, "harness-refresh", None, None)
+                    .await?
+                {
+                    return Ok(CodexCredentialRefreshOutcome::Transient { account_id });
+                }
+                return Ok(CodexCredentialRefreshOutcome::Stale { account_id });
+            }
+        };
+        let secret = CodexOAuthSecret {
+            access_token: SecretString::from(tokens.access_token),
+            refresh_token: Some(SecretString::from(tokens.refresh_token)),
+            id_token: tokens
+                .id_token
+                .map(SecretString::from)
+                .or(due.secret.id_token),
+        };
+        record_oauth_recovery(
+            CodexOAuthRecoveryOperation::ScheduledRefresh,
+            Some(due.account.id().as_str()),
+            secret.access_token.expose_secret(),
+            secret
+                .refresh_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+        );
+        match self
+            .repository
+            .rotate_refreshed_harness_secret(
+                &due.account,
+                secret,
+                tokens.scopes,
+                Some(SystemTime::from(tokens.expires_at)),
+                None,
+                &client_id,
+            )
+            .await
+        {
+            Ok(revision) => {
+                let _ = self
+                    .credential_state
+                    .clear_refresh_backoff(due.account.id())
+                    .await;
+                tracing::info!(
+                    account_id = %due.account.id(),
+                    credential_revision = revision.get(),
+                    "OpenAI harness OAuth refresh succeeded"
+                );
+                Ok(CodexCredentialRefreshOutcome::Refreshed {
+                    account_id,
+                    credential_revision: revision.get(),
+                })
+            }
+            Err(CredentialRepositoryError::RevisionConflict(_)) => {
+                Ok(CodexCredentialRefreshOutcome::Stale { account_id })
             }
             Err(error) => Err(error.into()),
         }

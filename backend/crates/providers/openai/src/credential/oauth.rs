@@ -8,8 +8,8 @@ use chrono::{DateTime, TimeDelta, Utc};
 use gateway_admin::model::{
     AdminError,
     provider_credentials::{
-        AuthorizationCommitGuard, AuthorizationMutationTarget, AuthorizationOwner,
-        PendingAuthorizationMutation,
+        AuthorizationCommitGuard, AuthorizationMethodSelection, AuthorizationMutationTarget,
+        AuthorizationOwner, PendingAuthorizationMutation, ProviderAuthorizationMethod,
     },
 };
 use gateway_core::account::{
@@ -142,6 +142,9 @@ pub struct CodexPendingAuthorization {
     code_verifier: SecretString,
     installation_id: String,
     reauthorization: Option<ProviderAccountId>,
+    redirect_uri: Option<String>,
+    host_id: Option<String>,
+    saved_client_id: Option<String>,
     mutation: PendingAuthorizationMutation,
 }
 
@@ -156,6 +159,9 @@ pub struct StoredCodexPendingAuthorization {
     pub code_verifier: SecretString,
     pub installation_id: String,
     pub reauthorization_account_id: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub host_id: Option<String>,
+    pub saved_client_id: Option<String>,
     pub mutation: PendingAuthorizationMutation,
 }
 
@@ -179,6 +185,9 @@ impl CodexPendingAuthorization {
             code_verifier: input.code_verifier,
             installation_id: input.installation_id,
             reauthorization,
+            redirect_uri: input.redirect_uri,
+            host_id: input.host_id,
+            saved_client_id: input.saved_client_id,
             mutation: input.mutation,
         };
         if !valid_text(&pending.flow_id)
@@ -191,6 +200,7 @@ impl CodexPendingAuthorization {
             || !valid_secret(pending.code_verifier.expose_secret())
             || !valid_installation_id(&pending.installation_id)
             || !pending_mutation_matches(&pending)
+            || !harness_pending_consistent(&pending)
         {
             return Err(CodexOAuthPendingStoreError::InvalidValue);
         }
@@ -248,6 +258,21 @@ impl CodexPendingAuthorization {
     }
 
     #[must_use]
+    pub fn redirect_uri(&self) -> Option<&str> {
+        self.redirect_uri.as_deref()
+    }
+
+    #[must_use]
+    pub fn host_id(&self) -> Option<&str> {
+        self.host_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn saved_client_id(&self) -> Option<&str> {
+        self.saved_client_id.as_deref()
+    }
+
+    #[must_use]
     pub const fn mutation(&self) -> &PendingAuthorizationMutation {
         &self.mutation
     }
@@ -267,6 +292,9 @@ impl fmt::Debug for CodexPendingAuthorization {
             .field("code_verifier", &"<redacted>")
             .field("installation_id", &"<pseudonymous>")
             .field("reauthorization", &self.reauthorization)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("host_id", &self.host_id)
+            .field("saved_client_id", &self.saved_client_id)
             .field("mutation", &self.mutation)
             .finish()
     }
@@ -362,6 +390,8 @@ pub struct CodexOAuthAdminService {
     credentials: CodexCredentialAdmin,
     oauth_client_id: String,
     profile: CodexWireProfileState,
+    harness_host_file: Option<std::path::PathBuf>,
+    harness_token_origin: Option<String>,
 }
 
 struct CodexOAuthAuthorizationCommitGuard {
@@ -420,12 +450,26 @@ impl CodexOAuthAdminService {
             credentials,
             oauth_client_id: OFFICIAL_CODEX_OAUTH_CLIENT_ID.to_owned(),
             profile,
+            harness_host_file: None,
+            harness_token_origin: None,
         }
     }
 
     #[must_use]
     pub fn with_oauth_client_id(mut self, oauth_client_id: impl Into<String>) -> Self {
         self.oauth_client_id = oauth_client_id.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_harness_host_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.harness_host_file = Some(path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_harness_token_origin(mut self, origin: impl Into<String>) -> Self {
+        self.harness_token_origin = Some(origin.into());
         self
     }
 }
@@ -436,31 +480,29 @@ impl CodexOAuthAdmin for CodexOAuthAdminService {
         &self,
         command: StartCodexOAuthAuthorization,
     ) -> Result<CodexOAuthAuthorizationStarted, CodexOAuthAdminError> {
-        let (name, reauthorization, installation_id) = match command.mutation.target() {
-            AuthorizationMutationTarget::Create { name } => {
-                (name.clone(), None, Uuid::new_v4().to_string())
-            }
-            AuthorizationMutationTarget::Reauthorize { account_id } => {
-                let current = self
-                    .store
-                    .load_current_credential(account_id)
-                    .await
-                    .map_err(map_store_error)?;
-                if current.account.provider().as_str() != "openai"
-                    || current.account.id() != account_id
-                {
-                    return Err(CodexOAuthAdminError::NotFound);
-                }
-                let installation_id = current_installation_id(&current)?;
-                (
-                    current.account.name().to_owned(),
-                    Some(account_id.clone()),
-                    installation_id,
+        let pinned = self.pin_authorization(command.mutation).await?;
+        match pinned.method {
+            None => {
+                self.start_pending(
+                    pinned.mutation,
+                    pinned.name,
+                    pinned.reauthorization,
+                    pinned.installation_id,
                 )
+                .await
             }
-        };
-        self.start_pending(command.mutation, name, reauthorization, installation_id)
-            .await
+            Some(method) => {
+                self.start_harness_pending(
+                    pinned.mutation,
+                    pinned.name,
+                    pinned.reauthorization,
+                    pinned.installation_id,
+                    method,
+                    pinned.saved_client_id,
+                )
+                .await
+            }
+        }
     }
 
     async fn complete_authorization(
@@ -505,6 +547,11 @@ impl CodexOAuthAdminService {
         callback_url: &str,
     ) -> Result<(PendingAuthorizationMutation, CompletedCodexOAuthCredential), CodexOAuthAdminError>
     {
+        if pending.redirect_uri().is_some() {
+            return self
+                .complete_harness_authorization(pending, callback_url)
+                .await;
+        }
         let current = if let Some(target) = pending.reauthorization() {
             let current = self
                 .store
@@ -608,6 +655,9 @@ impl CodexOAuthAdminService {
             code_verifier: SecretString::from(random_secret()?),
             installation_id,
             reauthorization_account_id: reauthorization.as_ref().map(ToString::to_string),
+            redirect_uri: None,
+            host_id: None,
+            saved_client_id: None,
             mutation,
         })
         .map_err(map_pending_error)?;
@@ -720,7 +770,276 @@ impl CodexOAuthAdminService {
         );
         Ok((secret, tokens.id_token))
     }
+
+    async fn pin_authorization(
+        &self,
+        mutation: PendingAuthorizationMutation,
+    ) -> Result<PinnedAuthorization, CodexOAuthAdminError> {
+        match mutation.target().clone() {
+            AuthorizationMutationTarget::Create { name } => {
+                let method = match mutation.authorization_method() {
+                    AuthorizationMethodSelection::Default => None,
+                    AuthorizationMethodSelection::Selected(method) => match method.as_str() {
+                        super::harness_oauth::HARNESS_METHOD_CODEX => None,
+                        other => Some(
+                            super::harness_oauth::HarnessMethod::from_method(other)
+                                .ok_or(CodexOAuthAdminError::InvalidInput)?,
+                        ),
+                    },
+                    AuthorizationMethodSelection::FromAccount(_) => {
+                        return Err(CodexOAuthAdminError::InvalidInput);
+                    }
+                };
+                Ok(PinnedAuthorization {
+                    mutation,
+                    name,
+                    reauthorization: None,
+                    installation_id: Uuid::new_v4().to_string(),
+                    method,
+                    saved_client_id: None,
+                })
+            }
+            AuthorizationMutationTarget::Reauthorize { account_id } => {
+                let current = self
+                    .store
+                    .load_current_credential(&account_id)
+                    .await
+                    .map_err(map_store_error)?;
+                if current.account.provider().as_str() != "openai"
+                    || current.account.id() != &account_id
+                {
+                    return Err(CodexOAuthAdminError::NotFound);
+                }
+                let data = CodexCredentialCodec::decode_complete(&current.credential)
+                    .map_err(|_| CodexOAuthAdminError::Credential)?;
+                if data.authentication_kind() != current.account.authentication_kind() {
+                    return Err(CodexOAuthAdminError::Conflict);
+                }
+                let (method, method_name, saved_client_id) = if data.authentication_kind()
+                    == super::CODEX_AUTHENTICATION_KIND_OAUTH
+                {
+                    (None, super::harness_oauth::HARNESS_METHOD_CODEX, None)
+                } else {
+                    let method = super::harness_oauth::method_for_kind(data.authentication_kind())
+                        .ok_or(CodexOAuthAdminError::InvalidInput)?;
+                    let saved_client_id = if method == super::harness_oauth::HarnessMethod::OpenCode
+                    {
+                        Some(
+                            data.oauth()
+                                .and_then(|oauth| oauth.oauth_client_id.clone())
+                                .filter(|client_id| {
+                                    super::harness_oauth::valid_harness_client_id(client_id)
+                                })
+                                .ok_or(CodexOAuthAdminError::Credential)?,
+                        )
+                    } else {
+                        None
+                    };
+                    (Some(method), method.as_str(), saved_client_id)
+                };
+                let method_value = ProviderAuthorizationMethod::new(method_name.to_owned())
+                    .map_err(|_| CodexOAuthAdminError::InvalidInput)?;
+                Ok(PinnedAuthorization {
+                    mutation: mutation.with_authorization_method(Some(method_value)),
+                    name: current.account.name().to_owned(),
+                    reauthorization: Some(account_id),
+                    installation_id: data.installation_id().to_owned(),
+                    method,
+                    saved_client_id,
+                })
+            }
+        }
+    }
+
+    async fn start_harness_pending(
+        &self,
+        mutation: PendingAuthorizationMutation,
+        name: String,
+        reauthorization: Option<ProviderAccountId>,
+        installation_id: String,
+        method: super::harness_oauth::HarnessMethod,
+        saved_client_id: Option<String>,
+    ) -> Result<CodexOAuthAuthorizationStarted, CodexOAuthAdminError> {
+        if !valid_text(&name) {
+            return Err(CodexOAuthAdminError::InvalidInput);
+        }
+        let host_uuid = super::harness_oauth::load_or_create_host_uuid(
+            &super::harness_oauth::resolve_host_file(self.harness_host_file.as_deref()),
+        )
+        .map_err(map_harness_error)?;
+        let started = super::harness_oauth::authorize(
+            &super::harness_oauth::HarnessCall {
+                method,
+                proxy_url: mutation
+                    .outbound_proxy()
+                    .map(|proxy| proxy.expose_url().to_owned()),
+                upstream_origin: self.harness_token_origin.clone(),
+            },
+            host_uuid,
+            saved_client_id.as_deref(),
+        )
+        .await
+        .map_err(map_harness_error)?;
+        let expires_at = Utc::now()
+            .checked_add_signed(AUTHORIZATION_TTL)
+            .ok_or(CodexOAuthAdminError::InvalidInput)?;
+        let pending = CodexPendingAuthorization::from_stored(StoredCodexPendingAuthorization {
+            flow_id: random_secret()?,
+            owner_ref: oauth_owner_ref(mutation.owner_binding().owner()),
+            started_request_ref: mutation.owner_binding().started_request_id().to_owned(),
+            name,
+            expires_at,
+            state: SecretString::from(started.state),
+            nonce: SecretString::from(started.nonce),
+            code_verifier: SecretString::from(started.verifier),
+            installation_id,
+            reauthorization_account_id: reauthorization.as_ref().map(ToString::to_string),
+            redirect_uri: Some(started.redirect_uri),
+            host_id: Some(started.host_id),
+            saved_client_id,
+            mutation,
+        })
+        .map_err(map_pending_error)?;
+        let authorization_url = started.url;
+        self.pending
+            .create(&pending)
+            .await
+            .map_err(map_pending_error)?;
+        Ok(CodexOAuthAuthorizationStarted {
+            flow_id: pending.flow_id.clone(),
+            authorization_url,
+            expires_at,
+        })
+    }
+
+    async fn complete_harness_authorization(
+        &self,
+        pending: CodexPendingAuthorization,
+        callback_url: &str,
+    ) -> Result<(PendingAuthorizationMutation, CompletedCodexOAuthCredential), CodexOAuthAdminError>
+    {
+        let method = harness_method(&pending).ok_or(CodexOAuthAdminError::InvalidInput)?;
+        let redirect = pending
+            .redirect_uri()
+            .ok_or(CodexOAuthAdminError::InvalidInput)?;
+        if !callback_matches_redirect(callback_url, redirect) {
+            return Err(CodexOAuthAdminError::CallbackRejected);
+        }
+        let (_code, callback_state) = callback_parts(callback_url)?;
+        if !constant_time_equal(
+            pending.state.expose_secret().as_bytes(),
+            callback_state.expose_secret().as_bytes(),
+        ) {
+            return Err(CodexOAuthAdminError::CallbackRejected);
+        }
+        let current = if let Some(target) = pending.reauthorization() {
+            let current = self
+                .store
+                .load_current_credential(target)
+                .await
+                .map_err(map_store_error)?;
+            if current_installation_id(&current)? != pending.installation_id() {
+                return Err(CodexOAuthAdminError::Conflict);
+            }
+            Some(current)
+        } else {
+            None
+        };
+        let proxy = current
+            .as_ref()
+            .map_or(pending.mutation.outbound_proxy(), |current| {
+                current.account.outbound_proxy()
+            });
+        let tokens = super::harness_oauth::exchange(
+            &super::harness_oauth::HarnessCall {
+                method,
+                proxy_url: proxy.map(|proxy| proxy.expose_url().to_owned()),
+                upstream_origin: self.harness_token_origin.clone(),
+            },
+            callback_url,
+            pending.state.expose_secret(),
+            pending.code_verifier.expose_secret(),
+            pending.nonce.expose_secret(),
+            pending.saved_client_id(),
+        )
+        .await
+        .map_err(map_harness_error)?;
+        let secret = super::types::CodexOAuthSecret {
+            access_token: SecretString::from(tokens.access_token),
+            refresh_token: Some(SecretString::from(tokens.refresh_token)),
+            id_token: tokens.id_token.map(SecretString::from),
+        };
+        record_oauth_recovery(
+            CodexOAuthRecoveryOperation::AuthorizationCode,
+            pending
+                .reauthorization()
+                .map(|account_id| account_id.as_str()),
+            secret.access_token.expose_secret(),
+            secret
+                .refresh_token
+                .as_ref()
+                .map(ExposeSecret::expose_secret),
+        );
+        if let Some(saved) = pending.saved_client_id()
+            && !constant_time_equal(saved.as_bytes(), tokens.client_id.as_bytes())
+        {
+            return Err(CodexOAuthAdminError::TokenRejected);
+        }
+        let mutation = pending.mutation.clone();
+        let credential = if let Some(current) = current {
+            CompletedCodexOAuthCredential::Reauthorize(Box::new(
+                self.credentials
+                    .prepare_refreshed_harness_rotation(
+                        current,
+                        super::admin::HarnessCredentialRotation {
+                            secret,
+                            client_id: tokens.client_id,
+                            scopes: tokens.scopes,
+                            allow_client_id_change: method
+                                == super::harness_oauth::HarnessMethod::Pi,
+                            access_token_expires_at: Some(tokens.expires_at),
+                        },
+                    )
+                    .map_err(map_admin_error)?,
+            ))
+        } else {
+            let prepared = self
+                .credentials
+                .prepare_harness_account(super::admin::NewHarnessOAuthAccount {
+                    account_id: format!("acct_{}", Uuid::now_v7().simple()),
+                    name: pending.name,
+                    installation_id: pending.installation_id,
+                    authentication_kind: method.authentication_kind().to_owned(),
+                    client_id: tokens.client_id,
+                    scopes: tokens.scopes,
+                    secret,
+                    access_token_expires_at: Some(tokens.expires_at),
+                    enabled: true,
+                })
+                .map_err(map_admin_error)?;
+            CompletedCodexOAuthCredential::Create(Box::new(
+                gateway_core::account::NewProviderAccount {
+                    model_access: Default::default(),
+                    account: prepared
+                        .account
+                        .with_outbound_proxy(mutation.outbound_proxy().cloned()),
+                    credential: prepared.credential,
+                },
+            ))
+        };
+        Ok((mutation, credential))
+    }
 }
+
+struct PinnedAuthorization {
+    mutation: PendingAuthorizationMutation,
+    name: String,
+    reauthorization: Option<ProviderAccountId>,
+    installation_id: String,
+    method: Option<super::harness_oauth::HarnessMethod>,
+    saved_client_id: Option<String>,
+}
+
 
 fn current_oauth_refresh_token(
     current: &LoadedCredential,
@@ -865,6 +1184,68 @@ pub(crate) fn oauth_owner_ref(owner: &AuthorizationOwner) -> String {
         AuthorizationOwner::System => digest.update(b"system"),
     }
     URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
+fn harness_method(
+    pending: &CodexPendingAuthorization,
+) -> Option<super::harness_oauth::HarnessMethod> {
+    match pending.mutation.authorization_method() {
+        AuthorizationMethodSelection::Selected(method) => {
+            super::harness_oauth::HarnessMethod::from_method(method.as_str())
+        }
+        AuthorizationMethodSelection::Default | AuthorizationMethodSelection::FromAccount(_) => {
+            None
+        }
+    }
+}
+
+fn harness_pending_consistent(pending: &CodexPendingAuthorization) -> bool {
+    let Some(method) = harness_method(pending) else {
+        return pending.redirect_uri.is_none()
+            && pending.host_id.is_none()
+            && pending.saved_client_id.is_none();
+    };
+    let Some(redirect) = pending.redirect_uri.as_deref() else {
+        return false;
+    };
+    let Some(host_id) = pending.host_id.as_deref() else {
+        return false;
+    };
+    if redirect != method.redirect_uri() || !super::harness_oauth::valid_host_urn(host_id) {
+        return false;
+    }
+    match pending.saved_client_id.as_deref() {
+        None => true,
+        Some(client_id) => {
+            method == super::harness_oauth::HarnessMethod::OpenCode
+                && super::harness_oauth::valid_harness_client_id(client_id)
+        }
+    }
+}
+
+fn callback_matches_redirect(callback_url: &str, redirect_uri: &str) -> bool {
+    let Ok(callback) = Url::parse(callback_url) else {
+        return false;
+    };
+    let Ok(redirect) = Url::parse(redirect_uri) else {
+        return false;
+    };
+    callback.scheme() == redirect.scheme()
+        && callback.host_str() == redirect.host_str()
+        && callback.port() == redirect.port()
+        && callback.path() == redirect.path()
+}
+
+fn map_harness_error(error: super::harness_oauth::HarnessRunnerError) -> CodexOAuthAdminError {
+    match error {
+        super::harness_oauth::HarnessRunnerError::Callback => {
+            CodexOAuthAdminError::CallbackRejected
+        }
+        super::harness_oauth::HarnessRunnerError::Token => CodexOAuthAdminError::TokenRejected,
+        super::harness_oauth::HarnessRunnerError::Upstream => {
+            CodexOAuthAdminError::UpstreamUnavailable
+        }
+    }
 }
 
 fn pending_mutation_matches(pending: &CodexPendingAuthorization) -> bool {

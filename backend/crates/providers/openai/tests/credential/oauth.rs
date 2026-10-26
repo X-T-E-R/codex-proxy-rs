@@ -56,6 +56,9 @@ impl CodexOAuthPendingStore for PendingStore {
             code_verifier: pending.code_verifier().clone(),
             installation_id: pending.installation_id().to_owned(),
             reauthorization_account_id: pending.reauthorization().map(ToString::to_string),
+            redirect_uri: pending.redirect_uri().map(str::to_owned),
+            host_id: pending.host_id().map(str::to_owned),
+            saved_client_id: pending.saved_client_id().map(str::to_owned),
             mutation: pending.mutation().clone(),
         });
         Ok(())

@@ -7,7 +7,8 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
@@ -21,8 +22,15 @@ pub(crate) struct CodexSessionIdentity {
     secret: [u8; 32],
 }
 
+static OPENAI_HARNESS_HOST_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn published_openai_harness_host_file() -> Option<&'static Path> {
+    OPENAI_HARNESS_HOST_FILE.get().map(PathBuf::as_path)
+}
+
 impl CodexSessionIdentity {
     pub(crate) fn load_or_create(path: &Path) -> Result<Self, CodexSessionIdentityError> {
+        publish_harness_host_file(path);
         match read_secret(path)? {
             Some(secret) => Ok(Self { secret }),
             None => Self::create(path),
@@ -85,6 +93,16 @@ pub(crate) enum CodexSessionIdentityError {
     InvalidSecret,
     #[error("Codex session identity storage is unavailable")]
     Storage,
+}
+
+fn publish_harness_host_file(identity_path: &Path) {
+    let Some(parent) = identity_path.parent() else {
+        return;
+    };
+    if parent.as_os_str().is_empty() {
+        return;
+    }
+    let _ = OPENAI_HARNESS_HOST_FILE.set(parent.join("openai_harness_host_id"));
 }
 
 fn read_secret(path: &Path) -> Result<Option<[u8; 32]>, CodexSessionIdentityError> {

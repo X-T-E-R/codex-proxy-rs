@@ -24,6 +24,7 @@ pub struct CodexRuntimeCredential {
     pub cookies: Vec<RuntimeCodexCookie>,
     pub oauth_client_id: Option<String>,
     pub oauth_scope: Option<String>,
+    pub authentication_kind: String,
 }
 
 impl std::fmt::Debug for CodexRuntimeCredential {
@@ -36,6 +37,7 @@ impl std::fmt::Debug for CodexRuntimeCredential {
             .field("cookies", &self.cookies)
             .field("oauth_client_id", &self.oauth_client_id)
             .field("oauth_scope", &self.oauth_scope)
+            .field("authentication_kind", &self.authentication_kind)
             .finish()
     }
 }
@@ -145,6 +147,7 @@ impl CodexCredentialCodec {
                 .map(|value| value.expose_secret().to_owned()),
             oauth_client_id: None,
             oauth_scope: None,
+            authentication_kind: super::CODEX_AUTHENTICATION_KIND_OAUTH.to_owned(),
             cookies,
         }))
     }
@@ -186,20 +189,30 @@ impl CodexCredentialCodec {
             CodexCredentialData::OAuth(data) => data.transport,
             CodexCredentialData::ApiKey(data) => data.transport,
         };
-        let (authentication, principal, installation_id, cookies, oauth_client_id, oauth_scope) =
-            match data {
-                CodexCredentialData::ApiKey(data) => (
-                    CodexRuntimeAuthentication::ApiKey(ApiKeyAuthentication {
-                        configuration: data.configuration(),
-                        secret: SecretString::from(data.api_key),
-                    }),
-                    None,
-                    data.installation_id,
-                    Vec::new(),
-                    None,
-                    None,
-                ),
-                CodexCredentialData::OAuth(data) => (
+        let (
+            authentication,
+            principal,
+            installation_id,
+            cookies,
+            oauth_client_id,
+            oauth_scope,
+            authentication_kind,
+        ) = match data {
+            CodexCredentialData::ApiKey(data) => (
+                CodexRuntimeAuthentication::ApiKey(ApiKeyAuthentication {
+                    configuration: data.configuration(),
+                    secret: SecretString::from(data.api_key),
+                }),
+                None,
+                data.installation_id,
+                Vec::new(),
+                None,
+                None,
+                super::api_key::CODEX_AUTHENTICATION_KIND_API_KEY.to_owned(),
+            ),
+            CodexCredentialData::OAuth(data) => {
+                let authentication_kind = data.authentication_kind.clone();
+                (
                     CodexRuntimeAuthentication::OAuth(CodexOAuthSecret {
                         access_token: SecretString::from(data.access_token),
                         refresh_token: data.refresh_token.map(SecretString::from),
@@ -210,8 +223,10 @@ impl CodexCredentialCodec {
                     data.cookies,
                     data.oauth_client_id,
                     data.oauth_scope,
-                ),
-            };
+                    authentication_kind,
+                )
+            }
+        };
         Ok(CodexRuntimeCredential {
             transport,
             authentication,
@@ -231,6 +246,7 @@ impl CodexCredentialCodec {
                 .collect(),
             oauth_client_id,
             oauth_scope,
+            authentication_kind,
         })
     }
 
@@ -252,8 +268,14 @@ impl CodexCredentialCodec {
         let existing = Self::decode_complete(existing)?;
         match (&mut incoming, existing) {
             (CodexCredentialData::OAuth(incoming), CodexCredentialData::OAuth(existing)) => {
+                if incoming.authentication_kind != existing.authentication_kind {
+                    return Err(CodexCredentialDataError::Invalid);
+                }
                 incoming.installation_id = existing.installation_id;
                 incoming.transport = existing.transport;
+                if super::harness_oauth::is_harness_kind(&existing.authentication_kind) {
+                    incoming.oauth_client_id = existing.oauth_client_id;
+                }
             }
             (CodexCredentialData::ApiKey(incoming), CodexCredentialData::ApiKey(existing)) => {
                 incoming.installation_id = existing.installation_id;
@@ -275,7 +297,9 @@ fn validate(data: &CodexCredentialData) -> Result<(), CodexCredentialDataError> 
     let (installation_id, cookies) = match data {
         CodexCredentialData::ApiKey(_) => return Err(CodexCredentialDataError::Invalid),
         CodexCredentialData::OAuth(data) => {
-            if data.schema_version != CODEX_CREDENTIAL_SCHEMA_VERSION {
+            if data.schema_version != CODEX_CREDENTIAL_SCHEMA_VERSION
+                || !valid_oauth_authentication(data)
+            {
                 return Err(CodexCredentialDataError::Invalid);
             }
             (&data.installation_id, &data.cookies)
@@ -297,6 +321,29 @@ fn validate(data: &CodexCredentialData) -> Result<(), CodexCredentialDataError> 
         return Err(CodexCredentialDataError::Invalid);
     }
     Ok(())
+}
+
+fn valid_oauth_authentication(data: &CodexOAuthCredentialData) -> bool {
+    if data.authentication_kind == super::CODEX_AUTHENTICATION_KIND_OAUTH {
+        return true;
+    }
+    super::harness_oauth::is_harness_kind(&data.authentication_kind)
+        && data.transport == super::ResponsesTransport::Http
+        && data.principal.is_none()
+        && data.cookies.is_empty()
+        && data
+            .oauth_client_id
+            .as_deref()
+            .is_some_and(super::harness_oauth::valid_harness_client_id)
+        && data
+            .oauth_scope
+            .as_deref()
+            .is_some_and(super::harness_oauth::valid_harness_scope)
+        && data
+            .refresh_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+        && !data.access_token.is_empty()
 }
 
 fn valid_installation_id(value: &str) -> bool {

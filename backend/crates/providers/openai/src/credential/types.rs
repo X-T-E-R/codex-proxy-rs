@@ -308,6 +308,16 @@ impl ResponsesTransport {
 }
 
 pub const CODEX_AUTHENTICATION_KIND_OAUTH: &str = "oauth";
+pub const CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING: &str = "chatgpt_token_sharing";
+pub const CODEX_AUTHENTICATION_KIND_PI_OPENAI: &str = "pi_openai";
+
+fn default_authentication_kind() -> String {
+    CODEX_AUTHENTICATION_KIND_OAUTH.to_owned()
+}
+
+fn is_legacy_oauth_authentication_kind(value: &String) -> bool {
+    value == CODEX_AUTHENTICATION_KIND_OAUTH
+}
 
 /// Codex OAuth 对 `provider_credentials_json` 的完整明文 schema
 #[derive(Clone, Serialize, Deserialize)]
@@ -332,6 +342,11 @@ pub struct CodexOAuthCredentialData {
     pub oauth_client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_scope: Option<String>,
+    #[serde(
+        default = "default_authentication_kind",
+        skip_serializing_if = "is_legacy_oauth_authentication_kind"
+    )]
+    pub authentication_kind: String,
     #[serde(default)]
     pub cookies: Vec<CodexCookie>,
 }
@@ -351,6 +366,7 @@ impl fmt::Debug for CodexOAuthCredentialData {
             .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
             .field("oauth_client_id", &self.oauth_client_id)
             .field("oauth_scope", &self.oauth_scope)
+            .field("authentication_kind", &self.authentication_kind)
             .field("cookies", &self.cookies)
             .finish()
     }
@@ -366,9 +382,9 @@ pub enum CodexCredentialData {
 
 impl CodexCredentialData {
     #[must_use]
-    pub const fn authentication_kind(&self) -> &'static str {
+    pub fn authentication_kind(&self) -> &str {
         match self {
-            Self::OAuth(_) => CODEX_AUTHENTICATION_KIND_OAUTH,
+            Self::OAuth(data) => data.authentication_kind.as_str(),
             Self::ApiKey(_) => super::api_key::CODEX_AUTHENTICATION_KIND_API_KEY,
         }
     }

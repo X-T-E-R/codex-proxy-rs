@@ -88,6 +88,66 @@ impl CodexCredentialRepository {
         cas_revision(self.store.compare_and_swap_credential(update).await?)
     }
 
+    pub async fn rotate_refreshed_harness_secret(
+        &self,
+        account: &ProviderAccount,
+        secret: CodexOAuthSecret,
+        oauth_scope: String,
+        access_token_expires_at: Option<SystemTime>,
+        next_refresh_at: Option<SystemTime>,
+        expected_client_id: &str,
+    ) -> Result<CredentialRevision, CredentialRepositoryError> {
+        let current = self
+            .store
+            .load_credential(account.id(), account.revision())
+            .await?;
+        let mut data = CodexCredentialCodec::decode_complete(&current.credential)?;
+        let oauth = data
+            .oauth_mut()
+            .ok_or(CredentialRepositoryError::InvalidCredentialData(None))?;
+        if !super::harness_oauth::is_harness_kind(&oauth.authentication_kind)
+            || oauth.authentication_kind != account.authentication_kind()
+            || oauth.oauth_client_id.as_deref() != Some(expected_client_id)
+            || !super::harness_oauth::valid_harness_scope(&oauth_scope)
+            || secret.refresh_token.is_none()
+        {
+            return Err(CredentialRepositoryError::InvalidCredentialData(None));
+        }
+        oauth.access_token = secret.access_token.expose_secret().to_owned();
+        oauth.refresh_token = secret
+            .refresh_token
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned());
+        if secret.id_token.is_some() {
+            oauth.id_token = secret
+                .id_token
+                .as_ref()
+                .map(|value| value.expose_secret().to_owned());
+        }
+        oauth.oauth_scope = Some(oauth_scope);
+        let credential = CodexCredentialCodec::encode_complete(data)?;
+        let update = CredentialCasUpdate::new(
+            account.id().clone(),
+            account.revision(),
+            unchanged_profile(account),
+            credential,
+            true,
+            access_token_expires_at,
+            next_refresh_at,
+        )
+        .map_err(|source| {
+            CredentialRepositoryError::InvalidCredentialData(Some(ErrorSource::new(source)))
+        })?
+        .preserving_profile()
+        .with_account_state(
+            oauth_account_state(account, CredentialState::Ready),
+            SystemTime::now(),
+            None,
+            None,
+        );
+        cas_revision(self.store.compare_and_swap_credential(update).await?)
+    }
+
     /// 以相同 credential 原子推进刷新退避及本次上游错误事实
     pub async fn defer_refresh(
         &self,

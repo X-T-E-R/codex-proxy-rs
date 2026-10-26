@@ -1117,6 +1117,12 @@ OAuth start 使用：
 客户端不得提交 `credentialRevision`、旧 token 身份或其他并发控制字段。complete 请求也不重复提交
 `accountId`，后端通过 `flowId` 中保存的目标绑定完成授权
 
+OpenAI 授权可以带 `authorizationMethod`。省略或 `codex` 仍走既有 Codex Desktop PKCE，回调只认 `code` 和 `state`，身份仍从 Codex JWT 投影。`opencode` 与 `pi` 是两条独立授权：账号认证种类分别是 `chatgpt_token_sharing` 和 `pi_openai`，各自保存 `client_id`、`oauth_scope` 和 token。重新授权不要提交 `authorizationMethod`；服务端读取该账号现有种类并写入 pending。同一主体可以同时存在 Codex、OpenCode 和 pi 三个账号，账号 ID 互不借用，新流程不解析 Codex JWT 的 `chatgpt_account_id`。
+
+这两条授权的回调由管理员把浏览器最终地址粘贴到既有 complete 接口，不要求 CPR 监听回环端口。pending 固定本次 `redirect_uri`、安装级 `host_id` 和重新授权时的 client ID；complete 同时核对 state 与回调的 origin/path。安装级 host/device ID 持久保存在运行数据目录，账号之间共用；`installation_id` 按账号生成，重新授权保持不变。token 请求走该账号的出站代理，支持 `http`、`https`、`socks5` 和 `socks5h`。刷新只使用该账号自己的 client ID 和 refresh token。额度、资料、订阅、头像和重置卡仍只对认证种类 `oauth` 打开。
+
+导出 OpenCode 或 pi 账号时，CPR 文档在原 token 字段外增加 `authentication_kind`、`client_id` 和 `oauth_scope`。导回时按这些字段直接入库，不访问 Codex token 接口，也不把文档里的 `userId` / `accountId` 当成上游身份。旧 Codex 导出不包含这三个字段。
+
 流程只允许发起它的管理员身份继续；尚未完成的流程过期后需重新发起。
 账号提交成功后，`complete` 保留 24 小时的完成结果。同一管理员使用相同 `provider`、`flowId`
 重试时返回原账号结果，不再执行授权或更新凭据；新提交的 `callbackUrl` 和 `settings` 不会再次应用

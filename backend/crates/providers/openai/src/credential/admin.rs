@@ -65,6 +65,26 @@ pub(crate) struct UnresolvedCodexOAuthCredential {
     pub(crate) enabled: bool,
 }
 
+pub(crate) struct NewHarnessOAuthAccount {
+    pub(crate) account_id: String,
+    pub(crate) name: String,
+    pub(crate) installation_id: String,
+    pub(crate) authentication_kind: String,
+    pub(crate) client_id: String,
+    pub(crate) scopes: String,
+    pub(crate) secret: CodexOAuthSecret,
+    pub(crate) access_token_expires_at: Option<DateTime<Utc>>,
+    pub(crate) enabled: bool,
+}
+
+pub(crate) struct HarnessCredentialRotation {
+    pub(crate) secret: CodexOAuthSecret,
+    pub(crate) client_id: String,
+    pub(crate) scopes: String,
+    pub(crate) allow_client_id_change: bool,
+    pub(crate) access_token_expires_at: Option<DateTime<Utc>>,
+}
+
 impl fmt::Debug for UnresolvedCodexOAuthCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -140,6 +160,14 @@ struct ParsedOAuthAuthentication {
     access_token: Option<String>,
     refresh_token: Option<String>,
     id_token: Option<String>,
+    harness: Option<ParsedHarnessImport>,
+}
+
+struct ParsedHarnessImport {
+    authentication_kind: String,
+    client_id: String,
+    scopes: String,
+    expires_at: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for ParsedOAuthAuthentication {
@@ -270,6 +298,15 @@ struct CodexCprOAuthExportAccount {
     refresh_token: Option<String>,
     id_token: Option<String>,
     access_token_expires_at: Option<String>,
+    #[serde(
+        rename = "authentication_kind",
+        skip_serializing_if = "Option::is_none"
+    )]
+    authentication_kind: Option<String>,
+    #[serde(rename = "client_id", skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
+    #[serde(rename = "oauth_scope", skip_serializing_if = "Option::is_none")]
+    oauth_scope: Option<String>,
 }
 
 /// App 已从 Store 读取的当前账号、revision 与明文 Provider JSON
@@ -652,6 +689,127 @@ impl CodexCredentialAdmin {
         })
     }
 
+    pub(crate) fn prepare_harness_account(
+        &self,
+        input: NewHarnessOAuthAccount,
+    ) -> Result<NewProviderAccount, CodexCredentialAdminError> {
+        let account_id = ProviderAccountId::new(input.account_id)
+            .map_err(|_| CodexCredentialAdminError::InvalidInput)?;
+        let provider = ProviderKind::new(PROVIDER_NAME)
+            .map_err(|_| CodexCredentialAdminError::InvalidInput)?;
+        if input.name.trim().is_empty()
+            || !super::harness_oauth::is_harness_kind(&input.authentication_kind)
+            || input.secret.refresh_token.is_none()
+        {
+            return Err(CodexCredentialAdminError::InvalidInput);
+        }
+        let revision =
+            CredentialRevision::new(1).map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+        let credential = CodexCredentialCodec::encode_complete(CodexCredentialData::OAuth(
+            harness_credential_data(
+                &input.authentication_kind,
+                &input.client_id,
+                &input.scopes,
+                &input.installation_id,
+                &input.secret,
+            )?,
+        ))
+        .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+        let account = ProviderAccount::new(
+            account_id,
+            provider,
+            input.name,
+            None,
+            input.authentication_kind,
+            revision,
+            optional_time(input.access_token_expires_at),
+        )
+        .with_account_facts(
+            input.enabled,
+            CredentialState::Ready,
+            QuotaState::unknown(),
+            None,
+            None,
+        )
+        .with_refresh_schedule(true, None);
+        Ok(NewProviderAccount {
+            model_access: Default::default(),
+            account,
+            credential,
+        })
+    }
+
+    pub(crate) fn prepare_refreshed_harness_rotation(
+        &self,
+        current: LoadedCredential,
+        rotation: HarnessCredentialRotation,
+    ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
+        if current.account.provider().as_str() != PROVIDER_NAME
+            || !super::harness_oauth::is_harness_kind(current.account.authentication_kind())
+        {
+            return Err(CodexCredentialAdminError::InvalidCredential);
+        }
+        let mut data = CodexCredentialCodec::decode_complete(&current.credential)
+            .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+        let oauth = data
+            .oauth_mut()
+            .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+        if oauth.authentication_kind != current.account.authentication_kind()
+            || !super::harness_oauth::valid_harness_client_id(&rotation.client_id)
+            || !super::harness_oauth::valid_harness_scope(&rotation.scopes)
+            || rotation.secret.refresh_token.is_none()
+        {
+            return Err(CodexCredentialAdminError::InvalidCredential);
+        }
+        let current_client_id = oauth
+            .oauth_client_id
+            .clone()
+            .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+        if !rotation.allow_client_id_change && rotation.client_id != current_client_id {
+            return Err(CodexCredentialAdminError::InvalidCredential);
+        }
+        oauth.oauth_client_id = Some(rotation.client_id);
+        oauth.oauth_scope = Some(rotation.scopes);
+        oauth.access_token = rotation.secret.access_token.expose_secret().to_owned();
+        oauth.refresh_token = rotation
+            .secret
+            .refresh_token
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned());
+        if rotation.secret.id_token.is_some() {
+            oauth.id_token = rotation
+                .secret
+                .id_token
+                .as_ref()
+                .map(|value| value.expose_secret().to_owned());
+        }
+        let credential = CodexCredentialCodec::encode_complete(data)
+            .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+        let profile = ProviderAccountUpdate {
+            account_id: current.account.id().clone(),
+            name: current.account.name().to_owned(),
+            email: current.account.email().map(str::to_owned),
+            plan_type: current.account.plan_type().map(str::to_owned),
+        };
+        let credential = CredentialCasUpdate::new(
+            current.account.id().clone(),
+            current.account.revision(),
+            profile.clone(),
+            credential,
+            true,
+            optional_time(rotation.access_token_expires_at),
+            None,
+        )
+        .map_err(|_| CodexCredentialAdminError::InvalidCredential)?
+        .preserving_profile();
+        Ok(PreparedCodexCredentialRotation {
+            profile,
+            credential,
+            replacement_identity: None,
+            refresh_guards: None,
+        })
+    }
+
     /// 严格输出可被 CPR 导入逻辑直接读取的 canonical 文档
     pub fn format_cpr_export(
         &self,
@@ -703,7 +861,10 @@ impl CodexCredentialAdmin {
                 }
 
                 CodexCredentialData::OAuth(data) => {
-                    if account.authentication_kind() != CODEX_AUTHENTICATION_KIND_OAUTH
+                    let harness = super::harness_oauth::is_harness_kind(&data.authentication_kind);
+                    if account.authentication_kind() != data.authentication_kind
+                        || !(account.authentication_kind() == CODEX_AUTHENTICATION_KIND_OAUTH
+                            || harness)
                         || account.has_refresh_token() != data.refresh_token.is_some()
                     {
                         return Err(CodexCredentialAdminError::InvalidCredential);
@@ -717,6 +878,9 @@ impl CodexCredentialAdmin {
                             .access_token_expires_at()
                             .map(DateTime::<Utc>::from)
                             .map(|value| value.to_rfc3339()),
+                        authentication_kind: harness.then(|| data.authentication_kind.clone()),
+                        client_id: harness.then(|| data.oauth_client_id.clone()).flatten(),
+                        oauth_scope: harness.then(|| data.oauth_scope.clone()).flatten(),
                     })
                 }
             };
@@ -865,6 +1029,7 @@ pub struct CodexCredentialAdminService {
     leases: Arc<dyn ProviderLeasePort>,
     runtime_policy: Arc<dyn ProviderRuntimePolicyPort>,
     diagnostics: Arc<dyn gateway_core::diagnostics::OperationalDiagnostics>,
+    harness_token_origin: Option<String>,
 }
 
 impl fmt::Debug for CodexCredentialAdminService {
@@ -895,6 +1060,7 @@ impl CodexCredentialAdminService {
             leases,
             runtime_policy,
             diagnostics,
+            harness_token_origin: None,
         }
     }
 
@@ -902,6 +1068,12 @@ impl CodexCredentialAdminService {
     #[must_use]
     pub fn with_personal_access_token_client(mut self, client: Arc<OpenAiTokenClient>) -> Self {
         self.personal_access_token_client = Some(client);
+        self
+    }
+
+    #[must_use]
+    pub fn with_harness_token_origin(mut self, origin: impl Into<String>) -> Self {
+        self.harness_token_origin = Some(origin.into());
         self
     }
 
@@ -956,6 +1128,14 @@ impl CodexCredentialAdminService {
                 return Err(CodexCredentialAdminError::RefreshLeaseUnavailable);
             }
         };
+        if super::harness_oauth::is_harness_kind(current.account.authentication_kind()) {
+            let mut prepared = self.refresh_harness_account(&current, &runtime).await?;
+            prepared.refresh_guards = Some(ProviderRefreshGuards {
+                _capacity: capacity_guard,
+                _account: account_guard,
+            });
+            return Ok(prepared);
+        }
         let tokens = self
             .refresher
             .refresh_with_proxy(
@@ -1018,6 +1198,87 @@ impl CodexCredentialAdminService {
         Ok(prepared)
     }
 
+    async fn refresh_harness_account(
+        &self,
+        current: &LoadedCredential,
+        runtime: &super::security::CodexRuntimeCredential,
+    ) -> Result<PreparedCodexCredentialRotation, CodexCredentialAdminError> {
+        let method = super::harness_oauth::method_for_kind(current.account.authentication_kind())
+            .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+        let client_id = runtime
+            .oauth_client_id
+            .clone()
+            .filter(|value| super::harness_oauth::valid_harness_client_id(value))
+            .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+        let scopes = runtime
+            .oauth_scope
+            .clone()
+            .filter(|value| super::harness_oauth::valid_harness_scope(value))
+            .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+        let oauth = runtime
+            .authentication
+            .oauth()
+            .ok_or(CodexCredentialAdminError::MissingRefreshToken)?;
+        let refresh_token = oauth
+            .refresh_token
+            .as_ref()
+            .ok_or(CodexCredentialAdminError::MissingRefreshToken)?;
+        let expires_at_ms = current
+            .account
+            .access_token_expires_at()
+            .and_then(|expires_at| {
+                let millis = expires_at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_millis();
+                u64::try_from(millis).ok()
+            })
+            .unwrap_or(0);
+        let tokens = super::harness_oauth::refresh(
+            &super::harness_oauth::HarnessCall {
+                method,
+                proxy_url: current
+                    .account
+                    .outbound_proxy()
+                    .map(|proxy| proxy.expose_url().to_owned()),
+                upstream_origin: self.harness_token_origin.clone(),
+            },
+            &client_id,
+            refresh_token.expose_secret(),
+            oauth.access_token.expose_secret(),
+            &scopes,
+            expires_at_ms,
+        )
+        .await
+        .map_err(map_harness_refresh)?;
+        if tokens.client_id != client_id {
+            return Err(CodexCredentialAdminError::RefreshRejected {
+                code: None,
+                message: None,
+            });
+        }
+        let secret = CodexOAuthSecret {
+            access_token: SecretString::from(tokens.access_token),
+            refresh_token: Some(SecretString::from(tokens.refresh_token)),
+            id_token: tokens.id_token.map(SecretString::from),
+        };
+        Self::record_recovery_log(
+            CodexOAuthRecoveryOperation::ManualRefresh,
+            Some(current.account.id().as_str()),
+            &secret,
+        );
+        CodexCredentialAdmin.prepare_refreshed_harness_rotation(
+            current.clone(),
+            HarnessCredentialRotation {
+                secret,
+                client_id,
+                scopes: tokens.scopes,
+                allow_client_id_change: false,
+                access_token_expires_at: Some(tokens.expires_at),
+            },
+        )
+    }
+
     /// 归一导入 OAuth 凭据到唯一 `NewProviderAccount` 写入路径
     ///
     /// OAuth 导入先取得 access token（直接提供或 RT exchange），再按官方
@@ -1062,6 +1323,45 @@ impl CodexCredentialAdminService {
             };
             let typed_account_id = ProviderAccountId::new(account_id.clone())
                 .map_err(|_| CodexCredentialAdminError::InvalidInput)?;
+            if let Some(harness) = authentication.harness {
+                let access_token = authentication
+                    .access_token
+                    .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+                let refresh_token = authentication
+                    .refresh_token
+                    .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+                let secret = CodexOAuthSecret {
+                    access_token: SecretString::from(access_token),
+                    refresh_token: Some(SecretString::from(refresh_token)),
+                    id_token: authentication.id_token.map(SecretString::from),
+                };
+                Self::record_recovery_log(
+                    CodexOAuthRecoveryOperation::ImportDirect,
+                    Some(account_id.as_str()),
+                    &secret,
+                );
+                let mut prepared =
+                    CodexCredentialAdmin.prepare_harness_account(NewHarnessOAuthAccount {
+                        account_id,
+                        name: candidate
+                            .name
+                            .filter(|name| !name.trim().is_empty())
+                            .unwrap_or_else(|| "OpenAI OAuth".to_owned()),
+                        installation_id: uuid::Uuid::new_v4().to_string(),
+                        authentication_kind: harness.authentication_kind,
+                        client_id: harness.client_id,
+                        scopes: harness.scopes,
+                        secret,
+                        access_token_expires_at: harness.expires_at,
+                        enabled: true,
+                    })?;
+                prepared.model_access = candidate.model_access;
+                prepared.account = prepared
+                    .account
+                    .with_outbound_proxy(candidate.outbound_proxy);
+                accounts.push(prepared);
+                continue;
+            }
             let (mut secret, mut access_token_expires_at) = self
                 .resolve_import_tokens(
                     &typed_account_id,
@@ -1306,7 +1606,9 @@ fn parse_codex_import_account(
         authentication: if is_api_key_import(value) {
             ParsedCodexAuthentication::ApiKey(parse_api_key_import(value)?)
         } else {
-            ParsedCodexAuthentication::OAuth(parse_oauth_import_tokens(value)?)
+            let mut authentication = parse_oauth_import_tokens(value)?;
+            authentication.harness = parse_harness_import(value)?;
+            ParsedCodexAuthentication::OAuth(authentication)
         },
         outbound_proxy: None,
     })
@@ -1443,7 +1745,108 @@ fn parse_oauth_import_tokens(
         access_token,
         refresh_token,
         id_token,
+        harness: None,
     })
+}
+
+fn parse_harness_import(
+    value: &Value,
+) -> Result<Option<ParsedHarnessImport>, CodexCredentialAdminError> {
+    let Some(kind) = value.get("authentication_kind").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if kind == CODEX_AUTHENTICATION_KIND_OAUTH || kind == CODEX_AUTHENTICATION_KIND_API_KEY {
+        return Ok(None);
+    }
+    if !super::harness_oauth::is_harness_kind(kind) {
+        return Err(CodexCredentialAdminError::InvalidCredential);
+    }
+    let client_id = first_string(value, &["client_id", "clientId", "oauth_client_id"])
+        .ok_or(CodexCredentialAdminError::InvalidCredential)?;
+    let scopes = import_scope_text(value).ok_or(CodexCredentialAdminError::InvalidCredential)?;
+    if !super::harness_oauth::valid_harness_client_id(&client_id)
+        || !super::harness_oauth::valid_harness_scope(&scopes)
+    {
+        return Err(CodexCredentialAdminError::InvalidCredential);
+    }
+    let expires_at = first_string(value, &["accessTokenExpiresAt", "access_token_expires_at"])
+        .map(|text| {
+            DateTime::parse_from_rfc3339(&text)
+                .map(|value| value.with_timezone(&Utc))
+                .map_err(|_| CodexCredentialAdminError::InvalidCredential)
+        })
+        .transpose()?;
+    Ok(Some(ParsedHarnessImport {
+        authentication_kind: kind.to_owned(),
+        client_id,
+        scopes,
+        expires_at,
+    }))
+}
+
+fn import_scope_text(value: &Value) -> Option<String> {
+    if let Some(scope) = first_string(value, &["oauth_scope", "oauthScope"]) {
+        return Some(scope);
+    }
+    match value.get("scopes") {
+        Some(Value::String(scope)) if !scope.trim().is_empty() => Some(scope.trim().to_owned()),
+        Some(Value::Array(items)) => {
+            let scopes = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|scope| !scope.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!scopes.is_empty()).then_some(scopes)
+        }
+        _ => None,
+    }
+}
+
+fn harness_credential_data(
+    authentication_kind: &str,
+    client_id: &str,
+    scopes: &str,
+    installation_id: &str,
+    secret: &CodexOAuthSecret,
+) -> Result<super::types::CodexOAuthCredentialData, CodexCredentialAdminError> {
+    Ok(super::types::CodexOAuthCredentialData {
+        transport: ResponsesTransport::Http,
+        schema_version: 1,
+        principal: None,
+        installation_id: installation_id.to_owned(),
+        access_token: secret.access_token.expose_secret().to_owned(),
+        refresh_token: secret
+            .refresh_token
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned()),
+        id_token: secret
+            .id_token
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned()),
+        oauth_client_id: Some(client_id.to_owned()),
+        oauth_scope: Some(scopes.to_owned()),
+        authentication_kind: authentication_kind.to_owned(),
+        cookies: Vec::new(),
+    })
+}
+
+fn map_harness_refresh(
+    error: super::harness_oauth::HarnessRunnerError,
+) -> CodexCredentialAdminError {
+    match error {
+        super::harness_oauth::HarnessRunnerError::Token => {
+            CodexCredentialAdminError::RefreshRejected {
+                code: None,
+                message: None,
+            }
+        }
+        super::harness_oauth::HarnessRunnerError::Callback
+        | super::harness_oauth::HarnessRunnerError::Upstream => {
+            CodexCredentialAdminError::RefreshUnavailable
+        }
+    }
 }
 
 fn is_codex_import_candidate(value: &Value) -> bool {

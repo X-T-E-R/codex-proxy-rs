@@ -5,6 +5,7 @@ mod affinity;
 mod api_key;
 mod catalog;
 mod cookie;
+pub(crate) mod harness_oauth;
 mod oauth;
 mod profile_statistics;
 mod quota;
@@ -69,9 +70,11 @@ pub use selector::{
 };
 pub(crate) use selector::{CodexSelectionModel, SelectCodexProviderEndpointCredential};
 pub use types::{
-    CODEX_AUTHENTICATION_KIND_OAUTH, CodexAccountProfile, CodexCookie, CodexCookieCaptureOutcome,
-    CodexCredentialData, CodexCredentialPrincipal, CodexOAuthCredentialData, CodexOAuthSecret,
-    ResponsesTransport, RuntimeCodexCookie, UpsertCodexCookie,
+    CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING, CODEX_AUTHENTICATION_KIND_OAUTH,
+    CODEX_AUTHENTICATION_KIND_PI_OPENAI, CodexAccountProfile, CodexCookie,
+    CodexCookieCaptureOutcome, CodexCredentialData, CodexCredentialPrincipal,
+    CodexOAuthCredentialData, CodexOAuthSecret, ResponsesTransport, RuntimeCodexCookie,
+    UpsertCodexCookie,
 };
 
 mod diagnostics;

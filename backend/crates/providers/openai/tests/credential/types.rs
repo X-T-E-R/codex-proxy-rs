@@ -53,6 +53,8 @@ fn plaintext_provider_schema_round_trips_dynamic_cookie_data() {
         id_token: None,
         oauth_client_id: Some("client".to_owned()),
         oauth_scope: Some("openid profile".to_owned()),
+        authentication_kind: provider_openai::credential::CODEX_AUTHENTICATION_KIND_OAUTH
+            .to_owned(),
         cookies: vec![CodexCookie {
             name: "oai-did".to_owned(),
             value: "cookie-private".to_owned(),
