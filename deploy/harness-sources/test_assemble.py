@@ -35,10 +35,16 @@ class SnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "openai-harness"
             assemble.verify(root / "sources")
-            for package in ("effect", "openai", "partial-json"):
-                dependency = root / "worker/node_modules" / package / "package.json"
-                dependency.parent.mkdir(parents=True)
-                dependency.write_text("{}")
+            import json
+            dependencies = json.loads((assemble.WORKER / "package.json").read_text(encoding="utf-8"))["dependencies"]
+            worker = root / "worker"
+            worker.mkdir()
+            (worker / "package.json").write_text(json.dumps({"dependencies": dependencies}))
+            (worker / "package-lock.json").write_text(json.dumps({"packages": {"": {"dependencies": dependencies}}}))
+            for package, version in dependencies.items():
+                installed = worker / "node_modules" / package / "package.json"
+                installed.parent.mkdir(parents=True)
+                installed.write_text(json.dumps({"version": version}))
             assemble.seal_bundle(root)
             assemble.verify_bundle(root)
             (root / "sources/opencode/packages/core/src/plugin/provider/chatgpt.ts").write_text("changed")

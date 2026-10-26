@@ -15,6 +15,7 @@ Runtime packages installed from `package-lock.json`:
 | Package | Version | License |
 | --- | --- | --- |
 | `effect` | 4.0.1 | MIT, Copyright (c) 2023 Effectful Technologies Inc |
+| `jose` | 6.0.11 | MIT, Copyright (c) 2018 Filip Skokan |
 | `openai` | 7.19.0 | Apache-2.0, Copyright OpenAI |
 | `partial-json` | 0.1.7 | MIT, Copyright Muspi Merol |
 

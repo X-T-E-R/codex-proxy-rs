@@ -102,9 +102,13 @@ def bundle_files(destination):
 
 def seal_bundle(destination):
     entries = list(bundle_files(destination))
-    assert (destination / "worker/node_modules/effect/package.json").is_file(), "missing locked worker dependencies"
-    assert (destination / "worker/node_modules/openai/package.json").is_file(), "missing locked worker dependencies"
-    assert (destination / "worker/node_modules/partial-json/package.json").is_file(), "missing locked worker dependencies"
+    worker = destination / "worker"
+    dependencies = json.loads((worker / "package.json").read_text(encoding="utf-8"))["dependencies"]
+    locked = json.loads((worker / "package-lock.json").read_text(encoding="utf-8"))["packages"]
+    assert dependencies == locked[""]["dependencies"], "worker lock dependency drift"
+    for name, version in dependencies.items():
+        installed = worker / "node_modules" / name / "package.json"
+        assert installed.is_file() and json.loads(installed.read_text(encoding="utf-8"))["version"] == version, f"missing locked worker dependency: {name}"
     pinned = expected_files()
     actual = {(entry["path"].split("/", 2)[1], entry["path"].split("/", 2)[2]): entry["sha256"]
               for entry in entries if entry["path"].startswith("sources/")}
