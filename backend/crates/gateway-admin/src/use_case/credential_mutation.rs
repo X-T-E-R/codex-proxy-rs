@@ -99,6 +99,9 @@ pub(super) async fn pending_authorization(
     command: &StartAuthorization,
     resource: &'static str,
 ) -> Result<PendingAuthorizationMutation, AdminError> {
+    if command.reauthorization.is_some() && command.authorization_method.is_some() {
+        return Err(AdminError::invalid("重新授权方法必须由账号决定"));
+    }
     let proxy;
     let mut proxy_id = None;
     let target = match &command.reauthorization {
@@ -141,6 +144,7 @@ pub(super) async fn pending_authorization(
             &command.context,
         ),
     )
+    .with_authorization_method(command.authorization_method.clone())
     .with_outbound_proxy(proxy)
     .with_outbound_proxy_id(proxy_id))
 }

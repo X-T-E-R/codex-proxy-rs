@@ -167,6 +167,7 @@ async fn authorization_uses_selected_proxy_regardless_of_probe_status() {
                 context: context("oauth-proxy-status"),
                 name: "授权账号".to_owned(),
                 reauthorization: None,
+                authorization_method: None,
             };
             let result = if kind == "openai" {
                 services

@@ -145,6 +145,7 @@ async fn xai_authorization_should_observe_quota_without_affecting_commit() {
                 context: context("oauth-xai-create"),
                 name: "new xAI credential".to_owned(),
                 reauthorization: None,
+                authorization_method: None,
             })
             .await
             .expect("start authorization");

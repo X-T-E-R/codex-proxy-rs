@@ -744,6 +744,49 @@ mod actions {
     }
 
     #[test]
+    fn oauth_start_should_validate_openai_harness_and_preserve_xai_contract() {
+        for harness in [None, Some("codex"), Some("opencode"), Some("pi")] {
+            let mut request = json!({"provider": "openai", "name": "new account"});
+            if let Some(harness) = harness {
+                request["harness"] = json!(harness);
+            }
+            let parsed: StartAccountAuthorizationRequest = serde_json::from_value(request).unwrap();
+            assert!(parsed.validate().is_ok());
+        }
+        for harness in ["", "Codex", "opencode ", "unknown"] {
+            let request: StartAccountAuthorizationRequest = serde_json::from_value(json!({
+                "provider": "openai", "name": "new account", "harness": harness
+            }))
+            .unwrap();
+            assert_eq!(request.validate().unwrap_err().field(), "harness");
+        }
+        for request in [
+            json!({"provider": "xai", "name": "new account", "harness": "codex"}),
+            json!({"provider": "openai", "name": "reauthorize", "accountId": "acct_1", "harness": "pi"}),
+        ] {
+            let parsed: StartAccountAuthorizationRequest = serde_json::from_value(request).unwrap();
+            assert_eq!(parsed.validate().unwrap_err().field(), "harness");
+        }
+        for provider in ["openai", "xai"] {
+            assert!(
+                serde_json::from_value::<StartAccountAuthorizationRequest>(json!({
+                    "provider": provider, "name": "new account", "harness": null
+                }))
+                .is_err()
+            );
+        }
+        let xai: StartAccountAuthorizationRequest = serde_json::from_value(json!({
+            "provider": "xai", "name": "new account"
+        }))
+        .unwrap();
+        assert!(xai.validate().is_ok());
+        assert!(serde_json::from_value::<CompleteAccountAuthorizationRequest>(json!({
+            "provider": "openai", "flowId": "flow", "callbackUrl": "http://localhost/callback", "harness": "pi"
+        }))
+        .is_err());
+    }
+
+    #[test]
     fn credential_mutation_response_should_not_expose_internal_revision() {
         let response = AccountMutationData::from(CredentialMutationResult {
             config_revision: Revision::new(8).expect("config revision"),

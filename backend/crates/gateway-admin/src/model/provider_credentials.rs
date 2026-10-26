@@ -203,12 +203,45 @@ pub enum AuthorizationMutationTarget {
     Reauthorize { account_id: ProviderAccountId },
 }
 
+/// Provider 自有的 OAuth 方法标识；公共层只校验存储形状，不解释方法语义
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAuthorizationMethod(String);
+
+impl ProviderAuthorizationMethod {
+    pub fn new(value: String) -> Result<Self, AdminError> {
+        if value.is_empty()
+            || value.len() > 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(AdminError::invalid("invalid authorization method"));
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// 方法由新授权的请求选择，或由 Provider 核对重新授权账号后绑定
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizationMethodSelection<'a> {
+    /// OpenAI 旧请求和旧 pending 的缺省方法为 Codex
+    Default,
+    Selected(&'a ProviderAuthorizationMethod),
+    FromAccount(&'a ProviderAccountId),
+}
+
 /// 必须完整进入 Provider opaque pending payload、并在 complete 后原样恢复的事务信封
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAuthorizationMutation {
     provider_kind: ProviderKind,
     target: AuthorizationMutationTarget,
     owner_binding: AuthorizationOwnerBinding,
+    authorization_method: Option<ProviderAuthorizationMethod>,
     outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     outbound_proxy_id: Option<String>,
 }
@@ -224,6 +257,7 @@ impl PendingAuthorizationMutation {
             provider_kind,
             target,
             owner_binding,
+            authorization_method: None,
             outbound_proxy: None,
             outbound_proxy_id: None,
         }
@@ -242,6 +276,30 @@ impl PendingAuthorizationMutation {
     #[must_use]
     pub const fn owner_binding(&self) -> &AuthorizationOwnerBinding {
         &self.owner_binding
+    }
+
+    /// 重新授权的缺省来源必须由 Provider 按账号核对，不能使用客户端选择
+    #[must_use]
+    pub fn authorization_method(&self) -> AuthorizationMethodSelection<'_> {
+        match (&self.target, &self.authorization_method) {
+            (_, Some(method)) => AuthorizationMethodSelection::Selected(method),
+            (AuthorizationMutationTarget::Reauthorize { account_id }, None) => {
+                AuthorizationMethodSelection::FromAccount(account_id)
+            }
+            (AuthorizationMutationTarget::Create { .. }, None) => {
+                AuthorizationMethodSelection::Default
+            }
+        }
+    }
+
+    /// Provider 核对账号方法后也可用此方法固定重新授权的 pending
+    #[must_use]
+    pub fn with_authorization_method(
+        mut self,
+        method: Option<ProviderAuthorizationMethod>,
+    ) -> Self {
+        self.authorization_method = method;
+        self
     }
 
     #[must_use]
@@ -299,6 +357,12 @@ impl PendingAuthorizationMutation {
                 Value::String(self.owner_binding.started_request_id().to_owned()),
             ),
         ]);
+        if let Some(method) = &self.authorization_method {
+            document.insert(
+                "authorization_method".to_owned(),
+                Value::String(method.as_str().to_owned()),
+            );
+        }
         if let Some(proxy) = &self.outbound_proxy {
             document.insert(
                 "outbound_proxy_url".to_owned(),
@@ -338,6 +402,11 @@ impl PendingAuthorizationMutation {
             StoredAuthorizationOwnerV1::AdminApiKey => AuthorizationOwner::AdminApiKey,
             StoredAuthorizationOwnerV1::System => AuthorizationOwner::System,
         };
+        let authorization_method = document
+            .authorization_method
+            .map(ProviderAuthorizationMethod::new)
+            .transpose()
+            .map_err(|_| invalid())?;
         let proxy = document
             .outbound_proxy_url
             .as_deref()
@@ -352,6 +421,7 @@ impl PendingAuthorizationMutation {
                 started_request_id: document.started_request_id,
             },
         )
+        .with_authorization_method(authorization_method)
         .with_outbound_proxy(proxy)
         .with_outbound_proxy_id(document.outbound_proxy_id))
     }
@@ -364,6 +434,8 @@ struct StoredAuthorizationMutationV1 {
     target: StoredAuthorizationTargetV1,
     owner: StoredAuthorizationOwnerV1,
     started_request_id: String,
+    #[serde(default)]
+    authorization_method: Option<String>,
     #[serde(default)]
     outbound_proxy_url: Option<String>,
     #[serde(default)]
@@ -391,6 +463,8 @@ pub struct StartAuthorization {
     pub context: MutationContext,
     pub name: String,
     pub reauthorization: Option<ProviderAccountId>,
+    /// 仅新授权携带客户端选择；重授权由 Provider 核对账号自身方法
+    pub authorization_method: Option<ProviderAuthorizationMethod>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
 }
 

@@ -224,6 +224,7 @@ async fn openai_authorization_create_should_observe_initial_quota() {
             context: context("oauth-start-openai-create"),
             name: "new OpenAI credential".to_owned(),
             reauthorization: None,
+            authorization_method: None,
         })
         .await
         .expect("start authorization");
@@ -285,6 +286,7 @@ async fn openai_authorization_create_should_remain_successful_when_initial_quota
             context: context("oauth-start-openai-quota-failure"),
             name: "new OpenAI credential".to_owned(),
             reauthorization: None,
+            authorization_method: None,
         })
         .await
         .expect("start authorization");
@@ -332,6 +334,7 @@ async fn openai_authorization_store_failure_should_release_claim_for_retry() {
             context: context("oauth-store-retry"),
             name: "new OpenAI credential".to_owned(),
             reauthorization: None,
+            authorization_method: None,
         })
         .await
         .expect("start authorization");
@@ -410,6 +413,7 @@ async fn openai_reauthorization_should_commit_after_credential_revision_advances
             context: context("oauth-start-openai"),
             name: "reauthorize".to_owned(),
             reauthorization: Some(ProviderAccountId::new("acct_test").expect("account ID")),
+            authorization_method: None,
         })
         .await
         .expect("start reauthorization");
@@ -493,6 +497,7 @@ async fn reauthorization_with_import_settings_releases_claim_without_committing(
             context: context("reauthorization-settings"),
             name: "existing account".to_owned(),
             reauthorization: Some(ProviderAccountId::new("acct_test").expect("account ID")),
+            authorization_method: None,
         })
         .await
         .expect("start reauthorization");
@@ -512,4 +517,51 @@ async fn reauthorization_with_import_settings_releases_claim_without_committing(
     assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Invalid);
     assert!(!recorded(&events).contains(&"store.commit_authorization"));
     assert!(store.import_settings().is_empty());
+}
+
+#[tokio::test]
+async fn authorization_method_should_reach_provider_without_client_reauthorization_override() {
+    use gateway_admin::model::provider_credentials::{
+        AuthorizationMethodSelection, ProviderAuthorizationMethod,
+    };
+
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    let store = FakeAccountStore::new("openai", events.clone());
+    let services = service(provider.clone(), store).await;
+    let scope = gateway_core::routing::ProviderKind::new("openai").unwrap();
+    services
+        .credentials()
+        .for_provider(&scope)
+        .unwrap()
+        .start_authorization(StartAuthorization {
+            outbound_proxy: None,
+            context: context("oauth-harness-pi"),
+            name: "new account".to_owned(),
+            reauthorization: None,
+            authorization_method: Some(ProviderAuthorizationMethod::new("pi".to_owned()).unwrap()),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        provider.pending().unwrap().authorization_method(),
+        AuthorizationMethodSelection::Selected(method) if method.as_str() == "pi"
+    ));
+    let error = services
+        .credentials()
+        .for_provider(&scope)
+        .unwrap()
+        .start_authorization(StartAuthorization {
+            outbound_proxy: None,
+            context: context("oauth-client-override"),
+            name: "existing account".to_owned(),
+            reauthorization: Some(ProviderAccountId::new("acct_test").unwrap()),
+            authorization_method: Some(
+                ProviderAuthorizationMethod::new("opencode".to_owned()).unwrap(),
+            ),
+        })
+        .await
+        .expect_err("method of existing account must not be replaced by request");
+    assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Invalid);
+    assert_eq!(recorded(&events), ["provider.start_authorization"]);
 }

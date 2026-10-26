@@ -110,15 +110,31 @@ pub struct StartAccountAuthorizationRequest {
     pub provider: String,
     pub name: String,
     pub account_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present_harness")]
+    pub harness: Option<String>,
     pub outbound_proxy_url: Option<super::wire::AccountProxyUpdate>,
+}
+
+fn deserialize_present_harness<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 impl StartAccountAuthorizationRequest {
     pub fn validate(&self) -> Result<(), WireValidationError> {
-        parse_provider(&self.provider)?;
+        let provider = parse_provider(&self.provider)?;
         require_text(&self.name, MAX_NAME_BYTES, "name")?;
         if let Some(account_id) = self.account_id.as_deref() {
             require_account_id(account_id, "accountId")?;
+        }
+        if let Some(harness) = self.harness.as_deref()
+            && (provider.as_str() != "openai"
+                || self.account_id.is_some()
+                || !matches!(harness, "codex" | "opencode" | "pi"))
+        {
+            return Err(WireValidationError::new("harness"));
         }
         Ok(())
     }
@@ -140,6 +156,11 @@ impl StartAccountAuthorizationRequest {
                 context,
                 name: self.name,
                 reauthorization,
+                authorization_method: self
+                    .harness
+                    .map(gateway_admin::model::provider_credentials::ProviderAuthorizationMethod::new)
+                    .transpose()
+                    .map_err(|_| WireValidationError::new("harness"))?,
                 outbound_proxy: super::wire::proxy_selection(
                     self.outbound_proxy_id,
                     self.outbound_proxy_url,

@@ -1,9 +1,9 @@
 //! 验证 Provider 额度窗口投影与待提交凭据变更的数据合同
 
 use gateway_admin::model::provider_credentials::{
-    AccountUsagePeriod, AuthorizationMutationTarget, AuthorizationOwnerBinding,
-    PendingAuthorizationMutation, ProviderQuota, ProviderQuotaWindow, ProviderQuotaWindowRole,
-    QuotaLocalUsageAttribution,
+    AccountUsagePeriod, AuthorizationMethodSelection, AuthorizationMutationTarget,
+    AuthorizationOwnerBinding, PendingAuthorizationMutation, ProviderAuthorizationMethod,
+    ProviderQuota, ProviderQuotaWindow, ProviderQuotaWindowRole, QuotaLocalUsageAttribution,
 };
 use gateway_admin::model::{MutationActor, MutationContext};
 use gateway_core::account::ProviderAccountId;
@@ -257,6 +257,10 @@ fn pending_mutation_v1_should_keep_existing_storage_fields_and_reject_invalid_do
     });
     let restored =
         PendingAuthorizationMutation::from_storage_v1(legacy.clone()).expect("v1 document");
+    assert!(matches!(
+        restored.authorization_method(),
+        AuthorizationMethodSelection::FromAccount(account_id) if account_id.as_str() == "acct_1"
+    ));
     assert_eq!(Value::Object(restored.to_storage_v1()), legacy);
     for (pointer, invalid) in [
         ("/provider_kind", json!("")),
@@ -275,4 +279,45 @@ fn pending_mutation_v1_should_keep_existing_storage_fields_and_reject_invalid_do
     let mut document = legacy;
     document["schema_version"] = json!(2);
     assert!(PendingAuthorizationMutation::from_storage_v1(document).is_err());
+}
+
+#[test]
+fn pending_mutation_v1_should_restore_provider_method_without_changing_legacy_default() {
+    let owner = AuthorizationOwnerBinding::from_context(&MutationContext {
+        actor: MutationActor::AdminApiKey,
+        request_id: "request-1".to_owned(),
+    });
+    let new_pending = || {
+        PendingAuthorizationMutation::new(
+            ProviderKind::new("openai").unwrap(),
+            AuthorizationMutationTarget::Create {
+                name: "account".to_owned(),
+            },
+            owner.clone(),
+        )
+    };
+    let legacy = new_pending();
+    assert!(matches!(
+        legacy.authorization_method(),
+        AuthorizationMethodSelection::Default
+    ));
+    assert!(legacy.to_storage_v1().get("authorization_method").is_none());
+
+    for method in ["codex", "opencode", "pi"] {
+        let pending = new_pending().with_authorization_method(Some(
+            ProviderAuthorizationMethod::new(method.to_owned()).unwrap(),
+        ));
+        let stored = Value::Object(pending.to_storage_v1());
+        assert_eq!(stored["authorization_method"], method);
+        let restored = PendingAuthorizationMutation::from_storage_v1(stored).unwrap();
+        assert_eq!(restored, pending);
+        assert!(matches!(
+            restored.authorization_method(),
+            AuthorizationMethodSelection::Selected(value) if value.as_str() == method
+        ));
+    }
+
+    let mut invalid = Value::Object(legacy.to_storage_v1());
+    invalid["authorization_method"] = json!("BAD METHOD");
+    assert!(PendingAuthorizationMutation::from_storage_v1(invalid).is_err());
 }
