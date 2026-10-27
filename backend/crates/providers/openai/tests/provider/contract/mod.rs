@@ -6,6 +6,7 @@ mod cookies;
 mod correlation;
 mod error_details;
 mod harness;
+mod harness_framing;
 mod image_account_eligibility;
 mod image_model_access;
 mod model_account_eligibility;

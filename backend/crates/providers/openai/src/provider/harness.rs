@@ -568,38 +568,3 @@ fn harness_error(error: HarnessError, sent: UpstreamSendState) -> ProviderError 
     };
     provider_error(kind, sent)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stored_response_keeps_keepalives_and_rejects_foreign_response_ids() {
-        let mut ids = None;
-        let comment = b": heartbeat\n\n";
-        assert_eq!(
-            public_response_frame(comment, "install-a", &mut ids).unwrap(),
-            comment
-        );
-        assert!(ids.is_none());
-        let created = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_a\"}}\n\n";
-        let frame = public_response_frame(created, "install-a", &mut ids).unwrap();
-        let text = std::str::from_utf8(&frame).unwrap();
-        assert!(text.contains(OPENCODE_RESPONSE_ID_PREFIX));
-        assert!(!text.contains("resp_a"));
-        let other = b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"response_id\":\"resp_b\"}\n\n";
-        assert!(public_response_frame(other, "install-a", &mut ids).is_err());
-    }
-
-    #[test]
-    fn unsupported_input_is_invalid_request_without_upstream_send() {
-        let error = harness_error(
-            HarnessError::InvalidInput {
-                detail: "unsupported content".to_owned(),
-            },
-            UpstreamSendState::NotSent,
-        );
-        assert_eq!(error.kind(), ProviderErrorKind::InvalidRequest);
-        assert_eq!(error.send_state(), UpstreamSendState::NotSent);
-    }
-}
