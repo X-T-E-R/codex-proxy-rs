@@ -105,6 +105,7 @@ pub async fn initialize(
     let session_identity = config
         .session_identity()
         .map_err(|_| OpenAiInitializeError::SessionIdentity)?;
+    let connection_test_session_id = session_identity.connection_test_session_id();
     let http = build_reqwest_client().map_err(|_| OpenAiInitializeError::Transport)?;
     let desktop_release = Arc::new(CodexDesktopReleaseService::new(
         profile.clone(),
@@ -246,6 +247,7 @@ pub async fn initialize(
         },
         websocket_pool,
         desktop_release_status,
+        connection_test_session_id,
     ));
     let worker_contributions = provider::worker_contributions(
         config.timezone,

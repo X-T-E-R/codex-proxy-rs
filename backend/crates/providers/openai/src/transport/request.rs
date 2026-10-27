@@ -20,6 +20,7 @@ use crate::transport::protocol::responses::{
     CodexResponsesRequest, X_CODEX_TURN_STATE_CLIENT_METADATA_KEY,
 };
 
+pub(crate) const CONNECTION_TEST_SESSION_CONTEXT_KEY: &str = "connection_test_session_id";
 const PASSTHROUGH_HEADERS_CONTEXT_KEY: &str = "opaque_request_headers";
 const TURN_ID_CLIENT_METADATA_KEY: &str = "turn_id";
 const THREAD_SPAWN_SUBAGENT_KIND: &str = "thread_spawn";
@@ -111,6 +112,37 @@ pub fn encode_generate_request(
     extract_request_context(&mut encoded);
     apply_protocol_context(&mut encoded, payload.context());
     Ok(encoded)
+}
+
+/// 只用于固定账号的 OAuth 连接测试，账号映射留给统一 correlation 管线
+pub(crate) fn apply_connection_test_identity(
+    request: &mut CodexResponsesRequest,
+    session_id: &str,
+    request_id: &str,
+) {
+    let metadata = json!({
+        "session_id": session_id,
+        "thread_id": session_id,
+        "turn_id": request_id,
+    });
+    let turn_metadata = metadata.to_string();
+    request.client_session_id = Some(session_id.to_owned());
+    request.client_account_session_id = Some(session_id.to_owned());
+    request.client_thread_id = Some(session_id.to_owned());
+    request.client_turn_id = Some(request_id.to_owned());
+    request.client_request_id = Some(request_id.to_owned());
+    request.turn_metadata = Some(turn_metadata.clone());
+    request
+        .body_mut()
+        .insert("prompt_cache_key".to_owned(), json!(session_id));
+    request.explicit_prompt_cache_key = true;
+    request.set_client_metadata(Some(json!({
+        "session_id": session_id,
+        "thread_id": session_id,
+        "turn_id": request_id,
+        "x-client-request-id": request_id,
+        "x-codex-turn-metadata": turn_metadata,
+    })));
 }
 
 fn adapt_codex_responses_body(

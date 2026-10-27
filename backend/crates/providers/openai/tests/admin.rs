@@ -1,5 +1,7 @@
 //! 验证 OpenAI 管理能力、请求画像、Bundle 组装与额度投影
 
+mod connection_test;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};

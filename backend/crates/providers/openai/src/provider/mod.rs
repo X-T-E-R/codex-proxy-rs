@@ -783,11 +783,33 @@ impl CodexProvider {
             generate.protocol_payload().context(),
             &middleware_headers,
         );
+        let codex_oauth = matches!(
+            lease.authentication(),
+            crate::credential::CodexRuntimeAuthentication::OAuth(_)
+        );
+        let connection_test_session = generate
+            .protocol_payload()
+            .context()
+            .get(crate::transport::request::CONNECTION_TEST_SESSION_CONTEXT_KEY)
+            .and_then(Value::as_str)
+            .filter(|_| context.is_diagnostic_required_account());
+        let oauth_connection_test = codex_oauth && connection_test_session.is_some();
+        if let Some(session_id) = connection_test_session.filter(|_| codex_oauth) {
+            crate::transport::request::apply_connection_test_identity(
+                &mut upstream,
+                session_id,
+                context.request_id().as_str(),
+            );
+        }
         let processed = self.prepare_generate_request(&generate, upstream, &context);
         let native_scope = processed.checked_native_continuation_scope(&context)?;
         let mut upstream_request = processed.upstream;
-        let session_transport_key =
-            derive_codex_transport_key(&upstream_request, context.client_api_key_ref());
+        // 每次连接测试独立判断传输健康，不能继承上一测试的粘性 HTTP 降级
+        let session_transport_key = if oauth_connection_test {
+            None
+        } else {
+            derive_codex_transport_key(&upstream_request, context.client_api_key_ref())
+        };
         let previous_session = processed.previous_session;
         let continuation_requested = processed.continuation_requested;
         let session_affinity = processed.session_affinity;
@@ -898,11 +920,14 @@ impl CodexProvider {
         let state_before = trace
             .is_enabled()
             .then(|| crate::transport::diagnostics::evidence::request_state(&upstream_request));
-        scope_request_to_account(
-            &mut upstream_request,
-            lease.installation_id(),
-            account_scope,
-        );
+        // API Key 连接测试使用标准 Responses 正文，不补 Codex 安装身份或轮次字段
+        if codex_oauth || connection_test_session.is_none() {
+            scope_request_to_account(
+                &mut upstream_request,
+                lease.installation_id(),
+                account_scope,
+            );
+        }
         if let Some(before) = state_before {
             trace.record_evidence("provider.request.account_scope", serde_json::json!({
                 "scope": match account_scope {
@@ -918,10 +943,10 @@ impl CodexProvider {
                 "after": crate::transport::diagnostics::evidence::request_state(&upstream_request),
             }));
         }
-        let codex_oauth = matches!(
-            lease.authentication(),
-            crate::credential::CodexRuntimeAuthentication::OAuth(_)
-        );
+        if oauth_connection_test {
+            // WS 握手头不能逐 turn 更新；测试不入普通连接池，避免复用旧 request/turn 头
+            upstream_request.local_conversation_id = None;
+        }
         if codex_oauth {
             normalize_selected_codex_downstream_body(
                 &mut upstream_request,

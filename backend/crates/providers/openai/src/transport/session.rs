@@ -59,6 +59,14 @@ impl CodexSessionIdentity {
         }
     }
 
+    /// 诊断种子与真实客户端的会话锚点分域，账号隔离仍统一由出站 correlation 完成
+    pub(crate) fn connection_test_session_id(&self) -> String {
+        URL_SAFE_NO_PAD.encode(hmac_sha256(
+            &self.secret,
+            &[b"admin-connection-test-session-v1"],
+        ))
+    }
+
     /// 在账号选择前固定一次旧版 `lc_` 会话键
     pub(crate) fn prepare_local_conversation(&self, request: &mut CodexResponsesRequest) {
         if request.local_conversation_id.is_some() {

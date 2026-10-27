@@ -86,6 +86,7 @@ pub(crate) struct OpenAiAdminProvider {
     catalog: Arc<CodexCredentialCatalogService>,
     websocket_pool: Arc<CodexWebSocketPool>,
     desktop_release: CodexDesktopReleaseStatus,
+    connection_test_session_id: String,
 }
 
 pub(crate) struct OpenAiAdminServices {
@@ -105,6 +106,7 @@ impl OpenAiAdminProvider {
         services: OpenAiAdminServices,
         websocket_pool: Arc<CodexWebSocketPool>,
         desktop_release: CodexDesktopReleaseStatus,
+        connection_test_session_id: String,
     ) -> Self {
         Self {
             provider_kind,
@@ -117,6 +119,7 @@ impl OpenAiAdminProvider {
             catalog: services.catalog,
             websocket_pool,
             desktop_release,
+            connection_test_session_id,
         }
     }
 
@@ -276,7 +279,11 @@ impl ProviderAdmin for OpenAiAdminProvider {
         upstream_model: &UpstreamModelId,
         input_text: &str,
     ) -> Result<Operation, ProviderAdminError> {
-        build_connection_test_operation(upstream_model, input_text)
+        build_connection_test_operation(
+            upstream_model,
+            input_text,
+            &self.connection_test_session_id,
+        )
     }
 
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile> {
@@ -1701,6 +1708,7 @@ fn provider_admin_error(kind: ProviderAdminErrorKind) -> ProviderAdminError {
 fn build_connection_test_operation(
     upstream_model: &UpstreamModelId,
     input_text: &str,
+    session_id: &str,
 ) -> Result<Operation, ProviderAdminError> {
     let mut body = Map::new();
     body.insert(
@@ -1718,7 +1726,11 @@ fn build_connection_test_operation(
     body.insert("stream".to_owned(), Value::Bool(true));
     body.insert("store".to_owned(), Value::Bool(false));
     let payload = ProtocolPayload::json_object("openai", body)
-        .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?;
+        .map_err(|_| provider_admin_error(ProviderAdminErrorKind::Invalid))?
+        .with_context(Map::from_iter([(
+            crate::transport::request::CONNECTION_TEST_SESSION_CONTEXT_KEY.to_owned(),
+            Value::String(session_id.to_owned()),
+        )]));
     Ok(Operation::Generate(GenerateRequest::from_protocol_payload(
         payload,
     )))
