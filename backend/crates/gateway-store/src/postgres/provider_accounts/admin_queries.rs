@@ -79,8 +79,11 @@ pub(crate) async fn load_admin_account_page(
              join provider_accounts a on a.id = status.id
             where ($3::text is null or a.provider_kind = $3)
               and ($4::text is null or
+                   lower(a.id) like $4 escape '\\' or
                    lower(a.name) like $4 escape '\\' or
-                   lower(coalesce(a.email, '')) like $4 escape '\\')
+                   lower(coalesce(a.email, '')) like $4 escape '\\' or
+                   lower(coalesce(a.upstream_account_id, '')) like $4 escape '\\' or
+                   lower(coalesce(a.upstream_user_id, '')) like $4 escape '\\')
               and ($5::text is null or status.admin_status = $5)
               and ($6::smallint = 0 or
                    ($6 = 1 and exists (

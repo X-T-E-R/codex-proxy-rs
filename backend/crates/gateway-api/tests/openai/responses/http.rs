@@ -3485,7 +3485,7 @@ async fn websocket_rate_limit_error_projects_retry_after_for_sse_clients() {
     let body = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read SSE body");
-    let events = parse_sse_events(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+    let events = parse_sse_events(std::str::from_utf8(&body).unwrap()).unwrap();
     let failed = events
         .iter()
         .find(|event| event.event.as_deref() == Some("response.failed"))

@@ -759,7 +759,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 - `sortBy`: `email`、`status`、`planType`、`usage`、`lastUsedAt`、`expiresAt`
 - `sortDirection`: `asc`、`desc`
 
-账号列表的 `search` 仅按字面量包含匹配名称和邮箱，不区分大小写；`%`、`_` 和 `\` 按普通字符处理
+账号列表的 `search` 按字面量包含匹配账号 ID、名称、邮箱、上游账号 ID 和上游用户 ID，不区分大小写；`%`、`_` 和 `\` 按普通字符处理
 
 账号视图的 `capacity` 返回查询时的普通并发容量：`usedSlots` 不含独立审批池和排队请求，
 读取运行态失败时为 `null`；`totalSlots` 是应用账号独立配置或全局默认值后的上限，`null` 表示不限。
