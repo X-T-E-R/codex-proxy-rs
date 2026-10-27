@@ -11,7 +11,13 @@ module BuildToolchains
       [match[1], match[2].split('-', 2).first]
     end
     rust_image, image_rust = image.call('backend-builder', 'rust')
-    _, node = image.call('frontend-builder', 'node')
+    frontend_base = dockerfile[/^FROM (\S+) AS frontend-builder$/, 1]
+    raise 'Missing frontend-builder stage' unless frontend_base
+    _, node = if frontend_base == 'node-runtime'
+                image.call('node-runtime', 'node')
+              else
+                image.call('frontend-builder', 'node')
+              end
     raise "Rust toolchain #{rust} differs from Docker builder #{image_rust}" unless rust == image_rust
     { 'rust' => rust, 'rust_image' => rust_image, 'node' => node }
   end
