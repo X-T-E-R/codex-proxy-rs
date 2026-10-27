@@ -1838,9 +1838,12 @@ async fn codex_backend_client_stream_should_error_when_websocket_closes_before_t
 #[tokio::test]
 async fn codex_backend_client_stream_should_preserve_burst_during_downstream_backpressure() {
     const BURST_FRAMES: usize = 256;
+    const PING_INTERVAL: Duration = Duration::from_secs(30);
+    const PONG_TIMEOUT: Duration = Duration::from_secs(30);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let (burst_sent_tx, burst_sent_rx) = tokio::sync::oneshot::channel();
     let (terminal_drained_tx, terminal_drained_rx) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
@@ -1881,11 +1884,12 @@ async fn codex_backend_client_stream_should_preserve_burst_during_downstream_bac
                 return;
             }
         }
-        let _ = sink
-            .send(Message::Text(
-                completed_websocket_response("resp_backpressure", 3, 257).into(),
-            ))
-            .await;
+        sink.send(Message::Text(
+            completed_websocket_response("resp_backpressure", 3, 257).into(),
+        ))
+        .await
+        .unwrap();
+        burst_sent_tx.send(()).unwrap();
         terminal_drained_rx
             .await
             .expect("client should drain the terminal response before server close");
@@ -1893,8 +1897,8 @@ async fn codex_backend_client_stream_should_preserve_burst_during_downstream_bac
         control_frames.abort();
     });
     let pool = Arc::new(CodexWebSocketPool::with_config(CodexWebSocketPoolConfig {
-        ping_interval: Some(Duration::from_millis(5)),
-        ping_timeout: Duration::from_millis(20),
+        ping_interval: Some(PING_INTERVAL),
+        ping_timeout: PONG_TIMEOUT,
         liveness_timeout: None,
         ..websocket_pool_config_for_tests(None, None, None)
     }));
@@ -1914,11 +1918,28 @@ async fn codex_backend_client_stream_should_preserve_burst_during_downstream_bac
         .await
         .expect("websocket stream should open after the first output frame");
 
+    burst_sent_rx
+        .await
+        .expect("server should finish the inbound burst before the backpressure interval");
     tokio::time::sleep(Duration::from_millis(100)).await;
+    // 先让真实 socket 填满有界通道，再分别推进 Ping 与 Pong deadline
+    // 毫秒级真实 deadline 会把 CI 调度与 TCP 延迟误算成背压失败
+    tokio::time::pause();
+    tokio::time::advance(PING_INTERVAL).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(PONG_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    tokio::time::resume();
     let body = timeout(Duration::from_secs(5), async {
         let mut body = String::new();
         while let Some(chunk) = response.body.next().await {
-            let chunk = chunk.expect("backpressured websocket frame should remain valid");
+            let chunk = chunk.unwrap_or_else(|error| match error {
+                CodexClientError::WebSocket(error) => {
+                    panic!("backpressured websocket frame should remain valid: {error:?}")
+                }
+                error => panic!("backpressured websocket frame should remain valid: {error:?}"),
+            });
             body.push_str(std::str::from_utf8(&chunk).unwrap());
         }
         body
