@@ -713,7 +713,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
             rolling_usage: _,
         } = request;
         let mut account = self.account(&account_id).await?;
-        if account.authentication_kind() == crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY {
+        if account.authentication_kind() != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH {
             if refresh {
                 return Err(provider_admin_error(ProviderAdminErrorKind::Unsupported));
             }
@@ -760,7 +760,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
             .zip(&identities)
             .filter(|(request, _)| {
                 request.account.authentication_kind
-                    != crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY
+                    == crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
             })
             .filter_map(|(_, identity)| identity.as_ref().ok().map(|(id, _)| id.clone()))
             .collect::<Vec<_>>();
@@ -784,7 +784,7 @@ impl ProviderAdmin for OpenAiAdminProvider {
             .map(|(request, identity)| {
                 let (id, revision) = identity?;
                 let snapshot = if request.account.authentication_kind
-                    == crate::credential::CODEX_AUTHENTICATION_KIND_API_KEY
+                    != crate::credential::CODEX_AUTHENTICATION_KIND_OAUTH
                 {
                     None
                 } else {

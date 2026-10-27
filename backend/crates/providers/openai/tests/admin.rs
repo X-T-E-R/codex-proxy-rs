@@ -120,7 +120,7 @@ async fn account_capabilities_distinguish_oauth_from_api_key_and_unknown_credent
             && oauth.reset_credits
             && oauth.consume_reset_credit
     );
-    for kind in ["api_key", "unknown"] {
+    for kind in ["api_key", "pi_openai", "chatgpt_token_sharing", "unknown"] {
         assert_eq!(provider.account_capabilities(&id, kind), Default::default());
     }
 }
@@ -967,6 +967,108 @@ async fn openai_admin_batch_quota_isolates_stale_and_invalid_observations() {
     assert!(api_only[0].as_ref().unwrap().windows.is_empty());
     assert!(bundle.admin_provider().read_quotas(&[]).await.is_empty());
     assert_eq!(store.quota_reads() - quota_reads, 1);
+}
+
+#[tokio::test]
+async fn harness_accounts_do_not_query_codex_quota_or_expose_stale_windows() {
+    let store = Arc::new(MemoryAccountStore::default());
+    for (kind, suffix) in [("pi_openai", "pi"), ("chatgpt_token_sharing", "opencode")] {
+        let id = format!("acct_harness_quota_{suffix}");
+        let account_id = ProviderAccountId::new(id.clone()).unwrap();
+        let account = ProviderAccount::new(
+            account_id.clone(),
+            ProviderKind::new("openai").unwrap(),
+            id,
+            None,
+            kind.to_owned(),
+            CredentialRevision::new(1).unwrap(),
+            None,
+        )
+        .with_account_facts(
+            true,
+            CredentialState::Ready,
+            QuotaState::unknown(),
+            None,
+            None,
+        );
+        store
+            .create_account(gateway_core::account::NewProviderAccount {
+                account,
+                credential: gateway_core::account::PlaintextCredential::new(Map::new()),
+                model_access: None,
+            })
+            .await
+            .unwrap();
+    }
+    let config = valid_config();
+    let bundle = provider_openai::initialize(
+        config.config.clone(),
+        provider_ports_with(Arc::clone(&store), Arc::new(TestOAuthPending::default())),
+    )
+    .await
+    .unwrap();
+    let provider = bundle.admin_provider();
+    let quota_reads = store.quota_reads();
+    for suffix in ["pi", "opencode"] {
+        let id = ProviderAccountId::new(format!("acct_harness_quota_{suffix}")).unwrap();
+        assert!(
+            provider
+                .quota(ProviderQuotaRequest {
+                    account_id: id.clone(),
+                    refresh: false,
+                    rolling_usage: None,
+                })
+                .await
+                .unwrap()
+                .windows
+                .is_empty()
+        );
+        assert_eq!(
+            provider
+                .quota(ProviderQuotaRequest {
+                    account_id: id.clone(),
+                    refresh: true,
+                    rolling_usage: None,
+                })
+                .await
+                .unwrap_err()
+                .kind(),
+            ProviderAdminErrorKind::Unsupported
+        );
+        let account = store.account(id.as_str()).unwrap();
+        // 模拟误留的旧观测，认证类型不能借用 Codex 的额度快照
+        store
+            .compare_and_swap_quota(QuotaObservation {
+                account_id: id,
+                expected_revision: account.revision(),
+                observed_at: SystemTime::now(),
+                plan_type: None,
+                state: QuotaState::allowed(SystemTime::now()),
+                quota: OpaqueProviderData::new(
+                    json!({
+                        "rate_limit": { "primary_window": {
+                            "used_percent": 25,
+                            "reset_at": Utc::now().timestamp() + 3600,
+                            "limit_window_seconds": 18000
+                        }}
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                ),
+            })
+            .await
+            .unwrap();
+        let record = account_record(&store.account(account.id().as_str()).unwrap());
+        let result = provider
+            .read_quotas(&[ProviderQuotaReadRequest {
+                account: &record,
+                rolling_usage: None,
+            }])
+            .await;
+        assert!(result[0].as_ref().unwrap().windows.is_empty());
+    }
+    assert_eq!(store.quota_reads(), quota_reads);
 }
 
 #[tokio::test]
