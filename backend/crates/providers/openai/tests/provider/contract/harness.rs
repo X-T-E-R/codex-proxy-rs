@@ -375,12 +375,13 @@ fn harness_request_with_fields(
 #[cfg(debug_assertions)]
 fn harness_sse() -> String {
     let item = json!({"id":"fc_response","type":"function_call","call_id":"call_response","name":"lookup","arguments":"{\"q\":\"x\"}"});
-    [
+    let events = [
         json!({"type":"response.created","response":{"id":"resp_harness","status":"in_progress","output":[]}}),
         json!({"type":"response.output_item.added","output_index":0,"item":item}),
         json!({"type":"response.output_item.done","output_index":0,"item":item}),
         json!({"type":"response.completed","response":{"id":"resp_harness","status":"completed","output":[item],"usage":{"input_tokens":8,"output_tokens":4,"total_tokens":12}}}),
-    ].into_iter().map(|event| format!("data: {event}\n\n")).collect::<String>() + "data: [DONE]\n\n"
+    ].into_iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+    format!(": heartbeat\n\n{events}data: [DONE]\n\n")
 }
 
 #[cfg(debug_assertions)]
@@ -912,6 +913,7 @@ async fn stored_opencode_response_reuses_raw_handle_only_with_its_account_and_re
     );
     assert_eq!(state.payload().get("credential_revision"), Some(&json!(1)));
     let wire = String::from_utf8(downstream).expect("SSE wire");
+    assert!(wire.starts_with(": heartbeat\n\n"));
     assert!(wire.contains(&public));
     assert!(!wire.contains("resp_harness"));
     let pin = NativeContinuationPin::new(
