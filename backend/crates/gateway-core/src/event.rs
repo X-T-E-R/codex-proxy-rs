@@ -830,6 +830,7 @@ pub struct ProviderEvent {
     wire: Option<Box<ProtocolWireEvent>>,
     observation: Option<Box<ProviderResponseObservation>>,
     session_update: Option<Box<ProviderSessionState>>,
+    native_upstream_response_id: Option<OpaqueUpstreamValue>,
     middleware_transformed: bool,
     replayable_prelude: bool,
     middleware_origin_wire: Option<Arc<ProtocolWireEvent>>,
@@ -844,6 +845,7 @@ impl ProviderEvent {
             wire: None,
             observation: None,
             session_update: None,
+            native_upstream_response_id: None,
             middleware_transformed: false,
             replayable_prelude: false,
             middleware_origin_wire: None,
@@ -865,6 +867,7 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
+            native_upstream_response_id: None,
             middleware_transformed: false,
             replayable_prelude: false,
             middleware_origin_wire: None,
@@ -879,6 +882,7 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
+            native_upstream_response_id: None,
             middleware_transformed: false,
             replayable_prelude: false,
             middleware_origin_wire: None,
@@ -893,6 +897,7 @@ impl ProviderEvent {
             wire: None,
             observation: Some(Box::new(observation)),
             session_update: None,
+            native_upstream_response_id: None,
             middleware_transformed: false,
             replayable_prelude: false,
             middleware_origin_wire: None,
@@ -956,6 +961,19 @@ impl ProviderEvent {
     /// terminal 事件上持有它供下一轮使用
     pub fn attach_session_update(&mut self, state: ProviderSessionState) {
         self.session_update = Some(Box::new(state));
+    }
+
+    /// 公开响应 ID 与上游续接 handle 不相同时，附上 Provider 核实的原始 handle
+    pub fn attach_native_upstream_response_id(&mut self, response_id: String) {
+        self.native_upstream_response_id = Some(OpaqueUpstreamValue::new(response_id));
+    }
+
+    /// 只供 Core 构造续接 pin，不能代替客户端可见的 canonical 响应 ID
+    #[must_use]
+    pub fn native_upstream_response_id(&self) -> Option<&str> {
+        self.native_upstream_response_id
+            .as_ref()
+            .map(OpaqueUpstreamValue::as_str)
     }
 
     /// 返回 Provider 私有的连接内状态更新

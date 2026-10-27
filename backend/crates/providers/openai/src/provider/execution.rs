@@ -419,6 +419,8 @@ pub(super) struct OpenAiSessionState {
     #[serde(default)]
     pub(super) client_turn_id: Option<String>,
     pub(super) continuation_scope: OpenAiContinuationScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) harness_kind: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,6 +439,7 @@ pub(super) struct OpenAiSessionCapture {
     pub(super) client_turn_id: Option<String>,
     pub(super) response_store: bool,
     pub(super) continuation_scope: Option<OpenAiContinuationScope>,
+    pub(super) harness_kind: Option<String>,
 }
 
 pub(super) fn same_client_turn(previous: Option<&str>, current: Option<&str>) -> bool {
@@ -482,6 +485,7 @@ fn encode_openai_session_capture(
         turn_state: capture.turn_state.clone(),
         client_turn_id: capture.client_turn_id.clone(),
         continuation_scope,
+        harness_kind: capture.harness_kind.clone(),
     })
 }
 

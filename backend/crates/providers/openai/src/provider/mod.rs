@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, future::BoxFuture};
 use gateway_core::account::{AccountFeedbackStats, ProviderAccount};
+use gateway_core::engine::continuation::OPENCODE_RESPONSE_ID_PREFIX;
 use gateway_core::engine::continuation::{ContinuationBinding, NativeContinuationScope};
 use gateway_core::engine::middleware::MiddlewareHeader;
 use gateway_core::engine::provider::{
@@ -675,12 +676,36 @@ impl Provider for CodexProvider {
         if let Some(prepared) = preselection.as_ref() {
             prepared.checked_native_continuation_scope(&context)?;
         }
-        // 源库的非持久化 HTTP/SSE 只消费完整新链；预热和增量续接仍由原传输处理
+        // 版本化公开 ID 的 pin 失效时不可将原 OpenCode 续接误送旧 Codex 账号
+        let marked_continuation = preselection.as_ref().is_some_and(|prepared| {
+            prepared
+                .upstream
+                .previous_response_id()
+                .is_some_and(|id| id.starts_with(OPENCODE_RESPONSE_ID_PREFIX))
+        });
+        let harness_pin = context
+            .continuation()
+            .and_then(ContinuationBinding::pinned)
+            .filter(|pin| {
+                pin.provider().as_str() == PROVIDER_NAME
+                    && pin.matches_client(context.client_api_key_ref())
+                    && pin.session_state().is_some_and(|state| {
+                        state.provider() == PROVIDER_NAME
+                            && state.payload().get("harness_kind").and_then(Value::as_str)
+                                == Some("opencode")
+                    })
+            });
+        if marked_continuation && (guardian || harness_pin.is_none())
+            || harness_pin.is_some() && !marked_continuation
+        {
+            return Err(continuation_replay_required_error("scope_unavailable"));
+        }
         let allow_harness = !guardian
             && preselection.as_ref().is_some_and(|prepared| {
                 prepared.upstream.generate()
-                    && !prepared.continuation_requested
-                    && prepared.upstream.previous_response_id().is_none()
+                    && ((!prepared.continuation_requested
+                        && prepared.upstream.previous_response_id().is_none())
+                        || (marked_continuation && harness_pin.is_some()))
             });
         let (selection_session_affinity, requires_websocket) =
             preselection.map_or((None, false), |prepared| {
@@ -879,9 +904,20 @@ impl CodexProvider {
         let session_affinity = processed.session_affinity;
         if crate::credential::harness_oauth::is_harness_kind(lease.account().authentication_kind())
         {
-            if continuation_requested
-                || upstream_request.previous_response_id().is_some()
-                || !upstream_request.generate()
+            let native_opencode = upstream_request
+                .previous_response_id()
+                .is_some_and(|id| id.starts_with(OPENCODE_RESPONSE_ID_PREFIX))
+                && context
+                    .continuation()
+                    .and_then(ContinuationBinding::pinned)
+                    .and_then(|pin| pin.session_state())
+                    .is_some_and(|state| {
+                        state.payload().get("harness_kind").and_then(Value::as_str)
+                            == Some("opencode")
+                    });
+            if !upstream_request.generate()
+                || (continuation_requested || upstream_request.previous_response_id().is_some())
+                    && !native_opencode
             {
                 return Err(continuation_replay_required_error("scope_unavailable"));
             }
@@ -1162,6 +1198,7 @@ impl CodexProvider {
                 client_turn_id: upstream_request.client_turn_id.clone(),
                 response_store,
                 continuation_scope: None,
+                harness_kind: None,
             });
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let session_transport_key_hash = session_transport_key

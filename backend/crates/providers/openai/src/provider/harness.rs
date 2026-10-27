@@ -15,8 +15,10 @@ use std::{path::PathBuf, sync::Arc};
 
 use super::{
     AttemptContext, CodexAccountFailure, CodexCanonicalDecoder, CodexCanonicalOutcome,
-    CodexCredentialLease, CodexProvider, CodexUpstreamDiagnostics, MiddlewareHeader,
-    ReplayBoundary, map_canonical_error, provider_error,
+    CodexCredentialLease, CodexProvider, CodexUpstreamDiagnostics, ContinuationBinding,
+    MiddlewareHeader, OPENCODE_RESPONSE_ID_PREFIX, OpenAiContinuationScope, OpenAiSessionCapture,
+    ReplayBoundary, attach_openai_session_update, continuation_replay_required_error,
+    map_canonical_error, provider_error,
 };
 use crate::credential::harness_oauth::{HarnessMethod, method_for_kind};
 use crate::credential::{CodexCredentialSelector, opencode_fast_base};
@@ -81,7 +83,60 @@ impl CodexProvider {
             session_affinity_id: raw_session.filter(|parent| parent != &session_id),
         };
         let mut body = generate.protocol_payload().body().clone();
-        if has_account_bound_history(&body) && (!lease.affinity_hit() || lease.account_switch()) {
+        if body.get("store").is_some_and(|value| !value.is_boolean())
+            || method == HarnessMethod::Pi && body.get("store") == Some(&Value::Bool(true))
+        {
+            return Err(provider_error(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            )
+            .with_retry_prohibited()
+            .with_diagnostic(super::ProviderDiagnostic::new(
+                "fixed pi Responses does not support stored continuation",
+            )));
+        }
+        let store_response =
+            method == HarnessMethod::OpenCode && body.get("store") == Some(&Value::Bool(true));
+        let native_owner =
+            if let Some(public) = body.get("previous_response_id").and_then(Value::as_str) {
+                let pinned = context.continuation().and_then(ContinuationBinding::pinned);
+                let state = pinned
+                    .and_then(|pin| pin.session_state())
+                    .filter(|state| state.provider() == "openai")
+                    .and_then(|state| {
+                        serde_json::from_value::<super::OpenAiSessionState>(Value::Object(
+                            state.payload().clone(),
+                        ))
+                        .ok()
+                    });
+                let Some((pin, _)) = pinned.zip(state).filter(|(pin, state)| {
+                    method == HarnessMethod::OpenCode
+                    && public.starts_with(OPENCODE_RESPONSE_ID_PREFIX)
+                    && pin.previous_response_id().as_str() == public
+                    && pin.scope()
+                        == gateway_core::engine::continuation::NativeContinuationScope::Persisted
+                    && pin.provider().as_str() == "openai"
+                    && pin.matches_client(context.client_api_key_ref())
+                    && pin.account() == lease.account_id()
+                    && state.harness_kind.as_deref() == Some("opencode")
+                    && state.account_id == lease.account_id().as_str()
+                    && state.credential_revision == Some(lease.account().revision().get())
+                    && state.continuation_scope == OpenAiContinuationScope::Persisted
+                }) else {
+                    return Err(continuation_replay_required_error("scope_unavailable"));
+                };
+                body.insert(
+                    "previous_response_id".to_owned(),
+                    Value::String(pin.upstream_response_id().as_str().to_owned()),
+                );
+                true
+            } else {
+                false
+            };
+        if has_account_bound_history(&body)
+            && !native_owner
+            && (!lease.affinity_hit() || lease.account_switch())
+        {
             return Err(provider_error(
                 ProviderErrorKind::InvalidRequest,
                 UpstreamSendState::NotSent,
@@ -91,9 +146,49 @@ impl CodexProvider {
                 "account-bound Responses history cannot be replayed without its original account",
             )));
         }
-        // 会话身份已从正文/上下文解释并按账号映到源码头，不作为 Responses 业务选项重发
+        // 会话身份和子代理标记已经由权威解析参与选号，不能作为上游业务字段发送
+        if let Some(metadata) = body.remove("client_metadata") {
+            let recognized = metadata.as_object().is_some_and(|fields| {
+                fields.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "session_id"
+                            | "thread_id"
+                            | "turn_id"
+                            | "turnMetadata"
+                            | "turn_metadata"
+                            | "x-codex-turn-metadata"
+                            | "x-openai-subagent"
+                            | "x-codex-installation-id"
+                            | "installation_id"
+                            | "installationId"
+                    )
+                })
+            });
+            if !recognized {
+                return Err(provider_error(
+                    ProviderErrorKind::InvalidRequest,
+                    UpstreamSendState::NotSent,
+                )
+                .with_retry_prohibited()
+                .with_diagnostic(super::ProviderDiagnostic::new(
+                    "unsupported client_metadata in fixed Responses harness",
+                )));
+            }
+        }
         body.remove("session_id");
         body.remove("thread_id");
+        if body
+            .get("prompt_cache_key")
+            .is_some_and(|key| key.as_str().is_none_or(|key| key.trim().is_empty()))
+        {
+            return Err(provider_error(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            )
+            .with_retry_prohibited()
+            .with_diagnostic(super::ProviderDiagnostic::new("invalid prompt_cache_key")));
+        }
         let request_model = if method == HarnessMethod::OpenCode {
             opencode_fast_base(model.as_str()).unwrap_or(model.as_str())
         } else {
@@ -179,13 +274,26 @@ impl CodexProvider {
             lease.capacity_snapshot(),
         ));
         let can_update_account = lease.allows_account_state_mutation();
+        let capture = store_response.then(|| OpenAiSessionCapture {
+            account_id: lease.account_id().as_str().to_owned(),
+            credential_revision: Some(lease.account().revision().get()),
+            conversation_id: None,
+            turn_state: None,
+            client_turn_id: None,
+            response_store: true,
+            continuation_scope: Some(OpenAiContinuationScope::Persisted),
+            harness_kind: Some("opencode".to_owned()),
+        });
         let lease = Arc::new(lease);
         let events = harness_response_stream(
             runtime,
             request,
             context,
-            model,
-            service_tier,
+            HarnessResponseModel {
+                model,
+                service_tier,
+            },
+            capture,
             Arc::clone(&self.selector),
             Arc::clone(&lease),
         );
@@ -224,27 +332,35 @@ fn has_account_bound_history(body: &serde_json::Map<String, Value>) -> bool {
     body.get("input").is_some_and(bound)
 }
 
+struct HarnessResponseModel {
+    model: UpstreamModelId,
+    service_tier: Option<String>,
+}
+
 fn harness_response_stream(
     runtime: HarnessWorkerConfig,
     request: ResponsesCall,
     context: AttemptContext,
-    model: UpstreamModelId,
-    service_tier: Option<String>,
+    response_model: HarnessResponseModel,
+    mut capture: Option<OpenAiSessionCapture>,
     selector: Arc<CodexCredentialSelector>,
     lease: Arc<CodexCredentialLease>,
 ) -> EventStream {
     Box::pin(async_stream::try_stream! {
+        let installation_id = request.installation_id.clone();
+        let public_ids = capture.is_some();
+        let mut response_ids = None;
         let session = HarnessSession::open(runtime).await.map_err(|error| {
             tracing::error!(error = %error, "OpenAI Responses harness could not start");
             harness_error(error, UpstreamSendState::NotSent)
         })?;
         let mut response = session.open_responses(request, context.cancellation()).await
             .map_err(|error| harness_error(error, UpstreamSendState::NotSent))?;
-        let mut decoder = CodexCanonicalDecoder::new(model.as_str())
+        let mut decoder = CodexCanonicalDecoder::new(response_model.model.as_str())
             .with_trace(context.trace())
             .with_pricing(context.pricing().get("openai")
-                .and_then(|models| models.get(model.as_str())).cloned())
-            .with_requested_service_tier(service_tier.as_deref())
+                .and_then(|models| models.get(response_model.model.as_str())).cloned())
+            .with_requested_service_tier(response_model.service_tier.as_deref())
             .with_raw_sse_passthrough();
         let mut sent = UpstreamSendState::NotSent;
         let mut status = None;
@@ -275,7 +391,11 @@ fn harness_response_stream(
                         .and_then(Value::as_str)
                         .and_then(|text| base64::engine::general_purpose::STANDARD.decode(text).ok())
                         .ok_or_else(|| provider_error(ProviderErrorKind::Protocol, sent))?;
-                    let events = match decoder.push(&raw) {
+                    let frame = if public_ids {
+                        public_response_frame(&raw, &installation_id, &mut response_ids)
+                            .map_err(|_| provider_error(ProviderErrorKind::Protocol, sent))?
+                    } else { raw };
+                    let events = match decoder.push(&frame) {
                         CodexCanonicalOutcome::Events(events) => events,
                         CodexCanonicalOutcome::Failed(failure) => {
                             let (events, error, semantic_output_seen) = failure.into_parts();
@@ -315,6 +435,16 @@ fn harness_response_stream(
                     if !completed {
                         Err(provider_error(ProviderErrorKind::Protocol, sent))?;
                     }
+                    if let Some((raw, _)) = response_ids.as_ref() {
+                        for event in &mut terminal_events {
+                            if event.canonical_facts().iter().any(|fact| matches!(fact, GatewayEvent::Completed(_))) {
+                                event.attach_native_upstream_response_id(raw.clone());
+                            }
+                        }
+                        attach_openai_session_update(&mut terminal_events, &mut capture);
+                    } else if public_ids {
+                        Err(provider_error(ProviderErrorKind::Protocol, sent))?;
+                    }
                     for event in terminal_events { yield event; }
                     break;
                 }
@@ -343,6 +473,58 @@ fn harness_response_stream(
         drop(response);
         session.shutdown().await.map_err(|error| harness_error(error, sent))?;
     })
+}
+
+/// 只对已明确存储的 OpenCode 响应重写公开 ID，保留 SSE 帧的其他行
+fn public_response_frame(
+    frame: &[u8],
+    installation_id: &str,
+    ids: &mut Option<(String, String)>,
+) -> Result<Vec<u8>, ()> {
+    let text = std::str::from_utf8(frame).map_err(|_| ())?;
+    let Some(start) = text.find("data: ") else {
+        return Ok(frame.to_vec());
+    };
+    let start = start + "data: ".len();
+    let end = start + text[start..].find('\n').ok_or(())?;
+    let data = text[start..end].trim_end_matches('\r');
+    if data == "[DONE]" {
+        return Ok(frame.to_vec());
+    }
+    let mut event: Value = serde_json::from_str(data).map_err(|_| ())?;
+    if let Some(raw) = event
+        .pointer("/response/id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    {
+        if let Some((original, _)) = ids.as_ref() {
+            if original != &raw {
+                return Err(());
+            }
+        } else {
+            let public = format!(
+                "{OPENCODE_RESPONSE_ID_PREFIX}{}",
+                crate::transport::account_scoped_id(installation_id, &raw)
+            );
+            *ids = Some((raw, public));
+        }
+        if let Some(id) = event.pointer_mut("/response/id") {
+            *id = Value::String(ids.as_ref().ok_or(())?.1.clone());
+        }
+    }
+    if let Some(id) = event.get_mut("response_id") {
+        let (raw, public) = ids.as_ref().ok_or(())?;
+        if id.as_str() != Some(raw) {
+            return Err(());
+        }
+        *id = Value::String(public.clone());
+    }
+    let serialized = serde_json::to_string(&event).map_err(|_| ())?;
+    let mut output = Vec::with_capacity(frame.len() + OPENCODE_RESPONSE_ID_PREFIX.len() + 40);
+    output.extend_from_slice(&frame[..start]);
+    output.extend_from_slice(serialized.as_bytes());
+    output.extend_from_slice(&frame[end..]);
+    Ok(output)
 }
 
 fn harness_error_with_status(
@@ -390,6 +572,24 @@ fn harness_error(error: HarnessError, sent: UpstreamSendState) -> ProviderError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_response_keeps_keepalives_and_rejects_foreign_response_ids() {
+        let mut ids = None;
+        let comment = b": heartbeat\n\n";
+        assert_eq!(
+            public_response_frame(comment, "install-a", &mut ids).unwrap(),
+            comment
+        );
+        assert!(ids.is_none());
+        let created = b"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_a\"}}\n\n";
+        let frame = public_response_frame(created, "install-a", &mut ids).unwrap();
+        let text = std::str::from_utf8(&frame).unwrap();
+        assert!(text.contains(OPENCODE_RESPONSE_ID_PREFIX));
+        assert!(!text.contains("resp_a"));
+        let other = b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"response_id\":\"resp_b\"}\n\n";
+        assert!(public_response_frame(other, "install-a", &mut ids).is_err());
+    }
 
     #[test]
     fn unsupported_input_is_invalid_request_without_upstream_send() {

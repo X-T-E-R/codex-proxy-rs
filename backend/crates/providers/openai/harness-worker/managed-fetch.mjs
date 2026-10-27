@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { CREDIT, HTTP_BODY, HTTP_HEAD, HTTP_REQUEST, jsonPayload, writeJson } from "./protocol.mjs";
+import { CREDIT, HTTP_BODY, HTTP_HEAD, HTTP_REQUEST, HTTP_UPLOAD_CHUNK, HTTP_UPLOAD_END,
+  jsonPayload, writeFrame, writeJson } from "./protocol.mjs";
 
 const channels = new Map();
 let nextId = 1;
@@ -173,10 +174,17 @@ async function exchange(method, url, headers, body, signal, callId, requestId, o
       method,
       url,
       headers,
-      body_base64: Buffer.from(body).toString("base64"),
+      body_len: body.length,
       call_id: callId,
       request_id: requestId,
     });
+    // 原生请求正文按受管二进制帧传递，避免第二次 base64 放大
+    for (let offset = 0; offset < body.length; offset += 512 * 1024) {
+      if (signal?.aborted) throw new Error("cancelled");
+      await writeFrame(HTTP_UPLOAD_CHUNK, id, body.subarray(offset, offset + 512 * 1024));
+    }
+    if (signal?.aborted) throw new Error("cancelled");
+    await writeFrame(HTTP_UPLOAD_END, id, Buffer.alloc(0));
     const head = await channel.head;
     if (onWire) await onWire({ kind: "head", status: head.status,
       headers: (head.headers ?? []).filter(([name]) => ["x-request-id", "x-oai-request-id", "retry-after"].includes(name.toLowerCase())) });

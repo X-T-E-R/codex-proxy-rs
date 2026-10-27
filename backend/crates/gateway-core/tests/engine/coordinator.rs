@@ -1584,6 +1584,43 @@ fn success_preserves_opaque_upstream_response_id_and_builds_native_pin() {
 }
 
 #[test]
+fn public_response_id_looks_up_native_pin_while_provider_raw_id_remains_upstream_handle() {
+    let public = "cpr_oc_v1_public_response";
+    let raw = "resp_private_upstream";
+    let operation = generate_operation();
+    let route_plan = plan(&operation);
+    let mut terminal =
+        ProviderEvent::canonical(GatewayEvent::Completed(ResponseMeta::new(public, "gpt-5")));
+    terminal.attach_native_upstream_response_id(raw.to_owned());
+    terminal.attach_session_update(ProviderSessionState::new("openai", Map::new()).expect("state"));
+    let (coordinator, _, _) = coordinator(vec![Script::ObservedStream {
+        account_id: "acct_one",
+        items: vec![
+            Ok(ProviderEvent::canonical(GatewayEvent::Started(
+                ResponseMeta::new(public, "gpt-5"),
+            ))),
+            Ok(terminal),
+        ],
+    }]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("start execution");
+    block_on(session.collect_uncommitted()).expect("collect response");
+    let state = ProviderSessionState::new("openai", Map::new()).expect("state");
+    let pin = session
+        .native_continuation_pin(&state)
+        .expect("native continuation pin");
+    assert_eq!(pin.previous_response_id().as_str(), public);
+    assert_eq!(pin.upstream_response_id().as_str(), raw);
+}
+
+#[test]
 fn canonical_identity_change_and_empty_terminal_id_are_observational() {
     let operation = generate_operation();
     let route_plan = plan(&operation);

@@ -198,6 +198,17 @@ fn harness_request_with_model(
     model: &str,
     tier: Option<&str>,
 ) -> ProviderRequest {
+    harness_request_with_fields(thread, history, model, tier, &[])
+}
+
+#[cfg(debug_assertions)]
+fn harness_request_with_fields(
+    thread: &str,
+    history: bool,
+    model: &str,
+    tier: Option<&str>,
+    extra: &[(&str, Value)],
+) -> ProviderRequest {
     let input = if history {
         json!([
             {"type":"message","role":"user","content":[{"type":"input_text","text":"Earlier user"}]},
@@ -223,6 +234,9 @@ fn harness_request_with_model(
     ]);
     if let Some(tier) = tier {
         fields.insert("service_tier".to_owned(), json!(tier));
+    }
+    for (key, value) in extra {
+        fields.insert((*key).to_owned(), value.clone());
     }
     let payload = ProtocolPayload::json_object("openai", fields).expect("request");
     planned_request_with_presentation(
@@ -642,4 +656,279 @@ async fn selected_harness_completes_fixed_source_mock_and_protects_account_histo
             6 + cases.len()
         );
     }
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn stored_opencode_response_reuses_raw_handle_only_with_its_account_and_revision() {
+    const CHILD: &str = "CPR_TEST_STORED_OPENCODE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../");
+        let bundle = tempfile::tempdir().expect("pinned source bundle");
+        let assembled = std::process::Command::new("python")
+            .arg(root.join("deploy/harness-sources/assemble.py"))
+            .arg("assemble")
+            .arg("--output")
+            .arg(bundle.path().join("openai-harness"))
+            .output()
+            .expect("assemble pinned sources");
+        assert!(
+            assembled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&assembled.stderr)
+        );
+        let result = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                std::thread::current().name().expect("test name"),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(
+                "CPR_OPENAI_HARNESS_WORKER_DIR",
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("harness-worker"),
+            )
+            .env(
+                "CPR_OPENCODE_SOURCE",
+                bundle.path().join("openai-harness/sources/opencode"),
+            )
+            .env(
+                "CPR_PI_SOURCE",
+                bundle.path().join("openai-harness/sources/pi"),
+            )
+            .output()
+            .expect("isolated test process");
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let origin = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer token-account-a"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(harness_sse(), "text/event-stream"))
+        .expect(2)
+        .mount(&origin)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    seed_harness_as(
+        &store,
+        "acct_affinity_switch_a",
+        CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+        "token-account-a",
+    )
+    .await;
+    let provider = provider_with_affinity(&store, Arc::new(MemorySessionAffinity::default()));
+    let provider = Arc::new(
+        Arc::try_unwrap(provider)
+            .unwrap_or_else(|_| panic!("provider owner"))
+            .with_harness_test_dial_loopback(*origin.address()),
+    );
+    let first = harness_request_with_fields(
+        "root_provider_harness",
+        false,
+        "gpt-5.6-luna",
+        None,
+        &[
+            ("store", json!(true)),
+            (
+                "client_metadata",
+                json!({"x-openai-subagent":"worker","thread_id":"root_provider_harness"}),
+            ),
+            ("prompt_cache_key", json!("shared-cache")),
+        ],
+    );
+    let mut stream = provider
+        .clone()
+        .execute(first, harness_attempt("req_store_first", BTreeSet::new()))
+        .await
+        .expect("first stored call");
+    let mut public = None;
+    let mut state = None;
+    let mut raw = None;
+    let mut downstream = Vec::new();
+    while let Some(item) = stream.next().await {
+        let event = item.expect("first canonical event");
+        for fact in event.canonical_facts() {
+            if let GatewayEvent::Completed(meta) = fact {
+                public = Some(meta.response_id().to_owned());
+            }
+        }
+        state = event.session_update().cloned().or(state);
+        raw = event
+            .native_upstream_response_id()
+            .map(str::to_owned)
+            .or(raw);
+        if let Some(frame) = event.wire_event().and_then(|wire| wire.raw_sse_frame()) {
+            downstream.extend_from_slice(frame);
+        }
+    }
+    let public = public.expect("public completed ID");
+    let raw = raw.expect("raw handle");
+    let state = state.expect("provider session update");
+    assert!(public.starts_with("cpr_oc_v1_"));
+    assert_ne!(public, raw);
+    assert_eq!(raw, "resp_harness");
+    assert_eq!(
+        state.payload().get("harness_kind"),
+        Some(&json!("opencode"))
+    );
+    assert_eq!(state.payload().get("credential_revision"), Some(&json!(1)));
+    let wire = String::from_utf8(downstream).expect("SSE wire");
+    assert!(wire.contains(&public));
+    assert!(!wire.contains("resp_harness"));
+    let pin = NativeContinuationPin::new(
+        PreviousResponseId::new(public.clone()),
+        PreviousResponseId::new(raw.clone()),
+        ClientApiKeyId::new("key_openai_contract").unwrap(),
+        ProviderKind::new("openai").unwrap(),
+        ProviderAccountId::new("acct_affinity_switch_a").unwrap(),
+    )
+    .with_scope(gateway_core::engine::continuation::NativeContinuationScope::Persisted)
+    .with_session_state(state.clone());
+    let attempt = |request_id: &str, pin: NativeContinuationPin| {
+        let owner = ProviderAccountStateOwner::new(
+            ProviderKind::new("openai").unwrap(),
+            pin.account().clone(),
+        );
+        AttemptContext::new(
+            RequestAttemptContext::new(
+                ModelRequestId::new(request_id).unwrap(),
+                ClientApiKeyId::new("key_openai_contract").unwrap(),
+            ),
+            NonZeroU32::MIN,
+            SystemTime::now() + Duration::from_secs(30),
+            account_policy(),
+            AccountAttemptContext::new(BTreeSet::new(), None, Some(owner))
+                .with_account_scope(contract_account_scope()),
+            Some(ContinuationBinding::Pinned(pin)),
+            CancellationToken::new(),
+        )
+        .with_continuation_attempt(ContinuationAttempt::Native)
+        .with_transport(AttemptTransport::Fallback)
+    };
+    let followup = || {
+        harness_request_with_fields(
+            "root_provider_harness",
+            false,
+            "gpt-5.6-luna",
+            None,
+            &[
+                ("store", json!(true)),
+                ("previous_response_id", json!(public)),
+            ],
+        )
+    };
+    let mut stream = provider
+        .clone()
+        .execute(followup(), attempt("req_store_second", pin.clone()))
+        .await
+        .expect("pinned same-account continuation");
+    while let Some(item) = stream.next().await {
+        item.expect("second canonical event");
+    }
+    let requests = origin.received_requests().await.expect("mock requests");
+    assert_eq!(requests.len(), 2);
+    let second: Value = serde_json::from_slice(&requests[1].body).expect("second upstream body");
+    assert_eq!(second["previous_response_id"], raw);
+    assert_eq!(second["store"], true);
+    assert_eq!(second["prompt_cache_key"], Value::Null);
+    let first_body: Value = serde_json::from_slice(&requests[0].body).expect("first upstream body");
+    assert!(
+        first_body["prompt_cache_key"]
+            .as_str()
+            .is_some_and(|key| key != "shared-cache")
+    );
+
+    seed_harness_as(
+        &store,
+        "acct_affinity_switch_b",
+        CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+        "token-account-b",
+    )
+    .await;
+    let foreign_pin = NativeContinuationPin::new(
+        PreviousResponseId::new(public.clone()),
+        PreviousResponseId::new(raw.clone()),
+        ClientApiKeyId::new("key_openai_contract").unwrap(),
+        ProviderKind::new("openai").unwrap(),
+        ProviderAccountId::new("acct_affinity_switch_b").unwrap(),
+    )
+    .with_scope(gateway_core::engine::continuation::NativeContinuationScope::Persisted)
+    .with_session_state(state.clone());
+    let foreign = provider
+        .clone()
+        .execute(followup(), attempt("req_foreign_account", foreign_pin))
+        .await;
+    assert!(
+        foreign.is_err(),
+        "the original account's state cannot authorize account B"
+    );
+
+    let mismatched = |key: &str, value: Value| {
+        let mut payload = state.payload().clone();
+        payload.insert(key.to_owned(), value);
+        NativeContinuationPin::new(
+            PreviousResponseId::new(public.clone()),
+            PreviousResponseId::new(raw.clone()),
+            ClientApiKeyId::new("key_openai_contract").unwrap(),
+            ProviderKind::new("openai").unwrap(),
+            ProviderAccountId::new("acct_affinity_switch_a").unwrap(),
+        )
+        .with_scope(gateway_core::engine::continuation::NativeContinuationScope::Persisted)
+        .with_session_state(
+            gateway_core::operation::ProviderSessionState::new("openai", payload).unwrap(),
+        )
+    };
+    for (index, altered) in [
+        mismatched("credential_revision", json!(2)),
+        mismatched("account_id", json!("acct_wrong")),
+        mismatched("harness_kind", json!("pi")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = provider
+            .clone()
+            .execute(
+                followup(),
+                attempt(&format!("req_bad_owner_{index}"), altered),
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "mismatched continuation owner must not send"
+        );
+    }
+    let external = AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_pin_missing").unwrap(),
+            ClientApiKeyId::new("key_openai_contract").unwrap(),
+        ),
+        NonZeroU32::MIN,
+        SystemTime::now() + Duration::from_secs(30),
+        account_policy(),
+        AccountAttemptContext::new(BTreeSet::new(), None, None)
+            .with_account_scope(contract_account_scope()),
+        Some(ContinuationBinding::External(PreviousResponseId::new(
+            public.clone(),
+        ))),
+        CancellationToken::new(),
+    )
+    .with_continuation_attempt(ContinuationAttempt::Native);
+    let error = provider
+        .clone()
+        .execute(followup(), external)
+        .await
+        .err()
+        .expect("missing pin");
+    assert_eq!(
+        error.kind(),
+        ProviderErrorKind::ContinuationRecoveryRequired
+    );
+    assert_eq!(origin.received_requests().await.unwrap().len(), 2);
 }

@@ -45,7 +45,7 @@ export async function runPi(input, emit, signal, callId) {
   // 源码在 ChatGPT 省略字段之后仍写入 serviceTier；无档位时不传，避免空字符串进正文
   const stream = responses.stream(model, { messages: transcript.messages }, {
     apiKey: input.bearer,
-    sessionId,
+    sessionId: text(input.prompt_cache_key) ?? sessionId,
     ...(serviceTier !== undefined ? { serviceTier } : {}),
     ...(body?.reasoning?.effort ? { reasoningEffort: body.reasoning.effort } : {}),
     ...(body?.reasoning?.summary ? { reasoningSummary: body.reasoning.summary } : {}),

@@ -64,7 +64,7 @@ export async function runOpenCode(input, emit, signal, callId) {
     })
     .model({ id: input.model });
   const body = input.responses_body;
-  validateOptions(body, "opencode");
+  const allowedTools = validateOptions(body, "opencode");
   const mapped = body ? openCodeInput(body, media) : { system: input.instructions, prompt: input.prompt };
   const generation = {};
   if (body?.max_output_tokens != null || input.max_output_tokens != null) generation.maxTokens = body?.max_output_tokens ?? input.max_output_tokens;
@@ -83,12 +83,14 @@ export async function runOpenCode(input, emit, signal, callId) {
     ...(body?.include != null ? { include: body.include } : {}),
     ...(body?.metadata != null ? { metadata: body.metadata } : {}),
     ...(body?.text?.verbosity != null ? { textVerbosity: body.text.verbosity } : {}),
+    ...(allowedTools ? { allowedTools } : {}),
     store: body?.store === true,
   };
   // request id 只进入 LLMRequest.id；历史、工具与 reasoning 仍由源码 lowering
   const request = llm.request({
     id: requestId,
     model,
+    ...(input.prompt_cache_key ? { promptCacheKey: input.prompt_cache_key } : {}),
     ...mapped,
     ...(Object.keys(generation).length > 0 ? { generation } : {}),
     providerOptions,

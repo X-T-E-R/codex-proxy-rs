@@ -12,11 +12,14 @@ use crate::identity::ProviderKind;
 use crate::operation::ProviderSessionState;
 use crate::policy::ClientApiKeyId;
 
+/// 仅由存储式 OpenCode Responses 生成的版本化公开 ID 域
+/// 丢失其 pin 时不能把公开 ID 当成其他 Provider 的原生 handle
+pub const OPENCODE_RESPONSE_ID_PREFIX: &str = "cpr_oc_v1_";
+
 /// 客户端或 Provider 传递的 opaque response handle
 ///
-/// Codex 定义这个值的语义和格式
-/// 网关只将其作为亲和查找键或同账号上游
-/// continuation 的载体，不得按私有长度、字符集或前缀规则拒绝、归一化或改写
+/// Codex 原有 opaque ID 不得按私有长度、字符集或前缀规则归一化或改写
+/// OpenCode 的版本化公开 ID 属于网关域，仅可按 pin 解析为原生上游 handle
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PreviousResponseId(String);
 
@@ -265,8 +268,9 @@ impl NativeContinuationStoreError {
 
 /// 可丢失的 previous-response 亲和存储端口
 ///
-/// 亲和记录按调用方 API Key 隔离；Redis 不可用或超时必须由调用方 fail-open，
-/// 但命中其他 Key 的记录必须 fail closed
+/// 亲和记录按调用方 API Key 隔离；Redis 不可用或超时仅对原有 opaque ID
+/// 回退为外部续接，版本化 OpenCode 公开 ID 必须要求完整历史重放
+/// 命中其他 Key 的记录始终 fail closed
 pub trait NativeContinuationPort: Send + Sync {
     fn resolve<'a>(
         &'a self,

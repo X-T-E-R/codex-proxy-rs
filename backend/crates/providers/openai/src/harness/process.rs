@@ -424,22 +424,31 @@ async fn drive(
         return Err(HarnessError::Protocol);
     };
     let pi = matches!(call.harness, ResponsesHarness::Pi);
+    let mut scoped_body = call.responses_body.clone();
+    let prompt_cache_key = scoped_body.as_mut().and_then(|body| {
+        scope_harness_history_ids(body, &installation_id);
+        body.as_object_mut()?
+            .remove("prompt_cache_key")?
+            .as_str()
+            .map(|raw| account_scoped_id(&installation_id, raw))
+    });
+    let pi_source_session = if pi {
+        prompt_cache_key.as_ref().unwrap_or(&session_id)
+    } else {
+        &session_id
+    };
     let source_headers = exchange::SourceHeaders {
         pi,
         session_id: if pi {
-            session_id.clone()
+            pi_source_session.clone()
         } else {
             session_affinity_id
                 .clone()
                 .unwrap_or_else(|| session_id.clone())
         },
         thread_id: session_id.clone(),
-        client_request_id: session_id.clone(),
+        client_request_id: pi_source_session.clone(),
     };
-    let mut scoped_body = call.responses_body.clone();
-    if let Some(body) = scoped_body.as_mut() {
-        scope_harness_history_ids(body, &installation_id);
-    }
     let payload = protocol::CallPayload {
         harness: match call.harness {
             ResponsesHarness::OpenCode => "opencode",
@@ -456,13 +465,21 @@ async fn drive(
         max_output_tokens: call.max_output_tokens,
         temperature,
         service_tier: service_tier.as_deref(),
+        prompt_cache_key: prompt_cache_key.as_deref(),
         session_affinity_id: session_affinity_id.as_deref(),
         downstream_headers: &call.downstream_headers,
         event_window: call.event_window,
     };
     let stdin = stdin_handle(state);
-    protocol::write_json(&stdin, protocol::CALL, call_id, &payload).await?;
+    let written = tokio::select! {
+        _ = local_cancel.cancelled() => Err(HarnessError::Cancelled),
+        result = protocol::write_call(&stdin, call_id, &payload, user_cancel) => result,
+    };
+    if let Err(error) = written {
+        return isolate(state, call_id, error).await;
+    }
     let mut request_seen = false;
+    let mut upload: Option<(u32, HttpRequest, Vec<u8>)> = None;
     let deadline = call
         .timeout
         .and_then(|duration| Instant::now().checked_add(duration));
@@ -496,14 +513,38 @@ async fn drive(
         match frame.kind {
             protocol::HTTP_REQUEST => {
                 let parsed: HttpRequest = protocol::from_json(&frame.payload)?;
-                if parsed.call_id != call_id || parsed.request_id != request_id {
+                if parsed.call_id != call_id
+                    || parsed.request_id != request_id
+                    || parsed.body_len > 96 * 1024 * 1024
+                    || upload.is_some()
+                {
                     let _ = reject_http(&stdin, frame.id).await;
                     continue;
                 }
-                let observed = exchange::observe(&parsed)?;
+                upload = Some((frame.id, parsed, Vec::new()));
+            }
+            protocol::HTTP_UPLOAD_CHUNK => {
+                let Some((id, request, body)) = upload.as_mut() else {
+                    return Err(HarnessError::Protocol);
+                };
+                if *id != frame.id
+                    || frame.payload.len() > request.body_len.saturating_sub(body.len())
+                {
+                    return Err(HarnessError::Protocol);
+                }
+                body.extend_from_slice(&frame.payload);
+            }
+            protocol::HTTP_UPLOAD_END => {
+                let Some((id, parsed, body)) = upload.take() else {
+                    return Err(HarnessError::Protocol);
+                };
+                if id != frame.id || body.len() != parsed.body_len {
+                    return Err(HarnessError::Protocol);
+                }
+                let observed = exchange::observe(parsed, body);
                 spawn_forward(
                     state,
-                    frame.id,
+                    id,
                     observed.clone(),
                     Arc::clone(&window),
                     local_cancel,

@@ -34,7 +34,7 @@ use crate::{
         budget::{ClientBudgetCharge, ClientBudgetPort},
         continuation::{
             ContinuationBinding, NativeContinuationPin, NativeContinuationPort,
-            NativeContinuationStoreErrorKind,
+            NativeContinuationStoreErrorKind, OPENCODE_RESPONSE_ID_PREFIX,
         },
         coordinator::CoordinationExtensions,
         extensions::{ExecutionExtensionIndex, ExtensionCallScope},
@@ -596,7 +596,7 @@ impl DefaultExecutionService {
                             Err(error)
                                 if error.kind() == NativeContinuationStoreErrorKind::Unavailable =>
                             {
-                                tracing::debug!(request_id = request_id.as_str(), %error, "Continuation affinity 查询失败，退化为外部续接");
+                                tracing::debug!(request_id = request_id.as_str(), %error, "Continuation affinity 查询失败，按响应 ID 域选择恢复方式");
                                 None
                             }
                             Err(error)
@@ -611,12 +611,23 @@ impl DefaultExecutionService {
                         },
                         _ = timeout => None,
                     };
+                    let marked_opencode = previous.as_str().starts_with(OPENCODE_RESPONSE_ID_PREFIX);
+                    let replay_required = || GatewayError::new(
+                        GatewayErrorKind::InvalidRequest,
+                        "conversation continuation must be rebuilt",
+                    ).with_client_code("previous_response_not_found");
                     Some(match pin {
                         Some(pin) if !pin.matches_client(request.client.policy.key_id()) => {
                             return Err(GatewayError::new(GatewayErrorKind::PolicyDenied, "continuation does not belong to this client API key"));
                         }
                         Some(pin) if !authorization.account_scope.allows(pin.account()) => {
                             return Err(GatewayError::new(GatewayErrorKind::PolicyDenied, "continuation account is outside the client account scope"));
+                        }
+                        Some(pin) if marked_opencode && (pin.previous_response_id() != previous
+                            || pin.provider().as_str() != "openai"
+                            || !pin.session_state().is_some_and(|state| state.provider() == "openai"
+                                && state.payload().get("harness_kind").and_then(serde_json::Value::as_str) == Some("opencode"))) => {
+                            return Err(replay_required());
                         }
                         Some(pin)
                             if !plan.candidates().iter().any(|candidate| candidate.provider() == pin.provider()) =>
@@ -627,6 +638,7 @@ impl DefaultExecutionService {
                             attach_continuation_session_state(&mut request.operation, &pin);
                             ContinuationBinding::Pinned(pin)
                         }
+                        None if marked_opencode => return Err(replay_required()),
                         None => ContinuationBinding::External(previous.clone()),
                     })
                 }

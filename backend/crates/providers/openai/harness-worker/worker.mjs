@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
@@ -8,6 +9,9 @@ import { runOpenCode } from "./opencode.mjs";
 import { runPi } from "./pi.mjs";
 import {
   CALL,
+  CALL_START,
+  CALL_CHUNK,
+  CALL_END,
   CANCEL,
   EVENT,
   EVENT_CREDIT,
@@ -106,6 +110,7 @@ await writeJson(HELLO, 0, {
 
 const reader = createReader(process.stdin);
 const calls = new Map();
+const fragments = new Map();
 
 class EventWindow {
   constructor(capacity) {
@@ -173,14 +178,46 @@ class EventWindow {
 }
 
 for (;;) {
-  const frame = await reader.read();
+  let frame = await reader.read();
   if (frame == null) break;
   if (frame.type === READY) continue;
+  if (frame.type === CALL_START) {
+    const size = frame.payload.length === 8 ? Number(frame.payload.readBigUInt64BE(0)) : 0;
+    if (!Number.isSafeInteger(size) || size <= 0 || size > 128 * 1024 * 1024 || fragments.has(frame.id)) {
+      await writeJson(FAILURE, frame.id, { cancelled: false, message: "invalid call length" });
+    } else {
+      fragments.set(frame.id, { size, bytes: 0, parts: [] });
+    }
+    continue;
+  }
+  if (frame.type === CALL_CHUNK) {
+    const pending = fragments.get(frame.id);
+    if (!pending || frame.payload.length > pending.size - pending.bytes) {
+      fragments.delete(frame.id);
+      await writeJson(FAILURE, frame.id, { cancelled: false, message: "invalid call chunk" });
+    } else {
+      pending.parts.push(frame.payload);
+      pending.bytes += frame.payload.length;
+    }
+    continue;
+  }
+  if (frame.type === CALL_END) {
+    const pending = fragments.get(frame.id);
+    fragments.delete(frame.id);
+    if (!pending || pending.bytes !== pending.size) {
+      await writeJson(FAILURE, frame.id, { cancelled: false, message: "incomplete call" });
+      continue;
+    }
+    frame = { type: CALL, id: frame.id, payload: Buffer.concat(pending.parts, pending.size) };
+  }
   if (frame.type === HTTP_HEAD || frame.type === HTTP_BODY) {
     deliverHttp(frame);
     continue;
   }
   if (frame.type === CANCEL) {
+    if (fragments.delete(frame.id)) {
+      await writeJson(FAILURE, frame.id, { cancelled: true, message: "cancelled" });
+    }
     const call = calls.get(frame.id);
     call?.controller.abort();
     failHttp(frame.id);

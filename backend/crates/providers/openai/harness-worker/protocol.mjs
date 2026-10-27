@@ -13,6 +13,11 @@ export const CANCEL = 10;
 export const FAILURE = 11;
 export const EVENT_CREDIT = 12;
 export const EVENT_WAIT = 13;
+export const CALL_START = 14;
+export const CALL_CHUNK = 15;
+export const CALL_END = 16;
+export const HTTP_UPLOAD_CHUNK = 17;
+export const HTTP_UPLOAD_END = 18;
 
 const MAX_FRAME = 8 * 1024 * 1024;
 

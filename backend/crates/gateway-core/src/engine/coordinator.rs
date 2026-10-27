@@ -432,6 +432,7 @@ struct CurrentAttempt {
     started_at: SystemTime,
     send_observed: bool,
     response_observation: Option<ProviderResponseObservation>,
+    native_upstream_response_id: Option<String>,
 }
 
 impl CurrentAttempt {
@@ -873,7 +874,13 @@ where
         let account = current.metadata.provider_account_id().clone();
         let response_id = self.observation.upstream_response_id.as_deref()?;
         let previous_response_id = PreviousResponseId::new(response_id.to_owned());
-        let upstream_response_id = PreviousResponseId::new(response_id.to_owned());
+        let upstream_response_id = PreviousResponseId::new(
+            current
+                .native_upstream_response_id
+                .as_deref()
+                .unwrap_or(response_id)
+                .to_owned(),
+        );
         Some(
             NativeContinuationPin::new(
                 previous_response_id,
@@ -966,6 +973,11 @@ where
                         self.trace
                             .attempt(self.attempts)
                             .wire_event(wire.protocol(), wire.event_type());
+                    }
+                    if let Some(raw) = event.native_upstream_response_id()
+                        && let Some(current) = self.current.as_mut()
+                    {
+                        current.native_upstream_response_id = Some(raw.to_owned());
                     }
                     if let Some(state) = event.session_update() {
                         self.observe_session_update(state);
@@ -1518,6 +1530,7 @@ where
             started_at: SystemTime::now(),
             send_observed: false,
             response_observation: None,
+            native_upstream_response_id: None,
         });
         if self.request_persisted {
             best_effort_store_write(

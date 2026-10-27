@@ -3792,6 +3792,49 @@ fn invalid_continuation_record_should_not_be_forwarded_as_an_external_handle() {
     assert_eq!(error.kind(), GatewayErrorKind::Internal);
 }
 
+#[test]
+fn marked_opencode_response_requires_a_pin_on_cache_miss_or_store_outage() {
+    use gateway_core::engine::continuation::OPENCODE_RESPONSE_ID_PREFIX;
+
+    for continuation in [
+        Arc::new(UnusedContinuation) as Arc<dyn NativeContinuationPort>,
+        Arc::new(RejectedContinuation::Unavailable) as Arc<dyn NativeContinuationPort>,
+    ] {
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot()),
+            store.clone(),
+            ProviderRegistry::default(),
+            Arc::new(UnusedAdmissions),
+            continuation,
+            Arc::new(RecordingClientApiKeyUsage::default()),
+            Arc::new(crate::RecordingDiagnostics::default()),
+        );
+        let client = service
+            .authenticate("sk_start_test")
+            .expect("authenticated client");
+        let mut metadata = execution_metadata_with_continuation();
+        metadata.previous_response_id = Some(PreviousResponseId::new(format!(
+            "{OPENCODE_RESPONSE_ID_PREFIX}synthetic_public"
+        )));
+        let result = block_on(service.start(StartExecution {
+            client,
+            public_model: PublicModelId::new("gpt-start").expect("public model"),
+            operation: start_operation(),
+            metadata,
+        }));
+        let Err(error) = result else {
+            panic!("unresolved OpenCode public ID must fail before provider dispatch");
+        };
+        assert_eq!(error.kind(), GatewayErrorKind::InvalidRequest);
+        assert_eq!(
+            error.client_error_code(),
+            Some("previous_response_not_found")
+        );
+        assert!(store.requests.lock().unwrap().is_empty());
+    }
+}
+
 fn execution_metadata_with_continuation() -> ExecutionRequestMetadata {
     ExecutionRequestMetadata {
         cyber_session: Default::default(),
@@ -4039,6 +4082,7 @@ impl NativeContinuationPort for UnusedContinuation {
 enum RejectedContinuation {
     OwnershipMismatch,
     InvalidData,
+    Unavailable,
 }
 
 impl NativeContinuationPort for RejectedContinuation {
@@ -4051,6 +4095,7 @@ impl NativeContinuationPort for RejectedContinuation {
             Err(match self {
                 Self::OwnershipMismatch => NativeContinuationStoreError::ownership_mismatch(),
                 Self::InvalidData => NativeContinuationStoreError::invalid_data("invalid record"),
+                Self::Unavailable => NativeContinuationStoreError::unavailable("store offline"),
             })
         })
     }

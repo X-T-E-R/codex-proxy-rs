@@ -5,7 +5,7 @@ export function validateOptions(body, harness) {
   if (!body) return;
   const common = new Set(["model", "input", "instructions", "tools", "tool_choice", "reasoning",
     "service_tier", "max_output_tokens", "temperature", "top_p", "parallel_tool_calls", "stream"]);
-  const openCode = new Set(["store", "metadata", "include", "truncation", "max_tool_calls", "text"]);
+  const openCode = new Set(["store", "previous_response_id", "metadata", "include", "truncation", "max_tool_calls", "text"]);
   for (const key of Object.keys(body)) {
     if (common.has(key) || (harness === "opencode" && openCode.has(key))) continue;
     if (harness === "pi" && key === "store" && body.store === false) continue;
@@ -14,6 +14,20 @@ export function validateOptions(body, harness) {
   if (body.text && (typeof body.text !== "object" || Object.keys(body.text).some((key) => key !== "verbosity"))) {
     throw new UnsupportedInput("Unsupported OpenCode text options");
   }
+  const choice = body.tool_choice;
+  if (choice == null) return undefined;
+  if (typeof choice === "string") {
+    if (!["auto", "none", "required"].includes(choice)) throw new UnsupportedInput("Unsupported tool_choice");
+    return undefined;
+  }
+  const declared = new Set((body.tools ?? []).filter((tool) => tool.type === "function").map((tool) => tool.name));
+  if (choice.type === "function" && typeof choice.name === "string" && declared.has(choice.name)) return undefined;
+  if (choice.type !== "allowed_tools" || !["auto", "none", "required"].includes(choice.mode)
+      || !Array.isArray(choice.tools) || choice.tools.length === 0
+      || choice.tools.some((tool) => tool.type !== "function" || !declared.has(tool.name))) {
+    throw new UnsupportedInput("tool_choice must only authorize declared tools");
+  }
+  return { mode: choice.mode, toolNames: choice.tools.map((tool) => tool.name) };
 }
 
 function content(item, kind) {

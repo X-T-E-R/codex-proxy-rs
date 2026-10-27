@@ -2131,8 +2131,12 @@ async fn complete_transcript_uses_each_sources_history_tools_and_wire_events() {
                 {"type":"function_call_output","call_id":"call_history","output":"previous result"},
                 {"type":"message","role":"user","content":[{"type":"input_text","text":"Current turn"}]}
             ],
-            "tools": [{"type":"function","name":"lookup","description":"Look up a value","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}],
-            "tool_choice": "auto",
+            "tools": [
+                {"type":"function","name":"lookup","description":"Look up a value","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}},
+                {"type":"function","name":"dangerous","description":"Do not authorize","parameters":{"type":"object"}}
+            ],
+            "tool_choice": {"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"lookup"}]},
+            "prompt_cache_key": "explicit-history-cache",
             "reasoning": {"effort":"low","summary":"auto"},
             "top_p": 0.7,
             "parallel_tool_calls": false,
@@ -2161,8 +2165,13 @@ async fn complete_transcript_uses_each_sources_history_tools_and_wire_events() {
         );
         assert!(!sent.to_string().contains("call_history"));
         assert!(sent.to_string().contains("encrypted-history"));
-        assert_eq!(sent["tool_choice"], "auto");
+        assert_eq!(
+            sent["tool_choice"],
+            json!({"type":"allowed_tools","mode":"required", "tools":[{"type":"function","name":"lookup"}]})
+        );
         assert_eq!(sent["tools"][0]["name"], "lookup");
+        assert_eq!(sent["tools"][1]["name"], "dangerous");
+        assert_eq!(sent["prompt_cache_key"], scoped("explicit-history-cache"));
         let outbound_wire = result
             .events
             .iter()
@@ -2216,7 +2225,7 @@ async fn unsupported_response_input_fails_before_dial_for_both_sources() {
         request.responses_body = Some(json!({
             "model": MODEL,
             "input": "hello",
-            "prompt_cache_key": "must-not-disappear",
+            "unsupported_safety_override": "must-not-disappear",
         }));
         let error = drive_call(&session, request, &CancellationToken::new())
             .await
@@ -2225,7 +2234,64 @@ async fn unsupported_response_input_fails_before_dial_for_both_sources() {
             matches!(error, HarnessError::InvalidInput { .. }),
             "{error}"
         );
+        let mut request = sample_call(harness, bearer);
+        request.prompt.clear();
+        request.responses_body = Some(json!({
+            "model": MODEL,
+            "input": "hello",
+            "tools": [{"type":"function","name":"dangerous","parameters":{"type":"object"}}],
+            "tool_choice": {"type":"allowed_tools","mode":"required","tools":[{"type":"function","name":"safe"}]}
+        }));
+        let error = drive_call(&session, request, &CancellationToken::new())
+            .await
+            .expect_err("undeclared allowed tool must fail before dial");
+        assert!(
+            matches!(error, HarnessError::InvalidInput { .. }),
+            "{error}"
+        );
     }
     assert!(origin.recorded.lock().expect("origin requests").is_empty());
+    session.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn large_image_and_tool_result_cross_managed_frames_without_losing_content() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let image = format!(
+        "data:image/png;base64,{}",
+        STANDARD.encode(vec![0x42; 5 * 1024 * 1024])
+    );
+    let output = "x".repeat(9 * 1024 * 1024);
+    for (harness, bearer) in [
+        (ResponsesHarness::OpenCode, TOKEN),
+        (ResponsesHarness::Pi, TOKEN_PI),
+    ] {
+        for (index, input) in [
+            json!([{"type":"message","role":"user","content":[{"type":"input_image","image_url":image}]}]),
+            json!([
+                {"type":"function_call","id":"fc_big","call_id":"call_big","name":"lookup","arguments":"{}"},
+                {"type":"function_call_output","call_id":"call_big","output":output},
+                {"type":"message","role":"user","content":[{"type":"input_text","text":"Continue"}]}
+            ]),
+        ].into_iter().enumerate() {
+            let mut call = sample_call(harness, bearer);
+            call.prompt.clear();
+            call.request_id = format!("req_large_{harness:?}_{index}");
+            call.responses_body = Some(json!({"model":MODEL,"input":input}));
+            let result = timeout(Duration::from_secs(120), complete(&session, call))
+                .await.expect("large managed request deadline");
+            let sent = json_body(&result.request.body);
+            if index == 0 {
+                assert!(sent.to_string().contains("data:image/png;base64,"));
+                assert!(result.request.body.len() > 6 * 1024 * 1024);
+            } else {
+                assert!(sent.to_string().contains(&"x".repeat(64)));
+                assert!(result.request.body.len() > 8 * 1024 * 1024);
+            }
+        }
+    }
+    assert_eq!(origin.recorded.lock().expect("origin requests").len(), 4);
     session.shutdown().await.expect("shutdown");
 }

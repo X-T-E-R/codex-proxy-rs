@@ -25,6 +25,11 @@ pub(crate) const CANCEL: u8 = 10;
 pub(crate) const FAILURE: u8 = 11;
 pub(crate) const EVENT_CREDIT: u8 = 12;
 pub(crate) const EVENT_WAIT: u8 = 13;
+pub(crate) const CALL_START: u8 = 14;
+pub(crate) const CALL_CHUNK: u8 = 15;
+pub(crate) const CALL_END: u8 = 16;
+pub(crate) const HTTP_UPLOAD_CHUNK: u8 = 17;
+pub(crate) const HTTP_UPLOAD_END: u8 = 18;
 pub(crate) const BODY_FIN: u8 = 1;
 pub(crate) const BODY_FAILED: u8 = 2;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
@@ -54,7 +59,7 @@ pub(crate) struct HttpRequest {
     pub(crate) method: String,
     pub(crate) url: String,
     pub(crate) headers: Vec<(String, String)>,
-    pub(crate) body_base64: String,
+    pub(crate) body_len: usize,
     #[serde(default)]
     pub(crate) call_id: u32,
     #[serde(default)]
@@ -113,6 +118,8 @@ pub(crate) struct CallPayload<'a> {
     pub(crate) temperature: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) service_tier: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt_cache_key: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) session_affinity_id: Option<&'a str>,
     pub(crate) downstream_headers: &'a [(String, String)],
@@ -224,6 +231,35 @@ pub(crate) async fn write_json(
 ) -> Result<(), HarnessError> {
     let payload = serde_json::to_vec(value).map_err(|_| HarnessError::Protocol)?;
     write_frame(stdin, kind, id, &payload).await
+}
+
+/// 大型完整历史分段过管道，始终保持单帧限制与取消路径
+pub(crate) async fn write_call(
+    stdin: &tokio::sync::Mutex<ChildStdin>,
+    id: u32,
+    value: &impl Serialize,
+    cancel: &gateway_core::lifecycle::CancellationToken,
+) -> Result<(), HarnessError> {
+    const MAX_CALL: usize = 128 * 1024 * 1024;
+    const CHUNK: usize = 512 * 1024;
+    let payload = serde_json::to_vec(value).map_err(|_| HarnessError::Protocol)?;
+    if payload.len() > MAX_CALL {
+        return Err(HarnessError::Protocol);
+    }
+    if payload.len() + 5 <= MAX_FRAME {
+        return tokio::select! {
+            _ = cancel.cancelled() => Err(HarnessError::Cancelled),
+            result = write_frame(stdin, CALL, id, &payload) => result,
+        };
+    }
+    write_frame(stdin, CALL_START, id, &(payload.len() as u64).to_be_bytes()).await?;
+    for chunk in payload.chunks(CHUNK) {
+        tokio::select! {
+            _ = cancel.cancelled() => return Err(HarnessError::Cancelled),
+            result = write_frame(stdin, CALL_CHUNK, id, chunk) => result?,
+        }
+    }
+    write_frame(stdin, CALL_END, id, &[]).await
 }
 
 pub(crate) fn from_json<T: for<'de> Deserialize<'de>>(payload: &[u8]) -> Result<T, HarnessError> {

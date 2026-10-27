@@ -2498,6 +2498,75 @@ async fn atomic_uncommitted_upstream_failure_batch_should_be_forwarded_once() {
 }
 
 #[tokio::test]
+async fn stored_opencode_public_id_survives_raw_sse_and_buffered_projection() {
+    let public = "cpr_oc_v1_public_synthetic";
+    let raw = "resp_private_synthetic";
+    let make_event = |kind: &'static str| {
+        let done = kind == "response.completed";
+        let value = json!({"type": kind, "response": {
+            "id": public, "model": "public-model", "status": if done { "completed" } else { "in_progress" }, "output": []
+        }});
+        let frame = Bytes::from(format!("event: {kind}\ndata: {value}\n\n"));
+        let fact = if done {
+            GatewayEvent::Completed(ResponseMeta::new(public, "public-model"))
+        } else {
+            GatewayEvent::Started(ResponseMeta::new(public, "public-model"))
+        };
+        ProviderEvent::canonical_with_wire(
+            vec![fact],
+            ProtocolWireEvent::json_with_raw_sse_metadata(
+                "openai",
+                Some(kind.to_owned()),
+                value,
+                frame,
+                None,
+                None,
+            )
+            .expect("stored response public wire"),
+        )
+    };
+    let trace = Arc::new(Trace::default());
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(delivery_provider(
+                make_event("response.created"),
+                CommitRequirement::CommitBeforeDelivery,
+            )),
+            NextStep::Event(delivery_provider(
+                make_event("response.completed"),
+                CommitRequirement::AlreadyCommitted,
+            )),
+            NextStep::FinalizeSuccess,
+        ],
+    );
+    let response = stream_execution_response(Box::new(session), None).await;
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    let events = parse_sse_events(body).unwrap();
+    for event in events.iter().filter(|event| event.data != "[DONE]") {
+        let data: Value = serde_json::from_str(&event.data).unwrap();
+        assert_eq!(data["response"]["id"], public);
+    }
+    assert!(!body.contains(raw));
+    assert!(trace.snapshot().contains(&"commit"));
+
+    let session = FakeSession::buffered_provider(
+        Arc::new(Trace::default()),
+        vec![
+            make_event("response.created"),
+            make_event("response.completed"),
+        ],
+    );
+    let response = collect_execution_response(Box::new(session)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["id"], public);
+    assert!(!String::from_utf8_lossy(&body).contains(raw));
+}
+
+#[tokio::test]
 async fn streaming_second_commit_request_should_fail_and_finalize_once() {
     let trace = Arc::new(Trace::default());
     let session = FakeSession::streaming(

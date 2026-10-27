@@ -12,7 +12,6 @@ use std::{
     },
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use futures::StreamExt;
 use gateway_core::lifecycle::CancellationToken;
@@ -52,16 +51,13 @@ impl Drop for HeaderHold {
     }
 }
 
-pub(crate) fn observe(request: &HttpRequest) -> Result<ObservedUpstreamRequest, HarnessError> {
-    let body = STANDARD
-        .decode(request.body_base64.as_bytes())
-        .map_err(|_| HarnessError::Protocol)?;
-    Ok(ObservedUpstreamRequest {
-        method: request.method.clone(),
-        url: request.url.clone(),
-        headers: request.headers.clone(),
+pub(crate) fn observe(request: HttpRequest, body: Vec<u8>) -> ObservedUpstreamRequest {
+    ObservedUpstreamRequest {
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
         body,
-    })
+    }
 }
 
 pub(crate) struct ForwardIo<'a> {

@@ -467,6 +467,35 @@ async fn retry_after_is_delivered_on_initial_and_committed_websocket_errors() {
 }
 
 #[tokio::test]
+async fn stored_opencode_public_id_survives_websocket_event_delivery() {
+    let public = "cpr_oc_v1_public_synthetic";
+    let raw = "resp_private_synthetic";
+    let events = ["response.created", "response.completed"].into_iter().map(|kind| {
+        ProviderEvent::wire(ProtocolWireEvent::json(
+            "openai",
+            Some(kind.to_owned()),
+            json!({"type":kind,"response":{"id":public,"status":if kind == "response.completed" {"completed"} else {"in_progress"},"output":[]}}),
+        ).expect("public OpenCode wire"))
+    }).collect();
+    let trace = Arc::new(AtomicFailureTrace {
+        first_batch: Mutex::new(Some(
+            CoordinatedEvent::try_batch(events, CommitRequirement::CommitBeforeDelivery).unwrap(),
+        )),
+        ..AtomicFailureTrace::default()
+    });
+    let (mut socket, _server) = connect(Arc::clone(&trace), Vec::new()).await;
+    send_request(&mut socket).await;
+    assert_eq!(next_event(&mut socket).await["type"], "response.metadata");
+    for kind in ["response.created", "response.completed"] {
+        let event = next_event(&mut socket).await;
+        assert_eq!(event["type"], kind);
+        assert_eq!(event["response"]["id"], public);
+        assert!(!event.to_string().contains(raw));
+    }
+    socket.close(None).await.unwrap();
+}
+
+#[tokio::test]
 async fn initial_error_without_upstream_facts_keeps_the_local_contract() {
     for (error, status, code) in [
         (EngineError::Deadline, 504, "request_timeout"),
