@@ -505,11 +505,12 @@ pub(crate) fn account_summary_from_row(
             "model_access_json",
         )?
         .0,
-        additional_models: get::<sqlx::types::Json<gateway_core::account::AccountAdditionalModels>>(
-            &row,
-            "additional_models_json",
-        )?
-        .0,
+        additional_models:
+            get::<sqlx::types::Json<gateway_core::account::AccountAdditionalModels>>(
+                &row,
+                "additional_models_json",
+            )?
+            .0,
         credential_state: status.credential_state,
         credential_observed_at: get(&row, "credential_observed_at")?,
         quota: status.quota,

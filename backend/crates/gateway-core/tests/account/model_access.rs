@@ -39,12 +39,17 @@ fn account_model_access_document_deduplicates_without_changing_exact_ids() {
 
 #[test]
 fn additional_models_are_an_independent_exact_id_set() {
-    let models: AccountAdditionalModels = serde_json::from_value(json!([
-        "new-terra-id", "new-terra-id", "New-Terra-ID"
-    ]))
-    .expect("additional models");
-    assert_eq!(serde_json::to_value(&models).expect("serialize"), json!(["New-Terra-ID", "new-terra-id"]));
-    assert_eq!(serde_json::to_value(AccountAdditionalModels::default()).expect("default"), json!([]));
+    let models: AccountAdditionalModels =
+        serde_json::from_value(json!(["new-terra-id", "new-terra-id", "New-Terra-ID"]))
+            .expect("additional models");
+    assert_eq!(
+        serde_json::to_value(&models).expect("serialize"),
+        json!(["New-Terra-ID", "new-terra-id"])
+    );
+    assert_eq!(
+        serde_json::to_value(AccountAdditionalModels::default()).expect("default"),
+        json!([])
+    );
 
     for invalid in [
         json!({"models": ["new-terra-id"]}),

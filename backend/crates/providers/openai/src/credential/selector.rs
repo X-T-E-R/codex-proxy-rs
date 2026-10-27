@@ -212,11 +212,16 @@ impl CredentialSelectionInput<'_> {
 
     fn allows_model(&self, model: CodexSelectionModel<'_>, account: &ProviderAccount) -> bool {
         if self.allow_harness && is_harness_kind(account.authentication_kind()) {
-            let Some(id) = model.model().filter(|_| matches!(model, CodexSelectionModel::Requested(_))) else {
+            let Some(id) = model
+                .model()
+                .filter(|_| matches!(model, CodexSelectionModel::Requested(_)))
+            else {
                 return false;
             };
             let default = match account.authentication_kind() {
-                super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING => self.harness_default_origins.0,
+                super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING => {
+                    self.harness_default_origins.0
+                }
                 super::CODEX_AUTHENTICATION_KIND_PI_OPENAI => self.harness_default_origins.1,
                 _ => false,
             };
