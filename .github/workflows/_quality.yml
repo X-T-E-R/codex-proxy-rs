@@ -131,7 +131,10 @@ jobs:
       - name: Setup pinned harness Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '26.12.0'
+          node-version: '24.18.0'
+
+      - name: Verify harness Node version
+        run: test "$(node --version)" = v24.18.0
 
       - name: Prepare pinned OpenAI harness tests
         shell: bash

@@ -9,6 +9,9 @@ import { pathToFileURL } from "node:url";
 
 const root = path.resolve(process.argv[2]);
 const node = path.resolve(process.argv[3] || process.execPath);
+const version = spawnSync(node, ["--version"], { encoding: "utf8", timeout: 30000 });
+assert.equal(version.status, 0, `Node version check failed: ${version.stderr}`);
+assert.equal(version.stdout.trim(), "v24.18.0", "packaged Node version");
 const worker = path.join(root, "worker");
 const env = {
   ...process.env,

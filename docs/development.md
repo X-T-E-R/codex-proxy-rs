@@ -14,7 +14,7 @@
 
 ## 环境与依赖
 
-需要 Node.js 26.12.0、pnpm、[Rust 工具链](architecture.md#验证命令)、PostgreSQL 和 Redis
+需要 Node.js 24.18.0、pnpm、[Rust 工具链](architecture.md#验证命令)、PostgreSQL 和 Redis
 
 各前端的 `packageManager` 固定 pnpm 版本，宿主 CI 和 Docker 从 `frontend/package.json` 读取
 
@@ -29,13 +29,13 @@ pnpm --dir frontend install --frozen-lockfile
 
 前端依赖、锁文件与 ESLint 配置由 `frontend/` 管理，根目录不维护 Node 包
 
-OpenCode / pi Responses worker 需要 Node.js 22.19.0 或更高版本。未设置 `CPR_HARNESS_NODE` 时，Provider 使用 `PATH` 中的 `node`。该 worker 不属于前端 pnpm workspace，依赖单独安装：
+OpenCode / pi Responses worker 与 pi 模型目录从 `PATH` 调用 Node.js 24.18.0。该 worker 不属于前端 pnpm workspace，依赖单独安装：
 
 ```bash
 npm ci --ignore-scripts --prefix backend/crates/providers/openai/harness-worker
 ```
 
-进程参数是 `node --experimental-transform-types`。固定上游源码包含 TypeScript 参数属性，只剥离类型的模式无法加载。账号选择、凭据、管理端以及 `runtime` / `runtime-prebuilt` 镜像目前不提供这条运行路径
+worker 与 pi 模型目录均使用 `node --experimental-transform-types` 执行固定 TypeScript 源码中的参数属性。`runtime` / `runtime-prebuilt` 镜像和发行归档内置同版 Node、worker 依赖及固定源码
 
 - **版本固定**：`@codex-proxy/ui` 使用固定 GitHub 标签或提交，锁文件记录实际提交、源码归档地址及完整性摘要
 - **安装与构建**：pnpm 按 UI 自身锁文件准备依赖，执行 `prepack` 生成 JS、CSS 和类型声明，普通 `dev`、`build`、发行 CI 和 Docker 使用编译产物，无需初始化子模块

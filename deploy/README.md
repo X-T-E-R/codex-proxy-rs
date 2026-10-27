@@ -624,7 +624,7 @@ docker compose -f deploy/compose.yaml up -d --no-build --wait codex-proxy-rs
 ```
 
 源码构建需要克隆 CPR 仓库并准备配置与数据目录，构建过程自动准备前端依赖和锁定的 worker 依赖，
-无需初始化上游子模块或准备额外 build context。`runtime` 与 `runtime-prebuilt` 镜像均内置 Node.js 26.12.0、
+无需初始化上游子模块或准备额外 build context。`runtime` 与 `runtime-prebuilt` 镜像均内置 Node.js 24.18.0、
 OpenAI harness worker 及固定 OpenCode/pi 源码，分别位于 `/app/bin/node` 与 `/app/bin/openai-harness/`。
 两种镜像均设置 worker 和源码路径环境变量，不依赖运行主机的上游源码 checkout；
 源码快照的 168 个文件按固定提交及摘要验证；OpenCode 模型目录使用其固定提交的 models.dev 快照，

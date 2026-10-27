@@ -522,7 +522,7 @@ worker 启动时报告实际加载的源码文件。Rust 用仓库里的 `source
 
 完整输入历史、函数工具及关联 ID、reasoning 和可表达的媒体内容进入源库的 transcript 转换；不能表达的选项或工具限制在发送前拒绝。事件保留原始 SSE 与 canonical 事实；账单和账号反馈仍经现有 Provider 链路。OpenCode 的 `store:true` 响应对外使用带域标记的 ID，Core 续接 pin 用公开 ID 查找并保留原始上游 ID；续接只允许同一 Client Key、账号、认证通道与凭据版本。pin 丢失时在选号前要求客户端携完整历史重放，不把该 ID 交给旧 Codex。pi 源码固定 `store:false`，显式 `store:true` 在发送前拒绝。
 
-Provider 的账号选择、OAuth 凭据事务与管理端直接使用该路径。运行需要 Node.js 22.19.0 或更高版本，以及 worker 锁定的依赖；`runtime` 和 `runtime-prebuilt` 镜像均随发行包内置 Node.js 26.12.0、worker 和固定源码。直接运行归档的路径设置见[部署与运维](../deploy/README.md#镜像升级与源码构建)。
+Provider 的账号选择、OAuth 凭据事务与管理端直接使用该路径。固定源码中的 TypeScript 参数属性由 Node.js 24.18.0 的 `--experimental-transform-types` 加载；`runtime` 和 `runtime-prebuilt` 镜像均随发行包内置该版本、worker 锁定依赖及固定源码。直接运行归档的路径设置见[部署与运维](../deploy/README.md#镜像升级与源码构建)。
 
 ### 后台账号导入
 

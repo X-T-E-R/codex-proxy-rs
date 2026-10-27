@@ -340,6 +340,7 @@ async fn spawn_worker(
 ) -> Result<Spawned, HarnessError> {
     let _ = std::fs::write(load_log, "");
     let mut command = Command::new(&launch.node);
+    // 固定 TypeScript 源码使用参数属性，Node 24 必须执行转换而非仅剥离类型
     command
         .arg("--experimental-transform-types")
         .arg("--import")

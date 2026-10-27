@@ -8,11 +8,11 @@ from pathlib import Path
 import tarfile
 from urllib.request import urlopen
 
-VERSION = "26.12.0"  # 与 deploy/Dockerfile 的 node-runtime 阶段版本一致
+VERSION = "24.18.0"  # 与 deploy/Dockerfile 的 node-runtime 阶段版本一致
 TARGETS = {
-    ("linux", "amd64"): ("linux-x64", "fd47865ecd6391ebb431fc815e01b9135bf83ded5cf373247e9331e196b7aded"),
-    ("linux", "arm64"): ("linux-arm64", "fd6cc729fa4448c2ac27c3fca5606019ced63c65a15c152c8df03e0cbce7f4c5"),
-    ("darwin", "arm64"): ("darwin-arm64", "a2e255e35347f727f29aa158c552a60140b17b6ba68719d5d6fc46c7d058aa75"),
+    ("linux", "amd64"): ("linux-x64", "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742"),
+    ("linux", "arm64"): ("linux-arm64", "58c9520501f6ae2b52d5b210444e24b9d0c029a58c5011b797bc1fe7105886f6"),
+    ("darwin", "arm64"): ("darwin-arm64", "4477b9f78efb77744cf5eb57a0e9594dba66466b38b4e93fa9f35cb907a095a6"),
 }
 
 parser = argparse.ArgumentParser(description=__doc__)

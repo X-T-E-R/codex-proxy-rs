@@ -26,8 +26,9 @@ Runtime packages installed from `package-lock.json`:
 | `openai` | 7.19.0 | Apache-2.0, Copyright OpenAI |
 | `partial-json` | 0.1.7 | MIT, Copyright Muspi Merol |
 
-Node.js >= 22.19.0 is required. Official runtime images and release archives include
-Node.js 26.12.0, the worker with packages installed by `npm ci --ignore-scripts
+The pinned TypeScript sources require Node.js 24.18.0 with
+`--experimental-transform-types`. Official runtime images and release archives include
+that Node version, the worker with packages installed by `npm ci --ignore-scripts
 --omit=dev`, and a pinned OpenCode/pi source snapshot. `node-LICENSE` travels with
 the Node executable; upstream `LICENSE` files travel under `sources/opencode` and
 `sources/pi`. The installed packages retain their own license files in `node_modules`.

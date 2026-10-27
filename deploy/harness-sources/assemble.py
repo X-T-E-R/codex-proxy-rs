@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 WORKER = ROOT / "backend/crates/providers/openai/harness-worker"
 SNAPSHOT = HERE / "snapshot.tar.gz"
-NODE_VERSION = "26.12.0"
+NODE_VERSION = "24.18.0"
 COMMITS = {
     "opencode": "ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17",
     "pi": "f9daca3480732d0042b1df3a6e27221f597a620d",

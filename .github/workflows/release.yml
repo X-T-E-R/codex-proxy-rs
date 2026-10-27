@@ -216,7 +216,7 @@ jobs:
       - name: Setup pinned Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '26.12.0'
+          node-version: '24.18.0'
 
       - name: Assemble locked harness
         run: |
@@ -307,7 +307,7 @@ jobs:
             -C "$RUNNER_TEMP/cpr-archive-smoke"
           root="$RUNNER_TEMP/cpr-archive-smoke/codex-proxy-rs"
           test -f "$root/runtime-manifest.json"
-          test "$("$root/node" --version)" = v26.12.0
+          test "$("$root/node" --version)" = v24.18.0
           "$root/node" deploy/harness-sources/smoke.mjs "$root/openai-harness" "$root/node"
 
       - name: Generate release asset provenance
@@ -422,7 +422,7 @@ jobs:
           PLATFORM: ${{ matrix.dockerPlatform }}
         run: |
           docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$IMAGE" -ec '
-            test "$(node --version)" = v26.12.0
+            test "$(node --version)" = v24.18.0
             test -f /app/bin/node-LICENSE
             test -f "$CPR_OPENAI_HARNESS_WORKER_DIR/node_modules/effect/package.json"
             test -f "$CPR_OPENCODE_SOURCE/packages/core/src/plugin/provider/chatgpt.ts"
