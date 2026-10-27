@@ -1528,3 +1528,177 @@ fn key_profiles_replace_whole_global_choice_and_previous_snapshot_stays_frozen()
     assert_eq!(values(&previous), ["global-a", "override"]);
     assert_eq!(values(&build("global-b", false)), ["global-b", "global-b"]);
 }
+
+struct AdditionalModelCatalog;
+
+impl ProviderCatalogPort for AdditionalModelCatalog {
+    fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+        BTreeMap::from([(
+            ProviderKind::new("openai").unwrap(),
+            ProviderCatalogGeneration::new(1),
+        )])
+    }
+
+    fn query_model_capabilities(
+        &self,
+        _: &ProviderKind,
+    ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>> {
+        Box::pin(async {
+            Ok(vec![
+                ProviderModelCapabilities::new(
+                    UpstreamModelId::new("future-terra").unwrap(),
+                    ModelCapabilities::new([OperationKind::Generate].into(), None),
+                )
+                .with_presentation(ModelPresentation::new(Some("future-terra".into()), None))
+                .with_catalog_accounts(
+                    [gateway_core::account::ProviderAccountId::new("acct_registered").unwrap()]
+                        .into(),
+                ),
+                ProviderModelCapabilities::new(
+                    UpstreamModelId::new("default-harness").unwrap(),
+                    ModelCapabilities::new([OperationKind::Generate].into(), None),
+                )
+                .with_catalog_accounts(
+                    [
+                        gateway_core::account::ProviderAccountId::new("acct_registered").unwrap(),
+                        gateway_core::account::ProviderAccountId::new("acct_other").unwrap(),
+                    ]
+                    .into(),
+                ),
+            ])
+        })
+    }
+
+    fn model_catalog_is_exhaustive(&self, _: &ProviderKind) -> bool {
+        false
+    }
+}
+
+#[test]
+fn registered_model_and_alias_only_appear_for_the_source_account_and_its_policy() {
+    use gateway_core::account::{
+        AccountAdditionalModels, AccountModelAccess, AccountModelAccessMode, ProviderAccountId,
+    };
+    use gateway_core::error::RoutingError;
+    use gateway_core::routing::RoutingContext;
+    let source_id = ProviderAccountId::new("acct_registered").unwrap();
+    let other_id = ProviderAccountId::new("acct_other").unwrap();
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        SettingsValues::new(
+            3,
+            "smart",
+            BTreeMap::from([("public-terra".into(), "future-terra".into())]),
+            None,
+            None,
+        ),
+        vec![],
+        vec![],
+        vec![
+            SnapshotProviderAccountFacts::new(source_id.clone(), "openai").with_additional_models(
+                AccountAdditionalModels::new(vec!["future-terra".into()]).unwrap(),
+            ),
+            SnapshotProviderAccountFacts::new(other_id.clone(), "openai"),
+        ],
+        vec![],
+    );
+    let snapshot = block_on(
+        RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(facts))),
+            Arc::new(AdditionalModelCatalog),
+        )
+        .compile(),
+    )
+    .unwrap();
+    let full = snapshot.all_account_scope();
+    let restricted = Arc::new(full.restricted_to(
+        &Default::default(),
+        &std::collections::BTreeSet::from([other_id]),
+    ));
+    let alias = PublicModelId::new("public-terra").unwrap();
+    assert!(snapshot.public_models_for_scope(&full).contains(&alias));
+    assert!(
+        !snapshot
+            .public_models_for_scope(&restricted)
+            .contains(&alias)
+    );
+    assert!(!snapshot.contains_public_model_for_scope(&alias, &restricted));
+    let default_model = PublicModelId::new("default-harness").unwrap();
+    assert!(
+        snapshot
+            .public_models_for_scope(&restricted)
+            .contains(&default_model)
+    );
+    assert!(
+        snapshot
+            .plan(
+                &default_model,
+                &super::operation(),
+                restricted.clone(),
+                &RoutingContext::default()
+            )
+            .is_ok()
+    );
+    assert!(matches!(
+        snapshot.plan(
+            &alias,
+            &super::operation(),
+            restricted,
+            &RoutingContext::default()
+        ),
+        Err(RoutingError::NoCapableProvider { .. })
+    ));
+    assert_eq!(
+        snapshot
+            .plan(
+                &alias,
+                &super::operation(),
+                full.clone(),
+                &RoutingContext::default()
+            )
+            .unwrap()
+            .candidates()[0]
+            .upstream_model()
+            .unwrap()
+            .as_str(),
+        "future-terra"
+    );
+
+    let blocked = SnapshotFacts::new(
+        revision(2),
+        revision(2),
+        SettingsValues::new(
+            3,
+            "smart",
+            BTreeMap::from([("public-terra".into(), "future-terra".into())]),
+            None,
+            None,
+        ),
+        vec![],
+        vec![],
+        vec![
+            SnapshotProviderAccountFacts::new(source_id, "openai").with_model_access(
+                AccountModelAccess::new(
+                    AccountModelAccessMode::Denylist,
+                    vec!["future-terra".into()],
+                )
+                .unwrap(),
+            ),
+        ],
+        vec![],
+    );
+    let blocked = block_on(
+        RuntimeSnapshotCompiler::new(
+            Arc::new(TestSnapshotStore::new(Ok(blocked))),
+            Arc::new(AdditionalModelCatalog),
+        )
+        .compile(),
+    )
+    .unwrap();
+    assert!(
+        !blocked
+            .public_models_for_scope(&blocked.all_account_scope())
+            .contains(&alias)
+    );
+}

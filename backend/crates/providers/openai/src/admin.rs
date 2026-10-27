@@ -1183,6 +1183,7 @@ fn account_from_record(account: &AccountRecord) -> Result<ProviderAccount, Provi
         account.last_error_message.clone(),
     )
     .with_model_access(account.model_access.clone())
+    .with_additional_models(account.additional_models.clone())
     .with_refresh_schedule(
         account.has_refresh_token,
         account.next_refresh_at.map(SystemTime::from),

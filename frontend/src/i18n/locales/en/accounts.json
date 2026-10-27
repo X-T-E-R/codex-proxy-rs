@@ -208,6 +208,15 @@
       "invalidModelId": "Enter an exact model ID, wildcards are not supported",
       "enterValidExactModelIdUpTo": "Please enter a valid exact model ID, up to 256 bytes, no wildcards are supported"
     },
+    "additionalModels": {
+      "title": "Additional models",
+      "help": "Register actual upstream model IDs for this account, defaults stay available and model limits still apply",
+      "input": "Upstream model ID",
+      "placeholder": "Enter an actual model ID",
+      "add": "Add",
+      "remove": "Remove {id}",
+      "duplicate": "This model is already added"
+    },
     "notes": {
       "viewAccountNotes": "View account notes",
       "title": "Account notes"
@@ -358,7 +367,6 @@
       "accountName": "{provider} account",
       "failedToStartAuthorization": "Failed to start authorization",
       "oauthHarness": "OAuth Harness",
-      "oauthHarnessHelp": "Select the OAuth client harness method",
       "harnesses": {
         "codex": "Codex",
         "opencode": "OpenCode (New)",

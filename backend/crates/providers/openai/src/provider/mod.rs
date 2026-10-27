@@ -791,12 +791,14 @@ impl Provider for CodexProvider {
                     .map(|affinity| affinity.key()),
             };
             let result = if allow_harness {
+                let origins = self.catalog.harness_default_origins(upstream_model.as_str()).await;
                 self.selector
                     .select_responses_with_context(
                         &request,
                         selection_session_affinity.as_ref(),
                         requires_websocket,
                         !stored_response,
+                        origins,
                     )
                     .await
             } else {

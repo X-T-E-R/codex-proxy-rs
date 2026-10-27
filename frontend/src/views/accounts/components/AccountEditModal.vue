@@ -8,7 +8,8 @@ import { ZButton, ZDialog, ZFormItem, ZSegmented, ZTextarea } from '@codex-proxy
 import { useI18n } from 'vue-i18n'
 import AccountPlanBadge from '@/components/account/AccountPlanBadge.vue'
 import ProviderIconGroup from '@/components/ProviderIconGroup.vue'
-import { isCodexOAuthAccount, isOpenAiApiKeyAccount } from '../utils/upstreamApiKey'
+import { isCodexOAuthAccount, isOpenAiApiKeyAccount, resolveAccountOAuthHarness } from '../utils/upstreamApiKey'
+import AccountAdditionalModelsField from './AccountAdditionalModelsField.vue'
 import AccountApiKeyFields from './AccountApiKeyFields.vue'
 import AccountIdentityCell from './AccountIdentityCell.vue'
 import AccountSettingsFields from './AccountSettingsFields.vue'
@@ -38,6 +39,7 @@ const notes = defineModel<string>('notes', { required: true })
 const enabled = defineModel<boolean>('enabled', { required: true })
 const concurrencyLimit = defineModel<string>('concurrencyLimit', { required: true })
 const modelAccess = defineModel<AccountModelAccess | undefined>('modelAccess', { required: true })
+const additionalModels = defineModel<string[]>('additionalModels', { required: true })
 const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
@@ -96,6 +98,8 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         :endpoint="account.outboundProxyEndpoint"
         :account-id="account.id"
       />
+
+      <AccountAdditionalModelsField v-if="['opencode', 'pi'].includes(resolveAccountOAuthHarness(account) ?? '')" v-model="additionalModels" :disabled="saving" />
 
       <ZFormItem :label="t('common.fields.notes')">
         <ZTextarea

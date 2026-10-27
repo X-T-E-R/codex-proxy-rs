@@ -156,6 +156,7 @@ export interface Account {
   }
   weight: number
   modelAccess: AccountModelAccess
+  additionalModels: string[]
   accessTokenExpiresAt: string | null
   accessTokenExpiresAtDisplay: string | null
   refreshTokenExpiresAt: string | null
@@ -424,6 +425,7 @@ interface AccountUpdateParam {
   concurrencyLimit: number | null
   weight: number
   modelAccess?: AccountModelAccess
+  additionalModels?: string[]
   groupIds: string[]
 }
 

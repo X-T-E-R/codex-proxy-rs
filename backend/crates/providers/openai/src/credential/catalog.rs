@@ -433,6 +433,41 @@ impl HarnessSourceCatalog {
         }
         Ok(Self { opencode, pi })
     }
+
+    fn for_account(
+        &self,
+        account: &ProviderAccount,
+    ) -> Result<Vec<HarnessSourceModel>, CodexCredentialCatalogError> {
+        let source = if account.authentication_kind()
+            == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
+        {
+            &self.opencode
+        } else {
+            &self.pi
+        };
+        source
+            .iter()
+            .cloned()
+            .map(Ok)
+            .chain(
+                account
+                    .additional_models()
+                    .models()
+                    .iter()
+                    .filter(|id| !source.iter().any(|model| model.id.as_str() == id.as_str()))
+                    .map(|id| {
+                        Ok(HarnessSourceModel {
+                            id: UpstreamModelId::new(id.clone())
+                                .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?,
+                            presentation: ModelPresentation::new(Some(id.clone()), None),
+                        })
+                    }),
+            )
+            .filter(|model| {
+                model.as_ref().map_or(true, |model| account.model_access().allows(model.id.as_str()))
+            })
+            .collect()
+    }
 }
 
 fn source_model(
@@ -580,6 +615,17 @@ impl CodexCredentialCatalogService {
             .await
     }
 
+    /// 本次模型在固定源目录中的认证域；额外 ID 由账号自身判断
+    pub(crate) async fn harness_default_origins(&self, model: &str) -> (bool, bool) {
+        let Ok(catalog) = self.source_catalog().await else {
+            return (false, false);
+        };
+        (
+            catalog.opencode.iter().any(|item| item.id.as_str() == model),
+            catalog.pi.iter().any(|item| item.id.as_str() == model),
+        )
+    }
+
     async fn harness_client_descriptors(
         &self,
         accounts: &[ProviderAccount],
@@ -596,17 +642,7 @@ impl CodexCredentialCatalogService {
             .iter()
             .filter(|account| super::harness_oauth::is_harness_kind(account.authentication_kind()))
         {
-            let source = if account.authentication_kind()
-                == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
-            {
-                &catalog.opencode
-            } else {
-                &catalog.pi
-            };
-            for model in source
-                .iter()
-                .filter(|model| account.model_access().allows(model.id.as_str()))
-            {
+            for model in catalog.for_account(account)? {
                 models
                     .entry(model.id.clone())
                     .or_insert_with(|| ProviderModelDescriptor {
@@ -638,17 +674,7 @@ impl CodexCredentialCatalogService {
         let mut models =
             BTreeMap::<UpstreamModelId, (ModelPresentation, BTreeSet<ProviderAccountId>)>::new();
         for account in accounts {
-            let source = if account.authentication_kind()
-                == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
-            {
-                &catalog.opencode
-            } else {
-                &catalog.pi
-            };
-            for model in source
-                .iter()
-                .filter(|model| account.model_access().allows(model.id.as_str()))
-            {
+            for model in catalog.for_account(&account)? {
                 let entry = models
                     .entry(model.id.clone())
                     .or_insert_with(|| (model.presentation.clone(), BTreeSet::new()));
@@ -897,9 +923,12 @@ impl CodexCredentialCatalogService {
         &self,
         account: &ProviderAccount,
     ) -> Result<CodexPlanCatalog, CodexCredentialCatalogError> {
-        let scope = CodexCatalogScope::for_account(account)?;
-        if let Some(catalog) = self.read_plan_catalog(&scope).await? {
-            return Ok(catalog);
+        // 管理设置与 credential revision 独立；固定 harness 的模型列表即时从账号事实计算
+        if !super::harness_oauth::is_harness_kind(account.authentication_kind()) {
+            let scope = CodexCatalogScope::for_account(account)?;
+            if let Some(catalog) = self.read_plan_catalog(&scope).await? {
+                return Ok(catalog);
+            }
         }
         self.refresh_account_catalog(account.id()).await
     }
@@ -920,16 +949,9 @@ impl CodexCredentialCatalogService {
         let scope = CodexCatalogScope::for_account(&account)?;
         if super::harness_oauth::is_harness_kind(account.authentication_kind()) {
             let catalog = self.source_catalog().await?;
-            let models = if account.authentication_kind()
-                == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
-            {
-                &catalog.opencode
-            } else {
-                &catalog.pi
-            };
-            let models = models
-                .iter()
-                .filter(|model| account.model_access().allows(model.id.as_str()))
+            let models = catalog
+                .for_account(&account)?
+                .into_iter()
                 .map(|model| model.id.as_str().to_owned())
                 .collect();
             let refreshed = CodexPlanCatalog::new(scope, Utc::now(), models);

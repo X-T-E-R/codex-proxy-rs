@@ -695,7 +695,8 @@ OpenAI Provider 在选号时排除 Grok 模型的 ChatGPT OAuth 账号，API Key
 `account::AccountModelAccess` 拥有管理员模型政策的校验与精确匹配语义，存入账号行的 `model_access_json`，
 由 `RuntimeAccountDirectory` / `FrozenAccountScope` 随配置快照冻结。Provider 在额度、亲和与租约之前
 按映射后的上游模型筛选账号；重试和 fallback 使用同一冻结政策。上游目录和凭据不承载或改写该政策。
-客户端目录的政策过滤判断范围内整个候选池，原生模型对象仍由 Provider 独占解释
+客户端目录的政策过滤判断范围内整个候选池，原生模型对象仍由 Provider 独占解释。
+每账号 `additional_models_json` 独立保存额外真实上游模型 ID，不代替固定源目录或模型政策；OpenAI Provider 把 OpenCode/pi 账号的默认与额外模型按账号来源编入目录，并在选号时按该账号所属固定目录或额外 ID 校验。未知额外模型只带通用展示，具体能力交由上游校验。配置发布重新编译来源目录，管理端读取固定 harness 账号模型时按当前账号事实重新生成，不沿用凭据 revision 为键的旧缓存
 
 账号编辑在一个事务中更新调度事实，批量更新只应用显式提供的字段。导入与首次 OAuth 可携带统一账号设置，由 Admin 传递给 Store，
 与凭据在同一事务中提交；Provider 仍独占凭据解析。未附带设置的导入、重新授权和后台刷新保留已有分组、

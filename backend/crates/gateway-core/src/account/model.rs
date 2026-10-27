@@ -794,6 +794,7 @@ pub struct ProviderAccount {
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
     model_access: super::AccountModelAccess,
+    additional_models: super::AccountAdditionalModels,
     credential_state: CredentialState,
     quota: QuotaState,
     last_error_reason: Option<AccountErrorReason>,
@@ -832,6 +833,7 @@ impl ProviderAccount {
             concurrency_limit: None,
             weight: AccountWeight::DEFAULT,
             model_access: super::AccountModelAccess::all(),
+            additional_models: super::AccountAdditionalModels::empty(),
             credential_state: CredentialState::Unknown,
             quota: QuotaState::unknown(),
             last_error_reason: None,
@@ -877,6 +879,17 @@ impl ProviderAccount {
     #[must_use]
     pub const fn model_access(&self) -> &super::AccountModelAccess {
         &self.model_access
+    }
+
+    #[must_use]
+    pub fn with_additional_models(mut self, models: super::AccountAdditionalModels) -> Self {
+        self.additional_models = models;
+        self
+    }
+
+    #[must_use]
+    pub const fn additional_models(&self) -> &super::AccountAdditionalModels {
+        &self.additional_models
     }
 
     #[must_use]

@@ -8,8 +8,8 @@ pub use location::{InvalidRequestLocation, RequestLocation};
 mod model;
 mod model_access;
 pub use model_access::{
-    AccountModelAccess, AccountModelAccessMode, InvalidAccountModelAccess,
-    MAX_ACCOUNT_ACCESS_MODELS,
+    AccountAdditionalModels, AccountModelAccess, AccountModelAccessMode,
+    InvalidAccountAdditionalModels, InvalidAccountModelAccess, MAX_ACCOUNT_ACCESS_MODELS,
 };
 mod protection;
 pub use protection::RuntimeProtectionSettings;

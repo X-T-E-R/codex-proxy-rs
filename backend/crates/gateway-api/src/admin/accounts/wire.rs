@@ -294,6 +294,7 @@ pub struct AccountView {
     pub capacity: AccountCapacityView,
     pub weight: u16,
     pub model_access: gateway_core::account::AccountModelAccess,
+    pub additional_models: gateway_core::account::AccountAdditionalModels,
     pub access_token_expires_at: Option<String>,
     pub access_token_expires_at_display: Option<String>,
     pub refresh_token_expires_at: Option<String>,

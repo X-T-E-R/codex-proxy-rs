@@ -416,9 +416,9 @@ Codex OAuth 账号按客户端传入的 `client_version` 请求上游目录，�
 `base_instructions`、`model_messages`、`service_tiers`、工具与能力字段，以及未知嵌套字段、显式 `null`
 和字段缺失的区别。API Key 上游返回完整 Codex `models` 目录时沿用该合同；仅返回普通 `data` 模型列表时使用通用画像，未提供的推理能力保持未知，不补充推理档位。
 
-OpenCode 与 pi 的新 OAuth 账号使用随发行包固定的源目录：OpenCode 的 8 个基础模型及其 8 个 `-fast` 变体、pi 的 42 个 chat 模型。它们以通用画像进入 Codex 客户端目录，不伪造 Codex 原生模型对象；账号模型权限仍可收窄集合。OpenCode 的 `-fast` 是模型变体而非上游 slug，实际请求发送基础模型和有效 `service_tier`；该目录随固定源码和发行包更新，不依赖运行机访问 models.dev。
+OpenCode 与 pi 的 OAuth 账号以随发行包固定的源目录为默认模型：OpenCode 的 8 个基础模型及其 8 个 `-fast` 变体、pi 的 42 个 chat 模型。管理员可在账号编辑中登记额外的真实上游模型 ID，立即加入该账号目录，不改变默认模型；未知模型只使用通用画像，不推断上下文容量、推理档位或 Fast 支持。它们以通用画像进入 Codex 客户端目录，不伪造 Codex 原生模型对象；账号模型限制仍可收窄集合。OpenCode 的固定 `-fast` 是模型变体而非上游 slug，实际请求发送基础模型和有效 `service_tier`；额外模型按所填 ID 原样发送，不自动生成 Fast 变体。固定目录随源码和发行包更新，不依赖运行机访问 models.dev。
 
-用户配置的模型别名仅替换 `slug`，不替换上游展示名、提示词、能力或 `priority`；保持原生模型顺序，新增别名附在后面。目录按当前路由快照的模型存在性及账号模型政策过滤，避免公布已知无法路由的模型；Codex 新模型需待后台目录对账，固定 harness 新模型需随源码版本更新后进入列表。
+用户配置的模型别名仅替换 `slug`，不替换上游展示名、提示词、能力或 `priority`；保持原生模型顺序，新增别名附在后面。目录按当前路由快照的模型存在性、来源账号及模型限制过滤，避免公布已知无法路由的模型；Codex OAuth 新模型需待后台目录对账，OpenCode/pi 新模型可在目标账号登记真实 ID 后使用。
 xAI 没有 Codex 原生目录，使用官方 CLI proxy 当前目录生成通用画像。推理菜单读取
 `reasoning_efforts` 对象列表，默认值只取菜单中的显式标记；缺失时保持未知
 
@@ -737,7 +737,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 | `POST` | `/api/admin/accounts/import-tasks/stop` | `{ taskId }` | 跳过未开始的条目，已开始的条目继续完成 |
 | `POST` | `/api/admin/accounts/refresh` | `{ accountId }` | 手工刷新 OAuth credential（`idToken` / `accessToken` / `refreshToken`），不刷新额度 |
 | `POST` | `/api/admin/accounts/recover` | `{ accountId }` | 停用账号只启用调度；已启用账号强制清除本地错误/额度/cooldown 事实，不访问上游 |
-| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, modelAccess?, outboundProxyId?, outboundProxyUrl?, connection? }` | 一次更新账号设置；`connection` 支持 OpenAI OAuth 传输方式及 API Key 连接配置，见下文 |
+| `POST` | `/api/admin/accounts/update` | `{ accountId, enabled, concurrencyLimit, weight, groupIds, notes?, modelAccess?, additionalModels?, outboundProxyId?, outboundProxyUrl?, connection? }` | 一次更新账号设置；`connection` 支持 OpenAI OAuth 传输方式及 API Key 连接配置，见下文 |
 | `POST` | `/api/admin/accounts/batch-update` | `{ accountIds, enabled?, concurrencyLimit?, weight?, groupIds?, modelAccess?, outboundProxyId?, outboundProxyUrl? }` | 一次事务更新所选账号；仅修改提供的字段，至少提供一项修改 |
 | `POST` | `/api/admin/accounts/delete` | `{ provider, accountIds }` | 批量删除 1–200 个账号 |
 | `GET` | `/api/admin/accounts/quota` | `accountId` | 读取当前额度，不强制访问上游；Provider 未提供额度能力时返回空额度投影 |
@@ -813,7 +813,9 @@ OpenAI 主动额度刷新和正常响应携带的明确套餐会同步到账号�
 浏览器打开的第三方 OAuth 授权页仍使用浏览器自身网络。
 账号出口与连接隔离见 [架构说明](architecture.md#账号出站代理)
 
-### 账号模型限制
+### 账号额外模型与限制
+
+OpenCode/pi OAuth 账号编辑可提交 `additionalModels: ["真实上游模型ID"]`，账号列表和详情返回该数组。省略时保留现值，提交 `[]` 移除全部额外模型；默认源目录不会被清除。最多 256 项，大小写敏感、精确匹配、重复去重，每项最多 256 字节且不能有首尾空白、控制字符、`__` 前缀或 `*` 通配符。该字段与 `modelAccess` 独立，登记后即为此账号发布可路由的模型 ID，但仍需上游真正接受该 ID；账号未登记的其他 OAuth harness 账号不会据此获得路由资格。Codex OAuth、API Key、xAI 不使用此额外目录。配置与凭据刷新独立持久，账号删除时一并删除
 
 账号列表和详情返回 `modelAccess: { mode, models }`，模型 ID 区分大小写并精确匹配：
 

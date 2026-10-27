@@ -54,6 +54,7 @@ fn account() -> AccountRecord {
         concurrency_limit: None,
         weight: AccountWeight::new(1).unwrap(),
         model_access: Default::default(),
+        additional_models: Default::default(),
         outbound_proxy: None,
         credential_state: CredentialState::Ready,
         credential_observed_at: at,

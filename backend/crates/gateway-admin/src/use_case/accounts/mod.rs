@@ -970,7 +970,18 @@ impl AccountsService for DefaultAccountsService {
     ) -> Result<AccountUpdateResult, AdminError> {
         let account_id = ProviderAccountId::new(command.account_id.clone())
             .map_err(|_| AdminError::invalid("Provider 账号 ID 不合法"))?;
-        let (_, provider) = self.provider_for_account(&account_id).await?;
+        let (item, provider) = self.provider_for_account(&account_id).await?;
+        if command.additional_models.is_some()
+            && (item.account.provider_kind.as_str() != "openai"
+                || !matches!(
+                    item.account.authentication_kind.as_str(),
+                    "chatgpt_token_sharing" | "pi_openai"
+                ))
+        {
+            return Err(AdminError::invalid(
+                "额外模型只适用于 OpenCode/pi OAuth 账号",
+            ));
+        }
         let enabled = command.enabled;
         let result = self
             .accounts

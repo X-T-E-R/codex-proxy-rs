@@ -43,6 +43,7 @@ pub struct SnapshotProviderAccountData {
     pub id: String,
     pub provider_kind: String,
     pub model_access: gateway_core::account::AccountModelAccess,
+    pub additional_models: gateway_core::account::AccountAdditionalModels,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +167,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                         .map(|id| {
                             SnapshotProviderAccountFacts::new(id, account.provider_kind)
                                 .with_model_access(account.model_access)
+                                .with_additional_models(account.additional_models)
                         })
                         .map_err(|_| SnapshotStoreError::unavailable())
                 })
@@ -370,18 +372,20 @@ async fn load_provider_accounts(
             String,
             String,
             sqlx::types::Json<gateway_core::account::AccountModelAccess>,
+            sqlx::types::Json<gateway_core::account::AccountAdditionalModels>,
         ),
-    >("select id, provider_kind, model_access_json from provider_accounts order by id")
+    >("select id, provider_kind, model_access_json, additional_models_json from provider_accounts order by id")
     .fetch_all(&mut **transaction)
     .await
     .map_err(|source| postgres_unavailable("load snapshot provider accounts", source))
     .map(|rows| {
         rows.into_iter()
             .map(
-                |(id, provider_kind, model_access)| SnapshotProviderAccountData {
+                |(id, provider_kind, model_access, additional_models)| SnapshotProviderAccountData {
                     id,
                     provider_kind,
                     model_access: model_access.0,
+                    additional_models: additional_models.0,
                 },
             )
             .collect()

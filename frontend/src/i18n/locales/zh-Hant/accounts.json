@@ -208,6 +208,15 @@
       "invalidModelId": "請使用有效的精確模型 ID，不支持通配符",
       "enterValidExactModelIdUpTo": "請輸入有效的精確模型 ID，最多 256 字節，不支持通配符"
     },
+    "additionalModels": {
+      "title": "額外模型",
+      "help": "為此賬號登記真實上游模型 ID，默認模型不變，仍受模型限制約束",
+      "input": "上游模型 ID",
+      "placeholder": "輸入真實模型 ID",
+      "add": "添加",
+      "remove": "移除 {id}",
+      "duplicate": "此模型已添加"
+    },
     "notes": {
       "viewAccountNotes": "查看賬號備註",
       "title": "賬號備註"
@@ -358,7 +367,6 @@
       "accountName": "{provider} 賬號",
       "failedToStartAuthorization": "啓動授權失敗",
       "oauthHarness": "OAuth 接入通道",
-      "oauthHarnessHelp": "選擇對應的 OAuth 客戶端接入方式",
       "harnesses": {
         "codex": "Codex",
         "opencode": "OpenCode（新版）",

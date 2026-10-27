@@ -8,7 +8,7 @@ import { t } from '@/i18n'
 import { notification as ZNotification } from '@/utils/notification'
 import { accountModelAccessError } from '../utils/modelAccess'
 import { concurrencyLimitInput, parseAccountSchedulingForm } from '../utils/schedulingForm'
-import { apiKeyAccountError, emptyApiKeyAccountForm, isCodexOAuthAccount, isOpenAiApiKeyAccount, parseApiKeyConfiguration } from '../utils/upstreamApiKey'
+import { apiKeyAccountError, emptyApiKeyAccountForm, isCodexOAuthAccount, isOpenAiApiKeyAccount, parseApiKeyConfiguration, resolveAccountOAuthHarness } from '../utils/upstreamApiKey'
 
 export function useAccountEditor(options: {
   reloadAccounts: () => Promise<unknown>
@@ -22,6 +22,7 @@ export function useAccountEditor(options: {
   const concurrencyLimit = shallowRef('')
   const weight = shallowRef('1')
   const modelAccess = ref<AccountModelAccess | undefined>()
+  const additionalModels = ref<string[]>([])
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
   const selectedGroupIds = ref<string[]>([])
@@ -72,6 +73,7 @@ export function useAccountEditor(options: {
     concurrencyLimit.value = concurrencyLimitInput(account.concurrencyLimit)
     weight.value = String(account.weight)
     modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
+    additionalModels.value = [...account.additionalModels]
     selectedGroupIds.value = account.groups.map(group => group.id)
     showEditModal.value = true
     if (isOpenAiApiKeyAccount(account) || isCodexOAuthAccount(account))
@@ -118,6 +120,7 @@ export function useAccountEditor(options: {
         concurrencyLimit: scheduling.values.concurrencyLimit,
         weight: scheduling.values.weight,
         modelAccess: modelAccess.value,
+        additionalModels: ['opencode', 'pi'].includes(resolveAccountOAuthHarness(editingAccount.value) ?? '') ? additionalModels.value : undefined,
         groupIds: [...new Set(selectedGroupIds.value)],
       }
       const connectionChanged = isApiKey && (
@@ -163,6 +166,7 @@ export function useAccountEditor(options: {
     concurrencyLimit,
     weight,
     modelAccess,
+    additionalModels,
     proxyMode,
     proxyId,
     selectedGroupIds,

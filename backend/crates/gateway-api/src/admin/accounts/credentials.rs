@@ -240,6 +240,7 @@ pub struct UpdateAccountRequest {
     pub concurrency_limit: Option<u64>,
     pub weight: u64,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
+    pub additional_models: Option<gateway_core::account::AccountAdditionalModels>,
     pub group_ids: Vec<String>,
 }
 
@@ -274,6 +275,7 @@ impl UpdateAccountRequest {
             concurrency_limit: parse_concurrency_limit(self.concurrency_limit)?,
             weight: parse_account_weight(self.weight)?,
             model_access: self.model_access,
+            additional_models: self.additional_models,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
         };
         Ok((settings, connection))

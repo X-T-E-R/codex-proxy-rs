@@ -515,6 +515,7 @@ mod provider {
                 outbound_proxy_enabled: true,
                 notes: None,
                 model_access: Default::default(),
+                additional_models: Default::default(),
                 id: "acct_error_test".to_owned(),
                 provider_kind: ProviderKind::new(provider).unwrap(),
                 groups: Vec::new(),

@@ -208,6 +208,15 @@
       "invalidModelId": "请使用有效的精确模型 ID，不支持通配符",
       "enterValidExactModelIdUpTo": "请输入有效的精确模型 ID，最多 256 字节，不支持通配符"
     },
+    "additionalModels": {
+      "title": "额外模型",
+      "help": "为此账号登记真实上游模型 ID，默认模型不变，仍受模型限制约束",
+      "input": "上游模型 ID",
+      "placeholder": "输入真实模型 ID",
+      "add": "添加",
+      "remove": "移除 {id}",
+      "duplicate": "此模型已添加"
+    },
     "notes": {
       "viewAccountNotes": "查看账号备注",
       "title": "账号备注"
@@ -358,7 +367,6 @@
       "accountName": "{provider} 账号",
       "failedToStartAuthorization": "启动授权失败",
       "oauthHarness": "OAuth 接入通道",
-      "oauthHarnessHelp": "选择对应的 OAuth 客户端接入方式",
       "harnesses": {
         "codex": "Codex",
         "opencode": "OpenCode（新版）",

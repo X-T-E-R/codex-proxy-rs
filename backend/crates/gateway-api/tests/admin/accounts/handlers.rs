@@ -193,6 +193,7 @@ fn account_page_item(
             concurrency_limit: None,
             weight: Default::default(),
             model_access: Default::default(),
+            additional_models: Default::default(),
             outbound_proxy: None,
             credential_state: facts.credential_state,
             credential_observed_at: now,

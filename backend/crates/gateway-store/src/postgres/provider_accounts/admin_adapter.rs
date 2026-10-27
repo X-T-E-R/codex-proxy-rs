@@ -613,6 +613,9 @@ impl AccountStore for PgAdminAccountStore {
         if command.notes.is_some() {
             changed_fields.push("notes".to_owned());
         }
+        if command.additional_models.is_some() {
+            changed_fields.push("additional_models".to_owned());
+        }
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
@@ -622,6 +625,7 @@ impl AccountStore for PgAdminAccountStore {
                 concurrency_limit: Some(command.concurrency_limit),
                 weight: Some(command.weight),
                 model_access: command.model_access,
+                additional_models: command.additional_models,
                 group_ids: Some(command.group_ids),
                 outbound_proxy: command.outbound_proxy,
                 audit: mutation_audit(
@@ -784,6 +788,7 @@ impl AccountStore for PgAdminAccountStore {
                 concurrency_limit: command.concurrency_limit,
                 weight: command.weight,
                 model_access: command.model_access,
+                additional_models: None,
                 group_ids: command.group_ids,
                 outbound_proxy: command.outbound_proxy,
                 audit: mutation_audit(

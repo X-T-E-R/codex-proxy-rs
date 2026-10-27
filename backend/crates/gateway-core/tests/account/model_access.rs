@@ -1,6 +1,6 @@
-//! 验证账号模型访问设置的边界、去重与模型标识保留
+//! 验证账号模型限制与额外目录的边界、去重及独立语义
 
-use gateway_core::account::AccountModelAccess;
+use gateway_core::account::{AccountAdditionalModels, AccountModelAccess};
 use serde_json::json;
 
 #[test]
@@ -35,4 +35,26 @@ fn account_model_access_document_deduplicates_without_changing_exact_ids() {
             "mode":"allowlist","models":["Test-Luna","test-luna"]
         })
     );
+}
+
+#[test]
+fn additional_models_are_an_independent_exact_id_set() {
+    let models: AccountAdditionalModels = serde_json::from_value(json!([
+        "new-terra-id", "new-terra-id", "New-Terra-ID"
+    ]))
+    .expect("additional models");
+    assert_eq!(serde_json::to_value(&models).expect("serialize"), json!(["New-Terra-ID", "new-terra-id"]));
+    assert_eq!(serde_json::to_value(AccountAdditionalModels::default()).expect("default"), json!([]));
+
+    for invalid in [
+        json!({"models": ["new-terra-id"]}),
+        json!([" model"]),
+        json!(["__private"]),
+        json!(["new-*"]),
+        json!(["\n"]),
+        json!(["x".repeat(257)]),
+        json!(vec!["model"; 257]),
+    ] {
+        assert!(serde_json::from_value::<AccountAdditionalModels>(invalid).is_err());
+    }
 }

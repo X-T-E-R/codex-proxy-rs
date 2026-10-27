@@ -139,6 +139,7 @@ pub struct AccountRecord {
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
     pub model_access: gateway_core::account::AccountModelAccess,
+    pub additional_models: gateway_core::account::AccountAdditionalModels,
     pub outbound_proxy_id: Option<String>,
     pub outbound_proxy: Option<gateway_core::account::OutboundProxy>,
     pub outbound_proxy_enabled: bool,
@@ -243,6 +244,7 @@ pub struct UpdateAccount {
     pub concurrency_limit: Option<AccountConcurrencyLimit>,
     pub weight: AccountWeight,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
+    pub additional_models: Option<gateway_core::account::AccountAdditionalModels>,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
 }

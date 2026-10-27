@@ -1934,6 +1934,7 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         outbound_proxy_enabled: true,
         notes: None,
         model_access: Default::default(),
+        additional_models: account.additional_models().clone(),
         outbound_proxy: None,
         id: account.id().to_string(),
         provider_kind: account.provider().clone(),

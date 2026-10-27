@@ -110,7 +110,7 @@ pub(crate) async fn load_admin_account_page(
                 a.upstream_account_id, a.plan_type, a.authentication_kind,
                 a.credential_revision, a.has_refresh_token, a.access_token_expires_at,
                 a.next_refresh_at, a.enabled, a.concurrency_limit, a.weight, a.model_access_json,
-                a.credential_state, a.quota_access_state, a.quota_evidence,
+                a.additional_models_json, a.credential_state, a.quota_access_state, a.quota_evidence,
                 a.quota_access_observed_at, a.quota_reset_at, a.last_error_reason,
                 a.last_error_message, a.credential_observed_at, a.created_at, a.updated_at,
                 filtered_total.filtered_total,

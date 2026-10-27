@@ -393,6 +393,7 @@ fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
     UpdateAccount {
         notes: None,
         model_access: Default::default(),
+        additional_models: None,
         account_id: account_id.to_owned(),
         enabled: true,
         concurrency_limit: None,

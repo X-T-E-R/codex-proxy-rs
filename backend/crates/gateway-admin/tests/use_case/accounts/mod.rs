@@ -1912,6 +1912,7 @@ async fn accounts_update_should_commit_then_release_disabled_account_and_publish
             UpdateAccount {
                 notes: None,
                 model_access: Default::default(),
+                additional_models: None,
                 outbound_proxy: None,
                 account_id: "acct_test".to_owned(),
                 enabled: false,
@@ -1951,6 +1952,7 @@ async fn accounts_update_should_not_notify_provider_when_store_commit_fails() {
             UpdateAccount {
                 notes: None,
                 model_access: Default::default(),
+                additional_models: None,
                 outbound_proxy: None,
                 account_id: "acct_test".to_owned(),
                 enabled: false,
@@ -3307,6 +3309,7 @@ pub(super) fn account_record(kind: &str) -> AccountRecord {
         outbound_proxy_enabled: true,
         notes: None,
         model_access: Default::default(),
+        additional_models: Default::default(),
         outbound_proxy: None,
         id: "acct_test".to_owned(),
         provider_kind: ProviderKind::new(kind).expect("provider kind"),

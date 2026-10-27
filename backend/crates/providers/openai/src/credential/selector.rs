@@ -193,6 +193,7 @@ struct CredentialSelectionInput<'a> {
     domain: OpenAiSelectionDomain,
     allow_harness: bool,
     allow_pi_harness: bool,
+    harness_default_origins: (bool, bool),
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
@@ -211,8 +212,15 @@ impl CredentialSelectionInput<'_> {
 
     fn allows_model(&self, model: CodexSelectionModel<'_>, account: &ProviderAccount) -> bool {
         if self.allow_harness && is_harness_kind(account.authentication_kind()) {
-            matches!(model, CodexSelectionModel::Requested(_))
-                && !model.model().is_some_and(is_grok_model)
+            let Some(id) = model.model().filter(|_| matches!(model, CodexSelectionModel::Requested(_))) else {
+                return false;
+            };
+            let default = match account.authentication_kind() {
+                super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING => self.harness_default_origins.0,
+                super::CODEX_AUTHENTICATION_KIND_PI_OPENAI => self.harness_default_origins.1,
+                _ => false,
+            };
+            !is_grok_model(id) && (default || account.additional_models().models().contains(id))
         } else {
             model.allows_account_in(account, self.domain)
         }
@@ -400,6 +408,7 @@ impl CodexCredentialSelector {
             domain,
             allow_harness: false,
             allow_pi_harness: false,
+            harness_default_origins: (false, false),
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -426,6 +435,7 @@ impl CodexCredentialSelector {
             domain: OpenAiSelectionDomain::ProviderDefault,
             allow_harness: false,
             allow_pi_harness: false,
+            harness_default_origins: (false, false),
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -446,6 +456,7 @@ impl CodexCredentialSelector {
         session_affinity_observation: Option<&CodexSessionAffinity>,
         requires_websocket: bool,
         allow_pi_harness: bool,
+        harness_default_origins: (bool, bool),
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket,
@@ -453,6 +464,7 @@ impl CodexCredentialSelector {
             domain: OpenAiSelectionDomain::ProviderDefault,
             allow_harness: true,
             allow_pi_harness,
+            harness_default_origins,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -536,6 +548,7 @@ impl CodexCredentialSelector {
             domain: OpenAiSelectionDomain::ProviderDefault,
             allow_harness: false,
             allow_pi_harness: false,
+            harness_default_origins: (false, false),
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),

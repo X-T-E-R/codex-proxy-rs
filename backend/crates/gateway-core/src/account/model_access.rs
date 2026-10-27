@@ -55,12 +55,7 @@ impl AccountModelAccess {
     ) -> Result<Self, InvalidAccountModelAccess> {
         if models.len() > MAX_ACCOUNT_ACCESS_MODELS
             || (mode == AccountModelAccessMode::All) != models.is_empty()
-            || models.iter().any(|model| {
-                model.trim() != model
-                    || model.trim().is_empty()
-                    || model.contains('*')
-                    || validate_text(model, 256, true, None).is_err()
-            })
+            || models.iter().any(|model| !valid_model_id(model))
         {
             return Err(InvalidAccountModelAccess);
         }
@@ -101,5 +96,49 @@ impl<'de> Deserialize<'de> for AccountModelAccess {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let document = ModelAccessDocument::deserialize(deserializer)?;
         Self::new(document.mode, document.models).map_err(serde::de::Error::custom)
+    }
+}
+
+fn valid_model_id(model: &str) -> bool {
+    model.trim() == model
+        && !model.is_empty()
+        && !model.contains('*')
+        && validate_text(model, 256, true, None).is_ok()
+}
+
+/// 管理员登记在单个账号上的真实上游模型 ID，不代替默认目录或模型限制
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct AccountAdditionalModels(BTreeSet<String>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("additionalModels requires at most 256 exact model IDs (at most 256 bytes each)")]
+pub struct InvalidAccountAdditionalModels;
+
+impl AccountAdditionalModels {
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self(BTreeSet::new())
+    }
+
+    pub fn new(models: Vec<String>) -> Result<Self, InvalidAccountAdditionalModels> {
+        if models.len() > MAX_ACCOUNT_ACCESS_MODELS
+            || models.iter().any(|model| !valid_model_id(model))
+        {
+            return Err(InvalidAccountAdditionalModels);
+        }
+        Ok(Self(models.into_iter().collect()))
+    }
+
+    #[must_use]
+    pub const fn models(&self) -> &BTreeSet<String> {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for AccountAdditionalModels {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let models = Vec::<String>::deserialize(deserializer)?;
+        Self::new(models).map_err(serde::de::Error::custom)
     }
 }

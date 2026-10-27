@@ -112,6 +112,7 @@ pub struct SnapshotProviderAccountFacts {
     account_id: ProviderAccountId,
     provider_kind: String,
     model_access: crate::account::AccountModelAccess,
+    additional_models: crate::account::AccountAdditionalModels,
 }
 
 impl SnapshotProviderAccountFacts {
@@ -121,6 +122,7 @@ impl SnapshotProviderAccountFacts {
             account_id,
             provider_kind: provider_kind.into(),
             model_access: crate::account::AccountModelAccess::all(),
+            additional_models: crate::account::AccountAdditionalModels::empty(),
         }
     }
 }
@@ -129,6 +131,15 @@ impl SnapshotProviderAccountFacts {
     #[must_use]
     pub fn with_model_access(mut self, model_access: crate::account::AccountModelAccess) -> Self {
         self.model_access = model_access;
+        self
+    }
+
+    #[must_use]
+    pub fn with_additional_models(
+        mut self,
+        models: crate::account::AccountAdditionalModels,
+    ) -> Self {
+        self.additional_models = models;
         self
     }
 }
@@ -354,12 +365,29 @@ impl RuntimeSnapshotCompiler {
             let cached = previous.filter(|previous| {
                 previous.extensions().map(|set| set.id()) == extensions.as_ref().map(|set| set.id())
             });
+            // 账号增删额外 ID 必须同步刷新来源目录，不能复用旧代次的账号归属。
+            let models_changed = cached.is_some_and(|previous| {
+                let assignments = facts
+                    .provider_accounts
+                    .iter()
+                    .filter(|account| !account.additional_models.models().is_empty())
+                    .map(|account| {
+                        (
+                            account.account_id.clone(),
+                            account.additional_models.clone(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                assignments != *previous.additional_model_assignments
+            });
+            let refresh_models = refresh_catalog || models_changed;
             let snapshot = compile_runtime_snapshot(
                 facts,
                 catalogs.as_ref(),
                 provider_kinds,
                 cached,
-                refresh_catalog,
+                refresh_models,
+                models_changed,
                 self.privacy_compiler.clone(),
             )
             .await?;
@@ -376,7 +404,7 @@ impl RuntimeSnapshotCompiler {
                     return Err(RuntimeSnapshotCompileError::RevisionChanged);
                 }
                 let snapshot = snapshot
-                    .with_provider_catalog_generations(if cached.is_some() && !refresh_catalog {
+                    .with_provider_catalog_generations(if cached.is_some() && !refresh_models {
                         BTreeMap::new()
                     } else {
                         observed_generations
@@ -395,6 +423,7 @@ async fn compile_runtime_snapshot(
     provider_kinds: Vec<ProviderKind>,
     previous: Option<&RuntimeSnapshot>,
     refresh_catalog: bool,
+    account_models_changed: bool,
     privacy_compiler: Option<Arc<dyn crate::settings::privacy::PrivacyPolicyCompiler>>,
 ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
     // 目录读取失败不能抹掉已知归属；成功返回空目录则仍是权威的模型撤回
@@ -407,6 +436,9 @@ async fn compile_runtime_snapshot(
         } else {
             None
         };
+        if account_models_changed && provider.as_str() == "openai" && models.is_none() {
+            return Err(RuntimeSnapshotCompileError::CatalogChanged);
+        }
         if let Some(previous) = previous.filter(|_| models.is_none()) {
             if let Some(accounts) = previous.model_catalog_accounts.get(provider) {
                 catalog_accounts.insert(provider.clone(), accounts.clone());
@@ -469,9 +501,14 @@ async fn compile_runtime_snapshot(
 
     let mut account_groups = BTreeMap::<ProviderAccountId, BTreeSet<AccountGroupId>>::new();
     let mut accounts = BTreeMap::new();
+    let mut additional_model_assignments = BTreeMap::new();
     for account in facts.provider_accounts {
         let provider_kind = ProviderKind::new(account.provider_kind)
             .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?;
+        if !account.additional_models.models().is_empty() {
+            additional_model_assignments
+                .insert(account.account_id.clone(), account.additional_models);
+        }
         // 账号归属独立于当前执行器集合；Provider 撤下后仍保留账号和分组，路由只选已注册执行器
         if accounts
             .insert(
@@ -577,6 +614,7 @@ async fn compile_runtime_snapshot(
             .with_account_directory(account_directory)
             .with_exhaustive_provider_catalogs(exhaustive_provider_catalogs)
             .with_model_catalog_accounts(catalog_accounts)
+            .with_additional_model_assignments(additional_model_assignments)
     })
 }
 
@@ -594,6 +632,8 @@ pub struct RuntimeSnapshot {
     provider_catalog_generations: Arc<BTreeMap<ProviderKind, ProviderCatalogGeneration>>,
     exhaustive_provider_catalogs: Arc<BTreeSet<ProviderKind>>,
     model_catalog_accounts: Arc<ModelCatalogAccounts>,
+    additional_model_assignments:
+        Arc<BTreeMap<ProviderAccountId, crate::account::AccountAdditionalModels>>,
     account_directory: Arc<RuntimeAccountDirectory>,
     client_policies: Arc<BTreeMap<ClientApiKeyId, ClientPolicy>>,
 }
@@ -766,6 +806,7 @@ impl RuntimeSnapshot {
             provider_catalog_generations: Arc::new(BTreeMap::new()),
             exhaustive_provider_catalogs: Arc::new(exhaustive_provider_catalogs),
             model_catalog_accounts: Arc::default(),
+            additional_model_assignments: Arc::default(),
             account_directory: Arc::new(RuntimeAccountDirectory::default()),
             client_policies: Arc::new(client_policy_map),
         })
@@ -785,6 +826,14 @@ impl RuntimeSnapshot {
 
     fn with_model_catalog_accounts(mut self, accounts: ModelCatalogAccounts) -> Self {
         self.model_catalog_accounts = Arc::new(accounts);
+        self
+    }
+
+    fn with_additional_model_assignments(
+        mut self,
+        assignments: BTreeMap<ProviderAccountId, crate::account::AccountAdditionalModels>,
+    ) -> Self {
+        self.additional_model_assignments = Arc::new(assignments);
         self
     }
 
@@ -989,6 +1038,16 @@ impl RuntimeSnapshot {
         public_model: &PublicModelId,
         scope: &FrozenAccountScope,
     ) -> bool {
+        self.catalog_model_allowed_for_scope_with_policy(provider, public_model, scope, true)
+    }
+
+    fn catalog_model_allowed_for_scope_with_policy(
+        &self,
+        provider: &ProviderKind,
+        public_model: &PublicModelId,
+        scope: &FrozenAccountScope,
+        enforce_policy: bool,
+    ) -> bool {
         let upstream_model = self.mapped_model(public_model.as_str());
         match self
             .model_catalog_accounts
@@ -997,9 +1056,9 @@ impl RuntimeSnapshot {
         {
             Some(accounts) => accounts.iter().any(|account| {
                 scope.account_provider(account) == Some(provider)
-                    && scope.allows_model(account, &upstream_model)
+                    && (!enforce_policy || scope.allows_model(account, &upstream_model))
             }),
-            None => scope.allows_provider_model(provider, &upstream_model),
+            None => !enforce_policy || scope.allows_provider_model(provider, &upstream_model),
         }
     }
 
@@ -1145,7 +1204,16 @@ impl RuntimeSnapshot {
             {
                 continue;
             }
-            // 强制 Provider 路由也不能扩大 Key 授权；管理诊断的目标账号由探测入口固定
+            // 目录的来源账号必须也位于本 Key 范围内；映射和显式别名按目标模型裁决。
+            if !self.catalog_model_allowed_for_scope_with_policy(
+                provider,
+                public_model,
+                &account_scope,
+                enforce_account_model_policy,
+            ) {
+                continue;
+            }
+            // 管理诊断仍跳过账号限制，但不跳过模型的来源归属。
             if enforce_account_model_policy
                 && !account_scope.allows_provider_model(provider, upstream_model.as_str())
             {

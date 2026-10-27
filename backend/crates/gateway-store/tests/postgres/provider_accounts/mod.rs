@@ -1178,6 +1178,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
             UpdateAccount {
                 notes: None,
                 model_access: Default::default(),
+                additional_models: None,
                 outbound_proxy: None,
                 account_id: "acct_terminal_mutation".to_owned(),
                 enabled: false,
@@ -1259,6 +1260,7 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
     let command = UpdateAccount {
         notes: None,
         model_access: Default::default(),
+        additional_models: None,
         account_id: "acct_proxy".to_owned(),
         enabled: true,
         concurrency_limit: None,
@@ -1337,6 +1339,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         group_ids: vec![],
         outbound_proxy: None,
         model_access: None,
+        additional_models: None,
     };
     store
         .update_account(command.clone(), &context)
@@ -1486,6 +1489,7 @@ async fn invalid_account_notes_roll_back_scheduling_revision_and_audit() {
                 group_ids: vec![],
                 outbound_proxy: None,
                 model_access: None,
+                additional_models: None,
             },
             &MutationContext {
                 actor: MutationActor::System,
@@ -2505,6 +2509,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
             notes: None,
             model_access: Default::default(),
+            additional_models: None,
             outbound_proxy: None,
             account_ids: vec!["acct_admin_a".to_owned()],
             enabled: Some(false),
@@ -2578,6 +2583,7 @@ async fn credential_rotation_and_settings_share_one_transaction() {
         weight: AccountWeight::new(7).unwrap(),
         group_ids: vec![AccountGroupId::new(GROUP_ID).unwrap()],
         model_access: None,
+        additional_models: None,
         outbound_proxy: Some(AccountProxySelection::Direct),
     };
     let scope = ProviderAccountAdminScope {
@@ -3296,6 +3302,7 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
             UpdateAccount {
                 notes: None,
                 model_access: Default::default(),
+                additional_models: None,
                 account_id: id.as_str().to_owned(),
                 enabled: true,
                 concurrency_limit: None,
@@ -3688,5 +3695,93 @@ async fn connection_configuration_update_preserves_credential_health() {
         );
     }
     assert_eq!(after["credential_revision"], 2);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn additional_models_persist_and_remove_without_changing_existing_model_policy() {
+    use gateway_core::account::{
+        AccountAdditionalModels, AccountModelAccess, AccountModelAccessMode,
+    };
+    let Some(database) = TestDatabase::create("account_additional_models").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let mut input = account("acct_extra_models", "user-extra-models");
+    input.authentication_kind = "chatgpt_token_sharing".to_owned();
+    repository
+        .insert_provider_account(input.clone())
+        .await
+        .expect("insert");
+    let before = repository
+        .load_provider_account(&input.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(before.summary.additional_models.models().is_empty());
+
+    let policy = AccountModelAccess::new(
+        AccountModelAccessMode::Denylist,
+        vec!["blocked-model".to_owned()],
+    )
+    .unwrap();
+    let store = admin_account_store(&database.pool);
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "additional-models-update".to_owned(),
+    };
+    let settings = UpdateAccount {
+        account_id: input.id.clone(),
+        notes: None,
+        enabled: true,
+        concurrency_limit: None,
+        weight: gateway_core::account::AccountWeight::DEFAULT,
+        group_ids: vec![],
+        outbound_proxy: None,
+        model_access: Some(policy.clone()),
+        additional_models: None,
+    };
+    store
+        .update_account(settings.clone(), &context)
+        .await
+        .expect("set original policy");
+    let registered = AccountAdditionalModels::new(vec!["future-terra".to_owned()]).unwrap();
+    store
+        .update_account(
+            UpdateAccount {
+                model_access: None,
+                additional_models: Some(registered.clone()),
+                ..settings.clone()
+            },
+            &context,
+        )
+        .await
+        .expect("register model");
+    let loaded = repository
+        .load_provider_account(&input.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.summary.additional_models, registered);
+    assert_eq!(loaded.summary.model_access, policy);
+
+    store
+        .update_account(
+            UpdateAccount {
+                model_access: None,
+                additional_models: Some(AccountAdditionalModels::empty()),
+                ..settings
+            },
+            &context,
+        )
+        .await
+        .expect("remove model");
+    let loaded = repository
+        .load_provider_account(&input.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(loaded.summary.additional_models.models().is_empty());
+    assert_eq!(loaded.summary.model_access, policy);
     database.close().await;
 }
