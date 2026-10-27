@@ -958,7 +958,7 @@ OAuth 等待回调期间不持有保护；提交仍拒绝已删除或连接配�
   "providerErrorKind": "permission_denied",
   "diagnosticCode": "subscription_sharing_ineligible",
   "sendState": "sent",
-  "error": "upstream denied access for this account",
+  "error": "upstream denied this request",
   "providerErrorCode": null,
   "providerErrorType": null,
   "upstreamStatus": 403,
