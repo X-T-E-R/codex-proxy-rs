@@ -775,6 +775,109 @@ async fn service_tier_and_request_identity_follow_both_sources() {
     session.shutdown().await.expect("shutdown");
 }
 
+#[tokio::test]
+async fn pi_shared_cache_key_keeps_distinct_source_sessions_across_turns() {
+    let (opencode, pi) = checkouts();
+    let origin = Origin::serve(OriginMode::Sse).await;
+    let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
+    let cache = scoped("shared-cache");
+    let mut session_headers = Vec::new();
+    for raw_session in ["ses_alpha", "ses_beta"] {
+        let actual = scoped(raw_session);
+        for turn in 1..=2 {
+            let mut call = sample_call(ResponsesHarness::Pi, TOKEN_PI);
+            call.session_id = raw_session.to_owned();
+            call.request_id = format!("req_{raw_session}_{turn}");
+            call.prompt.clear();
+            call.responses_body = Some(json!({
+                "model": MODEL,
+                "input": format!("{raw_session} turn {turn}"),
+                "prompt_cache_key": "shared-cache",
+            }));
+            call.downstream_headers = vec![
+                ("session_id".to_owned(), "untrusted-session".to_owned()),
+                (
+                    "x-client-request-id".to_owned(),
+                    "untrusted-request".to_owned(),
+                ),
+            ];
+            let result = complete(&session, call).await;
+            assert_eq!(json_body(&result.request.body)["prompt_cache_key"], cache);
+            for name in ["session_id", "x-client-request-id"] {
+                assert_eq!(header(&result.request.headers, name), Some(actual.as_str()));
+                assert_eq!(
+                    result
+                        .request
+                        .headers
+                        .iter()
+                        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                        .count(),
+                    1
+                );
+            }
+            assert_account_token(&result.request.headers, TOKEN_PI);
+            session_headers.push(
+                header(&result.request.headers, "session_id")
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+    }
+    assert_eq!(session_headers[0], session_headers[1]);
+    assert_eq!(session_headers[2], session_headers[3]);
+    assert_ne!(session_headers[0], session_headers[2]);
+
+    let mut implicit = sample_call(ResponsesHarness::Pi, TOKEN_PI);
+    implicit.session_id = "ses_default".to_owned();
+    implicit.request_id = "req_default_cache".to_owned();
+    let result = complete(&session, implicit).await;
+    let default_session = scoped("ses_default");
+    assert_eq!(
+        json_body(&result.request.body)["prompt_cache_key"],
+        default_session
+    );
+    for name in ["session_id", "x-client-request-id"] {
+        assert_eq!(
+            header(&result.request.headers, name),
+            Some(default_session.as_str())
+        );
+        assert_eq!(
+            result
+                .request
+                .headers
+                .iter()
+                .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                .count(),
+            1
+        );
+    }
+    {
+        let records = origin.recorded.lock().expect("requests");
+        assert_eq!(records.len(), 5);
+        for (index, record) in records.iter().enumerate() {
+            let expected = if index < 2 {
+                &session_headers[0]
+            } else if index < 4 {
+                &session_headers[2]
+            } else {
+                &default_session
+            };
+            for name in ["session_id", "x-client-request-id"] {
+                assert_eq!(header(&record.headers, name), Some(expected.as_str()));
+                assert_eq!(
+                    record
+                        .headers
+                        .iter()
+                        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+    session.shutdown().await.expect("shutdown");
+}
+
 async fn complete(session: &HarnessSession, call: ResponsesCall) -> ParsedResponses {
     expect_call(
         session,

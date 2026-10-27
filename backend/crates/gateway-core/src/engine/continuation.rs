@@ -16,6 +16,19 @@ use crate::policy::ClientApiKeyId;
 /// 丢失其 pin 时不能把公开 ID 当成其他 Provider 的原生 handle
 pub const OPENCODE_RESPONSE_ID_PREFIX: &str = "cpr_oc_v1_";
 
+/// 只识别当前版本实际发出的 UUID v4 小写公开 ID，保留旧 Provider 的任意 opaque ID
+#[must_use]
+pub fn is_opencode_public_response_id(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix(OPENCODE_RESPONSE_ID_PREFIX) else {
+        return false;
+    };
+    let bytes = suffix.as_bytes();
+    bytes.len() == 36
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+        && uuid::Uuid::parse_str(suffix).is_ok_and(|id| id.to_string() == suffix)
+}
+
 /// 客户端或 Provider 传递的 opaque response handle
 ///
 /// Codex 原有 opaque ID 不得按私有长度、字符集或前缀规则归一化或改写

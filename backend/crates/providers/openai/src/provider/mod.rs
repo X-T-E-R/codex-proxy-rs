@@ -10,8 +10,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, future::BoxFuture};
 use gateway_core::account::{AccountFeedbackStats, ProviderAccount};
-use gateway_core::engine::continuation::OPENCODE_RESPONSE_ID_PREFIX;
-use gateway_core::engine::continuation::{ContinuationBinding, NativeContinuationScope};
+use gateway_core::engine::continuation::{
+    ContinuationBinding, NativeContinuationScope, OPENCODE_RESPONSE_ID_PREFIX,
+    is_opencode_public_response_id,
+};
 use gateway_core::engine::middleware::MiddlewareHeader;
 use gateway_core::engine::provider::{
     ContinuationRequestObservation, EventStream, Provider, ProviderCallMetadata, ProviderRequest,
@@ -44,6 +46,7 @@ use gateway_core::task::{
     WorkerRunnable, WorkerSchedule, WorkerTaskError,
 };
 use gateway_core::upstream::{UpstreamSendState, UpstreamTransport};
+use gateway_protocol::openai::WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY;
 use gateway_protocol::openai::events::{
     ParsedRateLimits, parse_rate_limit_headers, rate_limits_to_header_pairs,
 };
@@ -80,7 +83,8 @@ use crate::transport::profile::{
 };
 use crate::transport::protocol::responses::{
     CodexResponsesRequest, PREVIOUS_RESPONSE_NOT_FOUND_CODE, PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
-    PreviousResponseScope, ResponseEventSignals, TransportRequirement, transport_requirement,
+    PreviousResponseScope, ResponseEventSignals, TransportRequirement,
+    X_CODEX_TURN_STATE_CLIENT_METADATA_KEY, transport_requirement,
 };
 use crate::transport::protocol::websocket::websocket_response_create_payload_len;
 use crate::transport::request::{
@@ -218,6 +222,18 @@ impl PreparedGenerateRequest {
         }
         Ok(scope)
     }
+}
+
+fn requires_codex_state(request: &CodexResponsesRequest, body: &Map<String, Value>) -> bool {
+    request.turn_state.is_some()
+        || request.responses_lite.is_some()
+        || body
+            .get("client_metadata")
+            .and_then(Value::as_object)
+            .is_some_and(|metadata| {
+                metadata.contains_key(X_CODEX_TURN_STATE_CLIENT_METADATA_KEY)
+                    || metadata.contains_key(WS_REQUEST_HEADER_RESPONSES_LITE_CLIENT_METADATA_KEY)
+            })
 }
 
 struct SelectedGenerate {
@@ -676,36 +692,81 @@ impl Provider for CodexProvider {
         if let Some(prepared) = preselection.as_ref() {
             prepared.checked_native_continuation_scope(&context)?;
         }
-        // 版本化公开 ID 的 pin 失效时不可将原 OpenCode 续接误送旧 Codex 账号
-        let marked_continuation = preselection.as_ref().is_some_and(|prepared| {
+        let codex_state_required = preselection.as_ref().is_some_and(|prepared| {
+            requires_codex_state(&prepared.upstream, generate.protocol_payload().body())
+        });
+        let stored_response = preselection
+            .as_ref()
+            .is_some_and(|prepared| prepared.upstream.store());
+        let known_pin = context.continuation().and_then(ContinuationBinding::pinned);
+        let harness_pin = known_pin.filter(|pin| {
+            pin.provider().as_str() == PROVIDER_NAME
+                && pin.matches_client(context.client_api_key_ref())
+                && pin.session_state().is_some_and(|state| {
+                    state.provider() == PROVIDER_NAME
+                        && state.payload().get("harness_kind").and_then(Value::as_str)
+                            == Some("opencode")
+                })
+        });
+        let marker = preselection.as_ref().is_some_and(|prepared| {
             prepared
                 .upstream
                 .previous_response_id()
-                .is_some_and(|id| id.starts_with(OPENCODE_RESPONSE_ID_PREFIX))
+                .is_some_and(is_opencode_public_response_id)
         });
-        let harness_pin = context
-            .continuation()
-            .and_then(ContinuationBinding::pinned)
-            .filter(|pin| {
-                pin.provider().as_str() == PROVIDER_NAME
-                    && pin.matches_client(context.client_api_key_ref())
-                    && pin.session_state().is_some_and(|state| {
-                        state.provider() == PROVIDER_NAME
-                            && state.payload().get("harness_kind").and_then(Value::as_str)
-                                == Some("opencode")
-                    })
-            });
-        if marked_continuation && (guardian || harness_pin.is_none())
-            || harness_pin.is_some() && !marked_continuation
+        let marked_continuation = marker && harness_pin.is_some();
+        if (marker && known_pin.is_none()) || (harness_pin.is_some() && (!marker || guardian)) {
+            return Err(continuation_replay_required_error("scope_unavailable"));
+        }
+        if codex_state_required
+            && (harness_pin.is_some()
+                || preselection
+                    .as_ref()
+                    .and_then(|prepared| prepared.previous_session.as_ref())
+                    .is_some_and(|state| state.harness_kind.is_some()))
         {
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
+        let account_hint = context.required_account().or_else(|| {
+            context
+                .account_state_owner()
+                .filter(|owner| owner.provider().as_str() == PROVIDER_NAME)
+                .map(|owner| owner.account())
+        });
+        if (codex_state_required || stored_response)
+            && let Some(account_id) = account_hint
+        {
+            let domain = self
+                .selector
+                .account_domain(account_id)
+                .await
+                .map_err(map_selection_error)?;
+            if codex_state_required
+                && matches!(
+                    domain,
+                    Some(
+                        crate::credential::OpenAiSelectionDomain::OpenCode
+                            | crate::credential::OpenAiSelectionDomain::Pi
+                    )
+                )
+            {
+                return Err(continuation_replay_required_error("scope_unavailable"));
+            }
+            if stored_response && domain == Some(crate::credential::OpenAiSelectionDomain::Pi) {
+                return Err(provider_error(
+                    ProviderErrorKind::InvalidRequest,
+                    UpstreamSendState::NotSent,
+                )
+                .with_retry_prohibited());
+            }
+        }
         let allow_harness = !guardian
+            && !codex_state_required
             && preselection.as_ref().is_some_and(|prepared| {
                 prepared.upstream.generate()
                     && ((!prepared.continuation_requested
                         && prepared.upstream.previous_response_id().is_none())
-                        || (marked_continuation && harness_pin.is_some()))
+                        || marked_continuation)
             });
         let (selection_session_affinity, requires_websocket) =
             preselection.map_or((None, false), |prepared| {
@@ -735,6 +796,7 @@ impl Provider for CodexProvider {
                         &request,
                         selection_session_affinity.as_ref(),
                         requires_websocket,
+                        !stored_response,
                     )
                     .await
             } else {
@@ -904,9 +966,37 @@ impl CodexProvider {
         let session_affinity = processed.session_affinity;
         if crate::credential::harness_oauth::is_harness_kind(lease.account().authentication_kind())
         {
+            if requires_codex_state(&upstream_request, generate.protocol_payload().body()) {
+                return Err(
+                    if context.account_state_owner().is_some()
+                        || previous_session
+                            .as_ref()
+                            .is_some_and(|state| state.harness_kind.is_some())
+                    {
+                        continuation_replay_required_error("scope_unavailable")
+                    } else {
+                        provider_error(
+                            ProviderErrorKind::InvalidRequest,
+                            UpstreamSendState::NotSent,
+                        )
+                        .with_retry_prohibited()
+                    },
+                );
+            }
+            if crate::credential::harness_oauth::method_for_kind(
+                lease.account().authentication_kind(),
+            ) == Some(crate::credential::harness_oauth::HarnessMethod::Pi)
+                && upstream_request.store()
+            {
+                return Err(provider_error(
+                    ProviderErrorKind::InvalidRequest,
+                    UpstreamSendState::NotSent,
+                )
+                .with_retry_prohibited());
+            }
             let native_opencode = upstream_request
                 .previous_response_id()
-                .is_some_and(|id| id.starts_with(OPENCODE_RESPONSE_ID_PREFIX))
+                .is_some_and(is_opencode_public_response_id)
                 && context
                     .continuation()
                     .and_then(ContinuationBinding::pinned)

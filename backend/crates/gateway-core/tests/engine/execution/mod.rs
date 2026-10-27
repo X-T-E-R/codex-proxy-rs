@@ -3815,7 +3815,7 @@ fn marked_opencode_response_requires_a_pin_on_cache_miss_or_store_outage() {
             .expect("authenticated client");
         let mut metadata = execution_metadata_with_continuation();
         metadata.previous_response_id = Some(PreviousResponseId::new(format!(
-            "{OPENCODE_RESPONSE_ID_PREFIX}synthetic_public"
+            "{OPENCODE_RESPONSE_ID_PREFIX}123e4567-e89b-42d3-a456-426614174000"
         )));
         let result = block_on(service.start(StartExecution {
             client,
@@ -3833,6 +3833,72 @@ fn marked_opencode_response_requires_a_pin_on_cache_miss_or_store_outage() {
         );
         assert!(store.requests.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn existing_legacy_pin_takes_precedence_over_a_marker_shaped_opaque_id() {
+    let opaque = "cpr_oc_v1_123e4567-e89b-42d3-a456-426614174000";
+    for (provider, available) in [("openai", true), ("xai", false)] {
+        let pin = NativeContinuationPin::new(
+            PreviousResponseId::new(opaque),
+            PreviousResponseId::new("legacy_upstream_handle"),
+            ClientApiKeyId::new("key_start_test").unwrap(),
+            ProviderKind::new(provider).unwrap(),
+            ProviderAccountId::new("acct_start").unwrap(),
+        );
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot()),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            Arc::new(UnusedAdmissions),
+            Arc::new(PinnedContinuation(pin)),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+            Arc::new(crate::RecordingDiagnostics::default()),
+        );
+        let mut metadata = execution_metadata_with_continuation();
+        metadata.previous_response_id = Some(PreviousResponseId::new(opaque));
+        let result = block_on(service.start(StartExecution {
+            client: service.authenticate("sk_start_test").expect("client"),
+            public_model: PublicModelId::new("gpt-start").unwrap(),
+            operation: start_operation(),
+            metadata,
+        }));
+        if available {
+            assert!(
+                result.is_ok(),
+                "known legacy Codex pin must retain its owner"
+            );
+        } else {
+            let Err(error) = result else {
+                panic!("xAI pin has no candidate in this OpenAI-only plan");
+            };
+            assert_eq!(error.kind(), GatewayErrorKind::NoAvailableProvider);
+        }
+    }
+}
+
+#[test]
+fn incomplete_marker_without_pin_remains_a_legacy_external_id() {
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(start_snapshot()),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+        Arc::new(crate::RecordingDiagnostics::default()),
+    );
+    let mut metadata = execution_metadata_with_continuation();
+    metadata.previous_response_id = Some(PreviousResponseId::new("cpr_oc_v1_legacy-opaque"));
+    assert!(
+        block_on(service.start(StartExecution {
+            client: service.authenticate("sk_start_test").expect("client"),
+            public_model: PublicModelId::new("gpt-start").unwrap(),
+            operation: start_operation(),
+            metadata,
+        }))
+        .is_ok()
+    );
 }
 
 fn execution_metadata_with_continuation() -> ExecutionRequestMetadata {
@@ -4069,6 +4135,25 @@ impl NativeContinuationPort for UnusedContinuation {
         _: &'a PreviousResponseId,
     ) -> BoxFuture<'a, Result<Option<NativeContinuationPin>, NativeContinuationStoreError>> {
         Box::pin(async { Ok(None) })
+    }
+
+    fn record<'a>(
+        &'a self,
+        _: NativeContinuationPin,
+    ) -> BoxFuture<'a, Result<(), NativeContinuationStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct PinnedContinuation(NativeContinuationPin);
+
+impl NativeContinuationPort for PinnedContinuation {
+    fn resolve<'a>(
+        &'a self,
+        _: &'a ClientApiKeyId,
+        _: &'a PreviousResponseId,
+    ) -> BoxFuture<'a, Result<Option<NativeContinuationPin>, NativeContinuationStoreError>> {
+        Box::pin(async { Ok(Some(self.0.clone())) })
     }
 
     fn record<'a>(

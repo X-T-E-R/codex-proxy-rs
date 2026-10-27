@@ -34,7 +34,7 @@ use crate::{
         budget::{ClientBudgetCharge, ClientBudgetPort},
         continuation::{
             ContinuationBinding, NativeContinuationPin, NativeContinuationPort,
-            NativeContinuationStoreErrorKind, OPENCODE_RESPONSE_ID_PREFIX,
+            NativeContinuationStoreErrorKind, is_opencode_public_response_id,
         },
         coordinator::CoordinationExtensions,
         extensions::{ExecutionExtensionIndex, ExtensionCallScope},
@@ -611,7 +611,7 @@ impl DefaultExecutionService {
                         },
                         _ = timeout => None,
                     };
-                    let marked_opencode = previous.as_str().starts_with(OPENCODE_RESPONSE_ID_PREFIX);
+                    let marked_opencode = is_opencode_public_response_id(previous.as_str());
                     let replay_required = || GatewayError::new(
                         GatewayErrorKind::InvalidRequest,
                         "conversation continuation must be rebuilt",
@@ -623,10 +623,11 @@ impl DefaultExecutionService {
                         Some(pin) if !authorization.account_scope.allows(pin.account()) => {
                             return Err(GatewayError::new(GatewayErrorKind::PolicyDenied, "continuation account is outside the client account scope"));
                         }
-                        Some(pin) if marked_opencode && (pin.previous_response_id() != previous
-                            || pin.provider().as_str() != "openai"
-                            || !pin.session_state().is_some_and(|state| state.provider() == "openai"
-                                && state.payload().get("harness_kind").and_then(serde_json::Value::as_str) == Some("opencode"))) => {
+                        Some(pin) if pin.session_state().is_some_and(|state|
+                            state.payload().get("harness_kind").and_then(serde_json::Value::as_str) == Some("opencode"))
+                            && (!marked_opencode || pin.previous_response_id() != previous
+                                || pin.provider().as_str() != "openai"
+                                || pin.session_state().is_none_or(|state| state.provider() != "openai")) => {
                             return Err(replay_required());
                         }
                         Some(pin)

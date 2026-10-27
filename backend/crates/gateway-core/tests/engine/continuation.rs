@@ -2,7 +2,7 @@
 
 use gateway_core::account::ProviderAccountId;
 use gateway_core::engine::continuation::{
-    ContinuationBinding, NativeContinuationPin, PreviousResponseId,
+    ContinuationBinding, NativeContinuationPin, PreviousResponseId, is_opencode_public_response_id,
 };
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::routing::ProviderKind;
@@ -38,6 +38,23 @@ fn opaque_response_id_preserves_any_codex_string_without_debug_disclosure() {
 
     assert_eq!(response_id.as_str(), value);
     assert!(!format!("{response_id:?}").contains(&value));
+}
+
+#[test]
+fn only_complete_versioned_opencode_ids_claim_the_public_domain() {
+    assert!(is_opencode_public_response_id(
+        "cpr_oc_v1_123e4567-e89b-42d3-a456-426614174000"
+    ));
+    for opaque in [
+        "cpr_oc_v1_",
+        "cpr_oc_v1_legacy-opaque",
+        "cpr_oc_v1_123e4567-e89b-12d3-a456-426614174000",
+        "cpr_oc_v1_123E4567-E89B-42D3-A456-426614174000",
+        "cpr_oc_v2_123e4567-e89b-42d3-a456-426614174000",
+        "cpr_oc_v1_123e4567-e89b-42d3-a456-426614174000-extra",
+    ] {
+        assert!(!is_opencode_public_response_id(opaque), "{opaque}");
+    }
 }
 
 #[test]

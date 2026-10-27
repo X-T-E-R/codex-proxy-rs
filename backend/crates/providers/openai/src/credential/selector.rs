@@ -192,6 +192,7 @@ struct CredentialSelectionInput<'a> {
     requires_oauth: bool,
     domain: OpenAiSelectionDomain,
     allow_harness: bool,
+    allow_pi_harness: bool,
     request_url: &'a Url,
     attempt: &'a AttemptContext,
     session_affinity_key: Option<&'a ProviderSessionAffinityKey>,
@@ -203,7 +204,9 @@ struct CredentialSelectionInput<'a> {
 impl CredentialSelectionInput<'_> {
     fn admits(&self, kind: &str) -> bool {
         self.domain.admits(kind, self.requires_oauth)
-            || (self.allow_harness && is_harness_kind(kind))
+            || (self.allow_harness
+                && (OpenAiSelectionDomain::OpenCode.admits(kind, false)
+                    || self.allow_pi_harness && OpenAiSelectionDomain::Pi.admits(kind, false)))
     }
 
     fn allows_model(&self, model: CodexSelectionModel<'_>, account: &ProviderAccount) -> bool {
@@ -396,6 +399,7 @@ impl CodexCredentialSelector {
             requires_oauth: false,
             domain,
             allow_harness: false,
+            allow_pi_harness: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -421,6 +425,7 @@ impl CodexCredentialSelector {
             requires_oauth: false,
             domain: OpenAiSelectionDomain::ProviderDefault,
             allow_harness: false,
+            allow_pi_harness: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -434,18 +439,20 @@ impl CodexCredentialSelector {
         .await
     }
 
-    /// 只有普通 Responses 新链可让两种新认证参与同一轮真实选号
+    /// 新链可选两种固定源码，存储式响应只能选支持持久续接的 OpenCode
     pub(crate) async fn select_responses_with_context(
         &self,
         request: &SelectCodexCredential<'_>,
         session_affinity_observation: Option<&CodexSessionAffinity>,
         requires_websocket: bool,
+        allow_pi_harness: bool,
     ) -> Result<CodexCredentialLease, CredentialSelectionError> {
         let input = CredentialSelectionInput {
             requires_websocket,
             requires_oauth: false,
             domain: OpenAiSelectionDomain::ProviderDefault,
             allow_harness: true,
+            allow_pi_harness,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity_key,
@@ -457,6 +464,24 @@ impl CodexCredentialSelector {
             CodexSelectionModel::Requested(request.upstream_model),
         )
         .await
+    }
+
+    /// 仅在固定账号且请求需要 harness 能力判别时读取认证域
+    pub(crate) async fn account_domain(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<Option<OpenAiSelectionDomain>, CredentialSelectionError> {
+        let account = self
+            .repository
+            .store()
+            .get_account(account_id)
+            .await
+            .map_err(|source| CredentialSelectionError::Store(ErrorSource::new(source)))?;
+        Ok(account
+            .filter(|account| account.provider() == &self.provider_kind)
+            .and_then(|account| {
+                OpenAiSelectionDomain::from_authentication_kind(account.authentication_kind())
+            }))
     }
 
     /// 中间件完成请求改写后，用真实 OpenAI 会话事实复验已持有的租约
@@ -510,6 +535,7 @@ impl CodexCredentialSelector {
             requires_oauth: request.requires_oauth,
             domain: OpenAiSelectionDomain::ProviderDefault,
             allow_harness: false,
+            allow_pi_harness: false,
             request_url: request.request_url,
             attempt: request.attempt,
             session_affinity_key: request.session_affinity.map(CodexSessionAffinity::key),
@@ -567,6 +593,7 @@ impl CodexCredentialSelector {
         let harness_affinities = if request.allow_harness && !diagnostic {
             [OpenAiSelectionDomain::OpenCode, OpenAiSelectionDomain::Pi]
                 .into_iter()
+                .filter(|domain| *domain != OpenAiSelectionDomain::Pi || request.allow_pi_harness)
                 .filter_map(|domain| {
                     request
                         .session_affinity_observation?
@@ -674,8 +701,20 @@ impl CodexCredentialSelector {
             }
             let legacy_binding_key = binding_key;
             let legacy_binding = binding.clone();
+            let mut accounts = self.repository.list_for_provider().await?;
             let mut harness_bindings = Vec::with_capacity(harness_affinities.len());
             for (domain, affinity) in &harness_affinities {
+                // 旧 Codex 独池不额外查 OpenCode/pi 亲和键；仅真实在候选池中的域参与分流
+                if !accounts.iter().any(|account| {
+                    account.provider() == &self.provider_kind
+                        && domain.admits(account.authentication_kind(), false)
+                        && request
+                            .attempt
+                            .account_scope()
+                            .is_some_and(|scope| scope.allows(account.id()))
+                }) {
+                    continue;
+                }
                 let current = self.lookup_session_affinity(affinity.key()).await?;
                 harness_bindings.push((*domain, affinity.key(), current));
             }
@@ -696,7 +735,6 @@ impl CodexCredentialSelector {
                 // 旧账号的增量状态不能把已迁移的会话拉回去，交回客户端完整历史重放
                 return Err(CredentialSelectionError::ContinuationOwnerChanged);
             }
-            let mut accounts = self.repository.list_for_provider().await?;
             // store 侧常规调度列表不包含停用账号；管理端诊断要对固定账号执行真实上游
             // 验证，先补回 required 账号，再统一检查认证类型和传输能力
             if diagnostic

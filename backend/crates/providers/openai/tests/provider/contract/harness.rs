@@ -133,6 +133,108 @@ async fn missing_harness_runtime_fails_closed_after_selecting_either_oauth_accou
 }
 
 #[tokio::test]
+async fn codex_turn_state_and_websocket_lite_select_legacy_in_a_mixed_pool() {
+    let origin = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .and(header("authorization", "Bearer at-acct_affinity_switch_a"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(CAPTURE_COMPLETED_SSE),
+        )
+        .expect(4)
+        .mount(&origin)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_affinity_switch_a").await;
+    seed_harness_as(
+        &store,
+        "acct_affinity_switch_b",
+        CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+        "test-open-code",
+    )
+    .await;
+    seed_harness_as(
+        &store,
+        "acct_scope_new",
+        CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+        "test-pi",
+    )
+    .await;
+    let provider = provider_with_affinity_and_base_url(
+        &store,
+        Arc::new(MemorySessionAffinity::default()),
+        origin.uri(),
+    );
+    for (mode, metadata) in [
+        (
+            "http-turn-state",
+            json!({"x-codex-turn-state": "state-from-codex"}),
+        ),
+        (
+            "websocket-lite",
+            json!({"ws_request_header_x_openai_internal_codex_responses_lite": "true"}),
+        ),
+    ] {
+        for iteration in 0..2 {
+            let payload = ProtocolPayload::json_object(
+                "openai",
+                Map::from_iter([
+                    ("model".to_owned(), json!("gpt-5.4")),
+                    ("input".to_owned(), json!("hello")),
+                    (
+                        "session_id".to_owned(),
+                        json!(format!("session_{mode}_{iteration}")),
+                    ),
+                    ("client_metadata".to_owned(), metadata.clone()),
+                ]),
+            )
+            .expect("legacy Codex request")
+            .with_context(Map::from_iter([(
+                "use_websocket".to_owned(),
+                json!(mode == "websocket-lite"),
+            )]));
+            let mut stream = Arc::clone(&provider)
+                .execute(
+                    planned_request(
+                        "openai",
+                        Operation::Generate(GenerateRequest::from_protocol_payload(payload)),
+                    ),
+                    fallback_transport_context(&format!("req_{mode}_{iteration}")),
+                )
+                .await
+                .expect("Codex-only state must never route to a harness account");
+            assert_eq!(
+                stream.metadata().provider_account_id().as_str(),
+                "acct_affinity_switch_a"
+            );
+            while let Some(event) = stream.next().await {
+                event.expect("legacy Codex upstream response");
+            }
+        }
+    }
+    let requests = origin
+        .received_requests()
+        .await
+        .expect("Codex mock requests");
+    assert_eq!(requests.len(), 4);
+    for request in &requests[..2] {
+        // 首轮尚未证明原 Codex 状态属于所选账号；沿用旧路径的账号边界清理
+        assert!(request.headers.get("x-codex-turn-state").is_none());
+    }
+    for request in &requests[2..] {
+        assert_eq!(
+            request
+                .headers
+                .get("x-openai-internal-codex-responses-lite")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+    }
+}
+
+#[tokio::test]
 async fn mixed_pool_rejects_credential_kind_switch_before_harness_send() {
     let store = Arc::new(MemoryAccountStore::default());
     seed_harness(&store, CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING).await;
@@ -711,7 +813,7 @@ async fn stored_opencode_response_reuses_raw_handle_only_with_its_account_and_re
         .and(path("/v1/responses"))
         .and(header("authorization", "Bearer token-account-a"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(harness_sse(), "text/event-stream"))
-        .expect(2)
+        .expect(5)
         .mount(&origin)
         .await;
     let store = Arc::new(MemoryAccountStore::default());
@@ -720,6 +822,13 @@ async fn stored_opencode_response_reuses_raw_handle_only_with_its_account_and_re
         "acct_affinity_switch_a",
         CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
         "token-account-a",
+    )
+    .await;
+    seed_harness_as(
+        &store,
+        "acct_scope_new",
+        CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+        "token-pi",
     )
     .await;
     let provider = provider_with_affinity(&store, Arc::new(MemorySessionAffinity::default()));
@@ -931,4 +1040,92 @@ async fn stored_opencode_response_reuses_raw_handle_only_with_its_account_and_re
         ProviderErrorKind::ContinuationRecoveryRequired
     );
     assert_eq!(origin.received_requests().await.unwrap().len(), 2);
+
+    for (index, metadata) in [
+        json!({"x-codex-turn-state":"legacy-turn"}),
+        json!({"ws_request_header_x_openai_internal_codex_responses_lite":"true"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let conflicted = harness_request_with_fields(
+            "root_provider_harness",
+            false,
+            "gpt-5.6-luna",
+            None,
+            &[
+                ("store", json!(true)),
+                ("previous_response_id", json!(public)),
+                ("client_metadata", metadata),
+            ],
+        );
+        let error = provider
+            .clone()
+            .execute(
+                conflicted,
+                attempt(&format!("req_pinned_legacy_state_{index}"), pin.clone()),
+            )
+            .await
+            .err()
+            .expect("Codex-only state cannot be resumed on the known OpenCode owner");
+        assert_eq!(
+            error.kind(),
+            ProviderErrorKind::ContinuationRecoveryRequired
+        );
+        assert_eq!(error.send_state(), UpstreamSendState::NotSent);
+    }
+
+    let diagnostic = provider
+        .clone()
+        .execute(
+            harness_request_with_fields(
+                "pi_store_not_supported",
+                false,
+                "gpt-5.6-luna",
+                None,
+                &[("store", json!(true))],
+            ),
+            diagnostic_context("req_pi_store_unsupported", "acct_scope_new")
+                .with_transport(AttemptTransport::Fallback),
+        )
+        .await
+        .err()
+        .expect("explicit pi account cannot persist responses");
+    assert_eq!(diagnostic.kind(), ProviderErrorKind::InvalidRequest);
+    assert_eq!(diagnostic.send_state(), UpstreamSendState::NotSent);
+
+    for index in 0..3 {
+        let mut stream = provider
+            .clone()
+            .execute(
+                harness_request_with_fields(
+                    &format!("fresh_stored_thread_{index}"),
+                    false,
+                    "gpt-5.6-luna",
+                    None,
+                    &[
+                        ("session_id", json!(format!("fresh_stored_session_{index}"))),
+                        ("store", json!(true)),
+                    ],
+                ),
+                harness_attempt(
+                    &format!("req_mixed_store_{index}"),
+                    BTreeSet::from([ProviderAccountId::new("acct_affinity_switch_b").unwrap()]),
+                ),
+            )
+            .await
+            .expect("mixed OpenCode/pi pool must select the store-capable account");
+        assert_eq!(
+            stream.metadata().provider_account_id().as_str(),
+            "acct_affinity_switch_a"
+        );
+        timeout(Duration::from_secs(30), async {
+            while let Some(event) = stream.next().await {
+                event.expect("store-capable account response");
+            }
+        })
+        .await
+        .expect("stored response deadline");
+    }
+    assert_eq!(origin.received_requests().await.unwrap().len(), 5);
 }

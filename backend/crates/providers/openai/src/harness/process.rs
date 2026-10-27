@@ -432,22 +432,17 @@ async fn drive(
             .as_str()
             .map(|raw| account_scoped_id(&installation_id, raw))
     });
-    let pi_source_session = if pi {
-        prompt_cache_key.as_ref().unwrap_or(&session_id)
-    } else {
-        &session_id
-    };
     let source_headers = exchange::SourceHeaders {
         pi,
         session_id: if pi {
-            pi_source_session.clone()
+            session_id.clone()
         } else {
             session_affinity_id
                 .clone()
                 .unwrap_or_else(|| session_id.clone())
         },
         thread_id: session_id.clone(),
-        client_request_id: pi_source_session.clone(),
+        client_request_id: session_id.clone(),
     };
     let payload = protocol::CallPayload {
         harness: match call.harness {

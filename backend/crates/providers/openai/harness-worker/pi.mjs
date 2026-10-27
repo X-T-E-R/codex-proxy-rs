@@ -41,11 +41,17 @@ export async function runPi(input, emit, signal, callId) {
   const sessionId = text(input.session_id);
   if (!sessionId || !requestId) throw new Error("missing session or request id");
   const headers = downstreamHeaders(input.downstream_headers);
+  const cacheKey = text(input.prompt_cache_key);
+  if (cacheKey) {
+    // pi 的 sessionId 还会派生会话头；显式缓存键只参与正文，头仍绑定当前真实会话
+    headers.session_id = sessionId;
+    headers["x-client-request-id"] = sessionId;
+  }
   // apiKey 是账号访问令牌，不能省，也不能换成 unused 或下游 Authorization
   // 源码在 ChatGPT 省略字段之后仍写入 serviceTier；无档位时不传，避免空字符串进正文
   const stream = responses.stream(model, { messages: transcript.messages }, {
     apiKey: input.bearer,
-    sessionId: text(input.prompt_cache_key) ?? sessionId,
+    sessionId: cacheKey ?? sessionId,
     ...(serviceTier !== undefined ? { serviceTier } : {}),
     ...(body?.reasoning?.effort ? { reasoningEffort: body.reasoning.effort } : {}),
     ...(body?.reasoning?.summary ? { reasoningSummary: body.reasoning.summary } : {}),
