@@ -82,17 +82,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish verified SHA-tagged image
+      - name: Publish verified SHA and latest image
         shell: bash
         run: |
           set -euo pipefail
+          latest_image=ghcr.io/x-t-e-r/codex-proxy-rs:latest
           docker tag "$CPR_IMAGE" "$TASK40_IMAGE"
           docker push "$TASK40_IMAGE"
+          docker tag "$CPR_IMAGE" "$latest_image"
+          docker push "$latest_image"
           docker image inspect --format '{{index .RepoDigests 0}}' "$TASK40_IMAGE" > "$RUNNER_TEMP/task40-image.txt"
           {
             echo "Source: $GITHUB_SHA"
             echo "Image: $(<"$RUNNER_TEMP/task40-image.txt")"
             echo "Tag: $TASK40_IMAGE"
+            echo "Latest: $latest_image"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve verified image identity
