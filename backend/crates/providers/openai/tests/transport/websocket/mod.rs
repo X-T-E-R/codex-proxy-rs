@@ -545,7 +545,7 @@ async fn websocket_execute_response_create_request_should_preserve_opening_error
     });
     let prepared = prepared_websocket_request(&format!("http://{addr}"));
 
-    let error = execute_response_create_request(&prepared)
+    let error = *execute_response_create_request(&prepared)
         .await
         .expect_err("failed opening should surface upstream status");
     let expected_body = server.await.unwrap();
@@ -692,7 +692,7 @@ async fn websocket_opening_error_should_convert_http_date_retry_after_to_seconds
     });
     let prepared = prepared_websocket_request(&format!("http://{addr}"));
 
-    let error = execute_response_create_request(&prepared)
+    let error = *execute_response_create_request(&prepared)
         .await
         .expect_err("failed opening should surface upstream status");
     server.await.unwrap();
@@ -737,7 +737,7 @@ async fn websocket_execute_response_create_request_should_reject_binary_event() 
     )
     .expect("prepare continuation WebSocket request");
 
-    let error = execute_response_create_request(&prepared)
+    let error = *execute_response_create_request(&prepared)
         .await
         .expect_err("binary websocket events should be rejected");
     server.await.unwrap();
@@ -1555,7 +1555,7 @@ async fn websocket_connection_limit_should_be_reported_without_transport_retry()
         .await
         .expect_err("transport reports rejection");
     assert!(matches!(
-        error,
+        error.as_ref(),
         CodexClientError::WebSocket(CodexWebSocketExchangeError::ConnectionLimitReached(_))
     ));
     server.await.unwrap();

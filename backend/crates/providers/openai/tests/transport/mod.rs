@@ -217,7 +217,9 @@ impl CodexBackendClientTestExt for CodexBackendClient {
         let response = self
             .create_response_stream_with_pool_account(request, context, None)
             .await?;
-        collect_backend_response(response, started_at).await
+        collect_backend_response(response, started_at)
+            .await
+            .map_err(|error| *error)
     }
 
     async fn create_response_stream(
@@ -239,14 +241,16 @@ impl CodexBackendClientTestExt for CodexBackendClient {
         let response = self
             .create_response_stream_with_pool_account(request, context, pool_account_id)
             .await?;
-        collect_backend_response(response, started_at).await
+        collect_backend_response(response, started_at)
+            .await
+            .map_err(|error| *error)
     }
 }
 
 async fn collect_backend_response(
     response: CodexBackendStreamingResponse,
     started_at: Instant,
-) -> CodexClientResult<CollectedBackendResponse> {
+) -> Result<CollectedBackendResponse, Box<CodexClientError>> {
     let CodexBackendStreamingResponse {
         mut body,
         transport,
@@ -264,7 +268,7 @@ async fn collect_backend_response(
     } = response;
     let mut body_bytes = Vec::new();
     while let Some(chunk) = body.next().await {
-        let chunk = chunk?;
+        let chunk = chunk.map_err(Box::new)?;
         transport_metrics.first_event_ms.get_or_insert_with(|| {
             i64::try_from(started_at.elapsed().as_millis())
                 .unwrap_or(i64::MAX)
@@ -293,7 +297,8 @@ async fn collect_backend_response(
         reported_model = update.reported_model.clone().or(reported_model);
     }
     let body = String::from_utf8_lossy(&body_bytes).into_owned();
-    let usage = extract_sse_usage(&body).map_err(CodexClientError::InvalidSse)?;
+    let usage =
+        extract_sse_usage(&body).map_err(|error| Box::new(CodexClientError::InvalidSse(error)))?;
     Ok(CollectedBackendResponse {
         body,
         transport,
@@ -311,7 +316,7 @@ async fn collect_backend_response(
 
 async fn execute_response_create_request(
     request: &CodexWebSocketRequest,
-) -> CodexClientResult<CollectedBackendResponse> {
+) -> Result<CollectedBackendResponse, Box<CodexClientError>> {
     let endpoint = request.connection().endpoint();
     let base_url = endpoint
         .strip_suffix("/codex/responses")
@@ -334,6 +339,7 @@ async fn execute_response_create_request(
             request_context("req_test_websocket", Some("chatgpt-account")),
         )
         .await
+        .map_err(Box::new)
 }
 
 fn codex_request(

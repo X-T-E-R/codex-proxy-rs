@@ -15,7 +15,7 @@ struct FetchedCodexQuota {
 
 enum CodexQuotaFetchAttemptError {
     InvalidCredential,
-    Upstream(CodexClientError),
+    Upstream(Box<CodexClientError>),
 }
 
 enum CodexQuotaFetchError {
@@ -717,7 +717,7 @@ impl CodexCredentialQuotaService {
             Err(CodexQuotaFetchAttemptError::Upstream(error)) => {
                 Err(CodexQuotaFetchError::Upstream {
                     account: Box::new(prepared.account),
-                    error: Box::new(error),
+                    error,
                 })
             }
         }
@@ -736,7 +736,7 @@ async fn fetch_usage_once(
     let request_id = format!("quota_{}", Uuid::now_v7().simple());
     client
         .for_account(&prepared.account)
-        .map_err(CodexQuotaFetchAttemptError::Upstream)?
+        .map_err(|error| CodexQuotaFetchAttemptError::Upstream(Box::new(error)))?
         .fetch_usage(CodexRequestContext::auxiliary(
             authorization.expose_secret(),
             prepared.account.upstream_account_id(),
@@ -744,7 +744,7 @@ async fn fetch_usage_once(
             None,
         ))
         .await
-        .map_err(CodexQuotaFetchAttemptError::Upstream)
+        .map_err(|error| CodexQuotaFetchAttemptError::Upstream(Box::new(error)))
 }
 
 /// 对 5xx 上游拒绝做有限次指数退避重试（1s/2s），吞掉瞬时抖动
@@ -758,12 +758,11 @@ async fn fetch_usage_with_5xx_retry(
     loop {
         let result = fetch_usage_once(client, prepared).await;
         let retryable = match &result {
-            Ok(_) => false,
-            Err(CodexQuotaFetchAttemptError::Upstream(CodexClientError::Upstream {
-                status,
-                ..
-            })) => status.is_server_error(),
-            Err(_) => false,
+            Err(CodexQuotaFetchAttemptError::Upstream(error)) => matches!(
+                error.as_ref(),
+                CodexClientError::Upstream { status, .. } if status.is_server_error()
+            ),
+            _ => false,
         };
         if !retryable || attempt >= QUOTA_FETCH_5XX_MAX_RETRIES {
             return result;

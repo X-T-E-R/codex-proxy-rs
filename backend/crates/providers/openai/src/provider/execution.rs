@@ -538,9 +538,9 @@ pub(super) async fn create_response_attempt(
     account_id: &str,
     deadline: gateway_core::lifecycle::Deadline,
     cancellation: &CancellationToken,
-) -> Result<CodexBackendStreamingResponse, CodexHandshakeAttemptError> {
+) -> Result<CodexBackendStreamingResponse, Box<CodexHandshakeAttemptError>> {
     if deadline.is_elapsed() {
-        return Err(CodexHandshakeAttemptError::Timeout);
+        return Err(Box::new(CodexHandshakeAttemptError::Timeout));
     };
     tokio::select! {
         biased;
@@ -552,6 +552,7 @@ pub(super) async fn create_response_attempt(
             Some(account_id),
         ) => response.map_err(CodexHandshakeAttemptError::Client),
     }
+    .map_err(Box::new)
 }
 
 pub(super) fn map_handshake_attempt_error(
@@ -577,9 +578,9 @@ pub(super) async fn create_json_attempt(
     authorization: &SecretString,
     cookie_header: Option<&SecretString>,
     account_selection: CodexAccountSelectionTelemetry<'_>,
-) -> Result<CodexBackendJsonResponse, CodexHandshakeAttemptError> {
+) -> Result<CodexBackendJsonResponse, Box<CodexHandshakeAttemptError>> {
     if request.context.deadline().is_elapsed() {
-        return Err(CodexHandshakeAttemptError::Timeout);
+        return Err(Box::new(CodexHandshakeAttemptError::Timeout));
     };
     let request_id = request.context.request_id().as_str();
     let trace = request.context.trace();
@@ -605,6 +606,7 @@ pub(super) async fn create_json_attempt(
             request_context,
         ) => response.map_err(CodexHandshakeAttemptError::Client),
     }
+    .map_err(Box::new)
 }
 
 pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStream {
@@ -644,13 +646,13 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             account_selection,
         )
         .await;
-        if let Err(CodexHandshakeAttemptError::Client(error)) = &response {
+        if let Err(CodexHandshakeAttemptError::Client(error)) = response.as_ref().map_err(Box::as_ref) {
             log_client_upstream_error(
                 UpstreamErrorLogContext::new(&request.context, &active_account, None),
                 error,
             );
         }
-        let response = match response.map_err(map_handshake_attempt_error) {
+        let response = match response.map_err(|error| map_handshake_attempt_error(*error)) {
             Ok(response) => response,
             Err(mut failure) => {
                 if let Some(observation) = failure.observation.take() {
@@ -821,7 +823,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             &cancellation,
         )
         .await;
-        let websocket_failure_policy = match &response {
+        let websocket_failure_policy = match response.as_ref().map_err(Box::as_ref) {
             Err(CodexHandshakeAttemptError::Client(error))
                 if transport_policy == CodexProviderTransport::PreferWebSocket =>
             {
@@ -829,13 +831,13 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             }
             _ => None,
         };
-        if let Err(CodexHandshakeAttemptError::Client(error)) = &response {
+        if let Err(CodexHandshakeAttemptError::Client(error)) = response.as_ref().map_err(Box::as_ref) {
             log_client_upstream_error(
                 UpstreamErrorLogContext::new(&context, &active_account, None),
                 error,
             );
         }
-        let response = response.map_err(map_handshake_attempt_error);
+        let response = response.map_err(|error| map_handshake_attempt_error(*error));
         let response = match response {
             Ok(response) => response,
             Err(mut failure) => {
