@@ -258,12 +258,13 @@ pub fn engine_error_response(error: &EngineError) -> Response {
     if capacity_unavailable {
         *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
     } else if let EngineError::Provider(error) = error
+        && error.kind() == ProviderErrorKind::Unavailable
         && let Some(status) = error
             .upstream_status()
-            .filter(|status| (400..600).contains(status))
+            .filter(|status| (500..600).contains(status))
         && let Ok(status) = StatusCode::from_u16(status)
     {
-        // 无完整上游正文时返回安全网关错误，但保留已确认的 HTTP 拒绝状态
+        // 仅在服务不可用分类内保留已确认的 5xx；额度、凭据和请求拒绝遵循自身恢复合同
         *response.status_mut() = status;
     }
     // 正文未完整取得时不能透传残缺响应，但已确认的上游关联 ID 仍应交付

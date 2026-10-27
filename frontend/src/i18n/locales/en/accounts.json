@@ -89,6 +89,8 @@
         "capacityUnavailable": "This account has no available capacity",
         "infrastructureUnavailable": "The provider's local infrastructure is temporarily unavailable",
         "rateLimited": "Upstream rate limit exceeded",
+        "upstreamPermissionDenied": "Upstream rejected this request",
+        "subscriptionSharingIneligible": "ChatGPT subscription sharing is unavailable for this account, check its upstream permissions",
         "upstreamUnavailable": "Upstream service temporarily unavailable",
         "timeout": "Upstream request timed out",
         "canceled": "Test canceled",

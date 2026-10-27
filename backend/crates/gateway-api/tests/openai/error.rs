@@ -10,7 +10,7 @@ use gateway_core::upstream::UpstreamSendState;
 
 use gateway_api::openai::error::{
     engine_error_response, gateway_error_contract, gateway_error_from_engine,
-    gateway_error_response, openai_error_response,
+    gateway_error_response, missing_client_api_key_response, openai_error_response,
 };
 
 #[tokio::test]
@@ -507,20 +507,40 @@ fn engine_provider_unsupported_capability_should_remain_unsupported() {
 }
 
 #[test]
-fn engine_provider_credential_failures_should_not_impersonate_client_auth_failures() {
-    for kind in [
+fn upstream_credential_failure_should_not_impersonate_client_authentication() {
+    let error = EngineError::Provider(ProviderError::new(
         ProviderErrorKind::Unauthorized,
-        ProviderErrorKind::PermissionDenied,
-    ] {
-        let error = EngineError::Provider(ProviderError::new(kind, UpstreamSendState::Sent));
-        let mapped = gateway_error_from_engine(&error);
+        UpstreamSendState::Sent,
+    ));
+    let mapped = gateway_error_from_engine(&error);
+    assert_eq!(mapped.kind(), GatewayErrorKind::UpstreamUnavailable);
+    assert_eq!(
+        mapped.safe_message(),
+        "upstream authentication resource is unavailable"
+    );
+    assert_eq!(
+        gateway_error_response(&mapped).status(),
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(
+        missing_client_api_key_response().0,
+        StatusCode::UNAUTHORIZED
+    );
+}
 
-        assert_eq!(mapped.kind(), GatewayErrorKind::UpstreamUnavailable);
-        assert_eq!(
-            mapped.safe_message(),
-            "upstream authentication resource is unavailable"
-        );
-    }
+#[test]
+fn upstream_permission_denial_is_distinct_from_client_authorization() {
+    let error = EngineError::Provider(ProviderError::new(
+        ProviderErrorKind::PermissionDenied,
+        UpstreamSendState::Sent,
+    ));
+    let mapped = gateway_error_from_engine(&error);
+    assert_eq!(mapped.kind(), GatewayErrorKind::UpstreamPermissionDenied);
+    assert_eq!(mapped.safe_message(), "upstream denied this request");
+    assert_eq!(
+        gateway_error_response(&mapped).status(),
+        StatusCode::FORBIDDEN
+    );
 }
 
 #[test]
@@ -895,7 +915,7 @@ fn final_connection_failures_and_local_capacity_have_distinct_http_statuses() {
 }
 
 #[tokio::test]
-async fn upstream_status_without_a_complete_response_uses_safe_body_and_real_http_status() {
+async fn upstream_status_without_a_complete_response_preserves_classified_recovery_contract() {
     use gateway_core::error::ProviderDiagnostic;
     use serde_json::json;
 
@@ -911,6 +931,24 @@ async fn upstream_status_without_a_complete_response_uses_safe_body_and_real_htt
             Some(429),
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limit_exceeded",
+        ),
+        (
+            ProviderErrorKind::QuotaExhausted,
+            Some(403),
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_exceeded",
+        ),
+        (
+            ProviderErrorKind::Unauthorized,
+            Some(401),
+            StatusCode::BAD_GATEWAY,
+            "upstream_unavailable",
+        ),
+        (
+            ProviderErrorKind::Unavailable,
+            Some(403),
+            StatusCode::BAD_GATEWAY,
+            "upstream_unavailable",
         ),
         (
             ProviderErrorKind::Unavailable,

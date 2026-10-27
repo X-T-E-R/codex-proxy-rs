@@ -83,6 +83,8 @@ interface ConnectionTestFailureEvent {
   type: 'error'
   source?: ConnectionTestFailureSource
   gatewayErrorCode?: string
+  providerErrorKind?: string | null
+  diagnosticCode?: string | null
   sendState?: ConnectionTestSendState | null
   error?: string
   providerErrorCode?: string | null
@@ -122,6 +124,7 @@ const CONNECTION_TEST_FAILURE_TEXT = computed<Record<string, string>>(() => ({
   account_capacity_unavailable: t('accounts.connectionTest.errors.capacityUnavailable'),
   provider_infrastructure_unavailable: t('accounts.connectionTest.errors.infrastructureUnavailable'),
   rate_limited: t('accounts.connectionTest.errors.rateLimited'),
+  upstream_permission_denied: t('accounts.connectionTest.errors.upstreamPermissionDenied'),
   upstream_unavailable: t('accounts.connectionTest.errors.upstreamUnavailable'),
   timeout: t('accounts.connectionTest.errors.timeout'),
   cancelled: t('accounts.connectionTest.errors.canceled'),
@@ -143,7 +146,12 @@ function parseConnectionTestEvent(raw: string): ConnectionTestEvent | null {
   return value as ConnectionTestEvent
 }
 
-function connectionTestFailureText(event: ConnectionTestFailureEvent) {
+export function connectionTestFailureText(event: ConnectionTestFailureEvent) {
+  if (event.gatewayErrorCode === 'upstream_permission_denied'
+    && event.providerErrorKind === 'permission_denied'
+    && event.diagnosticCode === 'subscription_sharing_ineligible') {
+    return t('accounts.connectionTest.errors.subscriptionSharingIneligible')
+  }
   return event.gatewayErrorCode
     ? CONNECTION_TEST_FAILURE_TEXT.value[event.gatewayErrorCode] || t('accounts.connectionTest.errors.unknown')
     : t('accounts.connectionTest.errors.failed')
@@ -153,10 +161,12 @@ function connectionTestFailureLabel(event: ConnectionTestFailureEvent) {
   return event.source ? CONNECTION_TEST_SOURCE_LABEL.value[event.source] || t('accounts.connectionTest.failed') : t('accounts.connectionTest.failed')
 }
 
-function connectionTestFailureDiagnostics(event: ConnectionTestFailureEvent) {
+export function connectionTestFailureDiagnostics(event: ConnectionTestFailureEvent) {
   return {
     error: event.error ?? null,
     gatewayErrorCode: event.gatewayErrorCode ?? null,
+    providerErrorKind: event.providerErrorKind ?? null,
+    diagnosticCode: event.diagnosticCode ?? null,
     sendState: event.sendState ?? null,
     upstreamStatus: event.upstreamStatus ?? null,
     providerErrorCode: event.providerErrorCode ?? null,

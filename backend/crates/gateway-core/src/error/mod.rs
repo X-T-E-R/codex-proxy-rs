@@ -1090,7 +1090,7 @@ pub enum GatewayErrorKind {
     ProviderInfrastructureUnavailable,
     /// 上游限流
     RateLimited,
-    /// 上游拒绝当前账号的请求权限
+    /// 上游拒绝当前请求的权限
     UpstreamPermissionDenied,
     /// 上游暂不可用
     UpstreamUnavailable,
@@ -1223,7 +1223,7 @@ impl GatewayError {
             ),
             ProviderErrorKind::PermissionDenied => Self::new(
                 GatewayErrorKind::UpstreamPermissionDenied,
-                "upstream denied access for this account",
+                "upstream denied this request",
             ),
             ProviderErrorKind::RequestPolicyDenied => Self::new(
                 GatewayErrorKind::PolicyDenied,

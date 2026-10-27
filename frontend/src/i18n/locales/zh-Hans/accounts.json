@@ -89,6 +89,8 @@
         "capacityUnavailable": "指定账号当前没有可用容量",
         "infrastructureUnavailable": "Provider 本地基础设施暂不可用",
         "rateLimited": "上游请求过于频繁",
+        "upstreamPermissionDenied": "上游拒绝当前请求",
+        "subscriptionSharingIneligible": "ChatGPT 账号无订阅共享资格，请检查上游账号权限",
         "upstreamUnavailable": "上游服务暂不可用",
         "timeout": "上游请求超时",
         "canceled": "测试请求已取消",

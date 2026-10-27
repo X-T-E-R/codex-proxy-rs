@@ -12,6 +12,14 @@ function source(root, relative) {
   return pathToFileURL(resolve(root, relative)).href;
 }
 
+export function piFailureMessage(event) {
+  const message = event?.error?.errorMessage;
+  // pi 的事件承载格式化后的上游文本；仅转发已知资格事实，不暴露任意错误正文
+  return typeof message === "string" && message.includes("The ChatGPT user is not eligible for subscription sharing")
+    ? "The ChatGPT user is not eligible for subscription sharing"
+    : "pi responses stream failed";
+}
+
 export async function runPi(input, emit, signal, callId) {
   const root = process.env.CPR_HARNESS_PI_ROOT;
   const responses = await import(source(root, "packages/ai/src/api/openai-responses.ts"));
@@ -95,7 +103,7 @@ export async function runPi(input, emit, signal, callId) {
         usage: event.message?.usage,
       });
     } else if (event.type === "error") {
-      throw new Error("pi responses stream failed");
+      throw new Error(piFailureMessage(event));
     } else if (event.type) {
       await emit({ kind: "trace", type: event.type, text: event.delta ?? event.text });
     }
