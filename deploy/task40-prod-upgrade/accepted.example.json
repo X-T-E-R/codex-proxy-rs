@@ -1,0 +1,10 @@
+{
+  "accepted": false,
+  "schema": 52,
+  "noMigrationChanges": true,
+  "hardCutAuthorized": false,
+  "source": "PARENT_EXACT_40_HEX_PRODUCT_SOURCE",
+  "image": "ghcr.io/x-t-e-r/codex-proxy-rs@sha256:PARENT_EXACT_64_HEX_REGISTRY_DIGEST",
+  "migrationEvidence": "PARENT: exact source migration freeze, plugin contract, isolated schema52 startup evidence",
+  "acceptanceEvidence": "PARENT: source/image binding, CI, authenticated Admin/recovery, feature and rollback evidence"
+}
