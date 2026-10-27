@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { Effect, Fiber, Layer, Stream } from "effect";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { downstreamHeaders } from "./downstream-headers.mjs";
-import { openCodeInput } from "./input.mjs";
+import { openCodeInput, validateOptions } from "./input.mjs";
 import { managedFetch } from "./managed-fetch.mjs";
 
 function text(value) {
@@ -64,10 +64,12 @@ export async function runOpenCode(input, emit, signal, callId) {
     })
     .model({ id: input.model });
   const body = input.responses_body;
+  validateOptions(body, "opencode");
   const mapped = body ? openCodeInput(body, media) : { system: input.instructions, prompt: input.prompt };
   const generation = {};
   if (body?.max_output_tokens != null || input.max_output_tokens != null) generation.maxTokens = body?.max_output_tokens ?? input.max_output_tokens;
   if (body?.temperature != null || input.temperature != null) generation.temperature = body?.temperature ?? input.temperature;
+  if (body?.top_p != null) generation.topP = body.top_p;
   const sessionId = text(input.session_id);
   const requestId = text(input.request_id);
   const serviceTier = text(input.service_tier);
@@ -75,6 +77,12 @@ export async function runOpenCode(input, emit, signal, callId) {
   const providerOptions = { ...(serviceTier ? { serviceTier } : {}),
     ...(body?.reasoning?.effort ? { reasoningEffort: body.reasoning.effort } : {}),
     ...(body?.reasoning?.summary ? { reasoningSummary: body.reasoning.summary } : {}),
+    ...(body?.parallel_tool_calls != null ? { parallelToolCalls: body.parallel_tool_calls } : {}),
+    ...(body?.truncation != null ? { truncation: body.truncation } : {}),
+    ...(body?.max_tool_calls != null ? { maxToolCalls: body.max_tool_calls } : {}),
+    ...(body?.include != null ? { include: body.include } : {}),
+    ...(body?.metadata != null ? { metadata: body.metadata } : {}),
+    ...(body?.text?.verbosity != null ? { textVerbosity: body.text.verbosity } : {}),
     store: body?.store === true,
   };
   // request id 只进入 LLMRequest.id；历史、工具与 reasoning 仍由源码 lowering

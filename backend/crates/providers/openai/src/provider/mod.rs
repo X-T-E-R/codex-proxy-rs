@@ -156,6 +156,8 @@ pub struct CodexProvider {
     live_calls_url: Url,
     session_identity: Option<CodexSessionIdentity>,
     harness_runtime: Result<crate::config::HarnessRuntimePaths, crate::HarnessError>,
+    #[cfg(debug_assertions)]
+    harness_test_dial_loopback: Option<std::net::SocketAddr>,
     session_transport_recovery: CodexSessionTransportRecovery,
     stream_max_retries: u32,
     live_registry: Arc<CodexLiveRegistry>,
@@ -335,6 +337,8 @@ impl CodexProvider {
             harness_runtime: Err(crate::HarnessError::Startup {
                 detail: "harness runtime is not configured".to_owned(),
             }),
+            #[cfg(debug_assertions)]
+            harness_test_dial_loopback: None,
             session_transport_recovery: CodexSessionTransportRecovery::default(),
             stream_max_retries,
             live_registry: Arc::new(CodexLiveRegistry::default()),
@@ -361,6 +365,15 @@ impl CodexProvider {
         runtime: Result<crate::config::HarnessRuntimePaths, crate::HarnessError>,
     ) -> Self {
         self.harness_runtime = runtime;
+        self
+    }
+
+    /// 仅 debug 隔离测试把固定 HTTPS 目标路由到受管 loopback origin
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn with_harness_test_dial_loopback(mut self, address: std::net::SocketAddr) -> Self {
+        self.harness_runtime = crate::config::OpenAiConfig::default().harness_paths();
+        self.harness_test_dial_loopback = Some(address);
         self
     }
 
@@ -506,21 +519,63 @@ impl Provider for CodexProvider {
     async fn query_model_capabilities(
         &self,
     ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
-        let snapshot = self.catalog.synchronize().await.map_err(|_| {
-            provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
-        })?;
-        let mut accounts = snapshot.model_catalog_accounts();
-        Ok(snapshot
-            .models()
-            .iter()
-            .map(|model| {
-                compile_model_capabilities(model).with_catalog_accounts(
-                    accounts
-                        .remove(model.request_model().as_str())
-                        .unwrap_or_default(),
-                )
-            })
-            .collect())
+        let harness = self.catalog.harness_model_capabilities().await;
+        let legacy = self.catalog.synchronize().await;
+        let mut models = match legacy {
+            Ok(snapshot) => {
+                let mut accounts = snapshot.model_catalog_accounts();
+                snapshot
+                    .models()
+                    .iter()
+                    .map(|model| {
+                        compile_model_capabilities(model).with_catalog_accounts(
+                            accounts
+                                .remove(model.request_model().as_str())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+            Err(error) if harness.as_ref().is_ok_and(|models| !models.is_empty()) => {
+                tracing::warn!(error = %error, "Codex model catalog unavailable; fixed harness catalog remains available");
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "OpenAI model catalog unavailable");
+                return Err(provider_error(
+                    ProviderErrorKind::Unavailable,
+                    UpstreamSendState::NotSent,
+                ));
+            }
+        };
+        match harness {
+            Ok(harness) => {
+                for discovered in harness {
+                    if let Some(existing) = models
+                        .iter_mut()
+                        .find(|model| model.upstream_model() == discovered.upstream_model())
+                    {
+                        let mut accounts = existing.catalog_accounts().cloned().unwrap_or_default();
+                        accounts
+                            .extend(discovered.catalog_accounts().into_iter().flatten().cloned());
+                        *existing = existing.clone().with_catalog_accounts(accounts);
+                    } else {
+                        models.push(discovered);
+                    }
+                }
+            }
+            Err(error) if !models.is_empty() => {
+                tracing::warn!(error = %error, "OpenAI fixed harness catalog unavailable");
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "OpenAI fixed harness catalog unavailable");
+                return Err(provider_error(
+                    ProviderErrorKind::Unavailable,
+                    UpstreamSendState::NotSent,
+                ));
+            }
+        }
+        Ok(models)
     }
 
     async fn query_client_model_catalog(

@@ -28,7 +28,7 @@ pub(crate) fn follows_session_with_headers(
     .is_some()
 }
 
-fn account_thread_with_headers(
+pub(crate) fn account_thread_with_headers(
     body: &Map<String, Value>,
     context: &Map<String, Value>,
     headers: &[gateway_core::engine::middleware::MiddlewareHeader],

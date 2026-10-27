@@ -23,6 +23,7 @@ pub(crate) use affinity::{
     derive_live_session_affinity, derive_previous_response_id_hash, derive_turn_alias,
 };
 pub use affinity::{OpenAiSelectionDomain, open_ai_client_session_key};
+pub(crate) use catalog::opencode_fast_base;
 pub(crate) use oauth::oauth_owner_ref;
 pub(crate) use types::parse_access_token_expiration;
 

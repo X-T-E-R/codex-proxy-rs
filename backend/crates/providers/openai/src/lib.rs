@@ -149,13 +149,16 @@ pub async fn initialize(
     let websocket_pool = Arc::new(CodexWebSocketPool::with_config(
         config.websocket_pool_config(),
     ));
-    let catalog = Arc::new(CodexCredentialCatalogService::new(
-        repository.clone(),
-        profile.clone(),
-        http.clone(),
-        config.base_url().to_owned(),
-        ports.catalog_cache(),
-    ));
+    let catalog = Arc::new(
+        CodexCredentialCatalogService::new(
+            repository.clone(),
+            profile.clone(),
+            http.clone(),
+            config.base_url().to_owned(),
+            ports.catalog_cache(),
+        )
+        .with_harness_runtime(config.harness_paths()),
+    );
     let quota = Arc::new(
         CodexCredentialQuotaService::new(
             repository.clone(),

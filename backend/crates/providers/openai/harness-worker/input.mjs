@@ -1,6 +1,21 @@
 // 将公开 Responses 历史交给两份源码自己的 canonical transcript 转换器
 export class UnsupportedInput extends Error {}
 
+export function validateOptions(body, harness) {
+  if (!body) return;
+  const common = new Set(["model", "input", "instructions", "tools", "tool_choice", "reasoning",
+    "service_tier", "max_output_tokens", "temperature", "top_p", "parallel_tool_calls", "stream"]);
+  const openCode = new Set(["store", "metadata", "include", "truncation", "max_tool_calls", "text"]);
+  for (const key of Object.keys(body)) {
+    if (common.has(key) || (harness === "opencode" && openCode.has(key))) continue;
+    if (harness === "pi" && key === "store" && body.store === false) continue;
+    throw new UnsupportedInput(`Unsupported ${harness} Responses option: ${key}`);
+  }
+  if (body.text && (typeof body.text !== "object" || Object.keys(body.text).some((key) => key !== "verbosity"))) {
+    throw new UnsupportedInput("Unsupported OpenCode text options");
+  }
+}
+
 function content(item, kind) {
   if (typeof item === "string") return [{ type: kind, text: item }];
   if (!Array.isArray(item)) throw new UnsupportedInput("Responses message content must be an array");

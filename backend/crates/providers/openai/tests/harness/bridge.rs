@@ -2134,18 +2134,32 @@ async fn complete_transcript_uses_each_sources_history_tools_and_wire_events() {
             "tools": [{"type":"function","name":"lookup","description":"Look up a value","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}],
             "tool_choice": "auto",
             "reasoning": {"effort":"low","summary":"auto"},
+            "top_p": 0.7,
+            "parallel_tool_calls": false,
             "service_tier": "priority"
         }));
         let result = complete(&session, request).await;
         let sent = json_body(&result.request.body);
         assert_eq!(sent["service_tier"], "priority");
+        assert_eq!(sent["top_p"], 0.7);
+        assert_eq!(sent["parallel_tool_calls"], false);
         assert!(
             sent["input"].as_array().expect("input").len() >= 5,
             "{sent}"
         );
         assert!(sent.to_string().contains("Earlier user"));
         assert!(sent.to_string().contains("Current turn"));
-        assert!(sent.to_string().contains("call_history"));
+        assert!(
+            sent.to_string()
+                .matches(&format!("call_{}", scoped("call_history")))
+                .count()
+                >= 2
+        );
+        assert!(
+            sent.to_string()
+                .contains(&format!("fc_{}", scoped("fc_history")))
+        );
+        assert!(!sent.to_string().contains("call_history"));
         assert!(sent.to_string().contains("encrypted-history"));
         assert_eq!(sent["tool_choice"], "auto");
         assert_eq!(sent["tools"][0]["name"], "lookup");
@@ -2193,6 +2207,20 @@ async fn unsupported_response_input_fails_before_dial_for_both_sources() {
         let error = drive_call(&session, request, &CancellationToken::new())
             .await
             .expect_err("unsupported input must fail before request reaches origin");
+        assert!(
+            matches!(error, HarnessError::InvalidInput { .. }),
+            "{error}"
+        );
+        let mut request = sample_call(harness, bearer);
+        request.prompt.clear();
+        request.responses_body = Some(json!({
+            "model": MODEL,
+            "input": "hello",
+            "prompt_cache_key": "must-not-disappear",
+        }));
+        let error = drive_call(&session, request, &CancellationToken::new())
+            .await
+            .expect_err("unsupported option must fail before upstream send");
         assert!(
             matches!(error, HarnessError::InvalidInput { .. }),
             "{error}"

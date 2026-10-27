@@ -1,4 +1,4 @@
-//! Codex 账号 entitlement 的进程内快照，以及套餐级 Redis 模型目录 cache
+//! Codex 与固定 OpenCode/pi OAuth 源码模型目录的账号隔离投影
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt;
@@ -10,14 +10,17 @@ use futures::{StreamExt, stream};
 use gateway_core::account::{
     CredentialRevision, CredentialState, OpaqueProviderData, ProviderAccount, ProviderAccountId,
 };
+use gateway_core::operation::OperationKind;
 use gateway_core::provider_ports::{
     ProviderCatalogCacheKey, ProviderCatalogCachePort, ProviderCatalogScope,
 };
 use gateway_core::routing::{
-    FrozenAccountScope, ModelPresentation, ProviderCatalogGeneration, ProviderKind,
-    ProviderModelContent, ProviderModelDescriptor, UpstreamModelId,
+    FrozenAccountScope, ModelCapabilities, ModelPresentation, ProviderCatalogGeneration,
+    ProviderKind, ProviderModelCapabilities, ProviderModelContent, ProviderModelDescriptor,
+    UpstreamModelId,
 };
 use secrecy::ExposeSecret;
+use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Notify, OnceCell};
 use tokio::time::Instant;
@@ -36,6 +39,25 @@ const MODEL_CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONCURRENT_API_CATALOGS: usize = 4;
 const CLIENT_CATALOG_ERROR_TTL: Duration = Duration::from_secs(5);
 
+// 固定 OpenCode 快照的 fast 是目录变体，不是上游模型 slug
+// 每次更新固定源码时以 models-dev 的 experimental.modes.fast 和插件 fallback 共同复验
+const OPENCODE_FAST_BASE: &[(&str, &str)] = &[
+    ("gpt-5.5-fast", "gpt-5.5"),
+    ("gpt-5.6-luna-fast", "gpt-5.6-luna"),
+    ("gpt-5.6-sol-fast", "gpt-5.6-sol"),
+    ("gpt-5.6-terra-fast", "gpt-5.6-terra"),
+    ("gpt-6-astra-fast", "gpt-6-astra"),
+    ("gpt-6-luna-fast", "gpt-6-luna"),
+    ("gpt-6-sol-fast", "gpt-6-sol"),
+    ("gpt-6.1-sol-fast", "gpt-6.1-sol"),
+];
+
+pub(crate) fn opencode_fast_base(model: &str) -> Option<&'static str> {
+    OPENCODE_FAST_BASE
+        .iter()
+        .find_map(|(alias, base)| (*alias == model).then_some(*base))
+}
+
 /// OpenAI 以套餐划分的模型目录作用域
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CodexCatalogScope(ProviderCatalogScope);
@@ -43,9 +65,17 @@ pub struct CodexCatalogScope(ProviderCatalogScope);
 impl CodexCatalogScope {
     /// 从账号已验证的套餐事实构造目录作用域
     pub fn for_account(account: &ProviderAccount) -> Result<Self, CodexCredentialCatalogError> {
-        if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY {
+        if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY
+            || super::harness_oauth::is_harness_kind(account.authentication_kind())
+        {
+            let prefix =
+                if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY {
+                    "account".to_owned()
+                } else {
+                    format!("account:{}", account.authentication_kind())
+                };
             return ProviderCatalogScope::new(format!(
-                "account:{}:{}",
+                "{prefix}:{}:{}",
                 account.id(),
                 account.revision().get()
             ))
@@ -248,6 +278,240 @@ struct FetchedCatalog {
     etags: Vec<String>,
 }
 
+struct HarnessSourceCatalog {
+    opencode: Vec<HarnessSourceModel>,
+    pi: Vec<HarnessSourceModel>,
+}
+
+#[derive(Clone)]
+struct HarnessSourceModel {
+    id: UpstreamModelId,
+    presentation: ModelPresentation,
+}
+
+impl HarnessSourceCatalog {
+    async fn load(
+        runtime: &crate::config::HarnessRuntimePaths,
+    ) -> Result<Self, CodexCredentialCatalogError> {
+        // 与 OpenCode models-dev normalize 一致：基础模型及 experimental.modes 先展开，
+        // 然后才与 token-sharing 插件的固定 fallback 相交
+        const FALLBACK: &[&str] = &[
+            "gpt-5.5",
+            "gpt-5.5-fast",
+            "gpt-5.6-luna",
+            "gpt-5.6-luna-fast",
+            "gpt-5.6-sol",
+            "gpt-5.6-sol-fast",
+            "gpt-5.6-terra",
+            "gpt-5.6-terra-fast",
+            "gpt-6-astra",
+            "gpt-6-astra-fast",
+            "gpt-6-luna",
+            "gpt-6-luna-fast",
+            "gpt-6-sol",
+            "gpt-6-sol-fast",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-fast",
+        ];
+        let snapshot = runtime
+            .opencode_checkout
+            .join("packages/core/src/models-dev/snapshot.txt");
+        let raw = tokio::fs::read(&snapshot).await.map_err(|error| {
+            CodexCredentialCatalogError::Upstream {
+                detail: format!("OpenCode pinned model snapshot unavailable: {error}"),
+            }
+        })?;
+        let parsed: Value = serde_json::from_slice(&raw).map_err(|error| {
+            CodexCredentialCatalogError::Upstream {
+                detail: format!("OpenCode pinned model snapshot invalid: {error}"),
+            }
+        })?;
+        let source = parsed
+            .pointer("/openai/models")
+            .and_then(Value::as_object)
+            .ok_or_else(|| CodexCredentialCatalogError::Upstream {
+                detail: "OpenCode pinned model snapshot has no OpenAI catalog".to_owned(),
+            })?;
+        let mut opencode = Vec::new();
+        for model in source.values() {
+            let Some(id) = model.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if FALLBACK.contains(&id) {
+                opencode.push(source_model(id, model, None)?);
+            }
+            if let Some(modes) = model
+                .pointer("/experimental/modes")
+                .and_then(Value::as_object)
+            {
+                for mode in modes.keys() {
+                    let variant = format!("{id}-{mode}");
+                    if FALLBACK.contains(&variant.as_str()) {
+                        opencode.push(source_model(&variant, model, Some(mode))?);
+                    }
+                }
+            }
+        }
+        let wrapper = runtime
+            .pi_checkout
+            .join("packages/ai/src/providers/openai.models.ts");
+        let wrapper_url = reqwest::Url::from_file_path(&wrapper).map_err(|()| {
+            CodexCredentialCatalogError::Upstream {
+                detail: "pi model wrapper path is invalid".to_owned(),
+            }
+        })?;
+        let script = format!(
+            "const {{ OPENAI_MODELS }} = await import({}); console.log(JSON.stringify(OPENAI_MODELS));",
+            serde_json::to_string(wrapper_url.as_str())
+                .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?,
+        );
+        let mut command = tokio::process::Command::new("node");
+        command
+            .args([
+                "--experimental-transform-types",
+                "--import",
+                "./register.mjs",
+                "--input-type=module",
+                "--eval",
+                &script,
+            ])
+            .current_dir(&runtime.worker_dir)
+            .env_clear()
+            .kill_on_drop(true);
+        for name in [
+            "SYSTEMROOT",
+            "WINDIR",
+            "SYSTEMDRIVE",
+            "COMSPEC",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "PATH",
+            "USERPROFILE",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        let output = tokio::time::timeout(MODEL_CATALOG_TIMEOUT, command.output())
+            .await
+            .map_err(|_| CodexCredentialCatalogError::Upstream {
+                detail: "pi fixed model wrapper timed out".to_owned(),
+            })?
+            .map_err(|error| CodexCredentialCatalogError::Upstream {
+                detail: format!("pi fixed model wrapper could not start: {error}"),
+            })?;
+        if !output.status.success() {
+            return Err(CodexCredentialCatalogError::Upstream {
+                detail: "pi fixed model wrapper or pinned catalog is unavailable".to_owned(),
+            });
+        }
+        let parsed: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+            CodexCredentialCatalogError::Upstream {
+                detail: "pi fixed model wrapper returned invalid JSON".to_owned(),
+            }
+        })?;
+        let models = parsed
+            .as_object()
+            .ok_or_else(|| CodexCredentialCatalogError::Upstream {
+                detail: "pi fixed model wrapper returned no chat catalog".to_owned(),
+            })?;
+        let pi = models
+            .values()
+            .map(|model| {
+                let id = model
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or(CodexCredentialCatalogError::InvalidCredentialData)?;
+                source_model(id, model, None)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if opencode.is_empty() || pi.is_empty() {
+            return Err(CodexCredentialCatalogError::Upstream {
+                detail: "fixed OpenCode/pi model catalog is empty".to_owned(),
+            });
+        }
+        Ok(Self { opencode, pi })
+    }
+}
+
+fn source_model(
+    id: &str,
+    source: &Value,
+    mode: Option<&str>,
+) -> Result<HarnessSourceModel, CodexCredentialCatalogError> {
+    let id =
+        UpstreamModelId::new(id).map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?;
+    let name = source
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(id.as_str());
+    let name = if let Some(mode) = mode {
+        format!("{name} {}{}", mode[..1].to_ascii_uppercase(), &mode[1..])
+    } else {
+        name.to_owned()
+    };
+    let context = source
+        .pointer("/limit/context")
+        .or_else(|| source.get("contextWindow"))
+        .and_then(Value::as_u64);
+    let image = source
+        .pointer("/modalities/input")
+        .or_else(|| source.get("input"))
+        .and_then(Value::as_array)
+        .is_some_and(|modalities| {
+            modalities
+                .iter()
+                .any(|value| value.as_str() == Some("image"))
+        });
+    let tools = source
+        .get("tool_call")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let efforts = source
+        .get("reasoning_options")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|option| option.get("type").and_then(Value::as_str) == Some("effort"))
+        .flat_map(|option| {
+            option
+                .get("values")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(Value::as_str)
+        .filter(|value| *value != "null")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let default_effort = efforts
+        .iter()
+        .find(|effort| effort.as_str() == "medium")
+        .or_else(|| efforts.first())
+        .cloned();
+    let fast = source
+        .pointer("/experimental/modes/fast/provider/body/service_tier")
+        .and_then(Value::as_str)
+        == Some("priority");
+    let tiers = if fast {
+        vec![gateway_core::routing::ModelServiceTier::new(
+            "priority", "fast", "Fast",
+        )]
+    } else {
+        Vec::new()
+    };
+    Ok(HarnessSourceModel {
+        id,
+        presentation: ModelPresentation::new(Some(name), None)
+            .with_reasoning(default_effort, efforts)
+            .with_context_window_tokens(context)
+            .with_image_input(image)
+            .with_agent_tools(tools, false)
+            .with_service_tiers(tiers),
+    })
+}
+
 impl From<CredentialRepositoryError> for CodexCredentialCatalogError {
     fn from(_: CredentialRepositoryError) -> Self {
         Self::InvalidCredentialData
@@ -260,6 +524,8 @@ pub struct CodexCredentialCatalogService {
     profile: CodexWireProfileState,
     http: reqwest::Client,
     base_url: String,
+    harness_runtime: Result<crate::config::HarnessRuntimePaths, crate::HarnessError>,
+    harness_catalog: Arc<OnceCell<HarnessSourceCatalog>>,
     plan_catalog_cache: Arc<dyn ProviderCatalogCachePort>,
     cache: Arc<RwLock<CatalogCacheState>>,
     client_catalogs: Arc<Mutex<Vec<ClientCatalogEntry>>>,
@@ -280,12 +546,127 @@ impl CodexCredentialCatalogService {
             profile,
             http,
             base_url,
+            harness_runtime: Err(crate::HarnessError::Startup {
+                detail: "harness runtime is not configured".to_owned(),
+            }),
+            harness_catalog: Arc::new(OnceCell::new()),
             plan_catalog_cache,
             cache: Arc::new(RwLock::new(CatalogCacheState::default())),
             client_catalogs: Arc::new(Mutex::new(Vec::new())),
             etags: Arc::new(Mutex::new(CatalogEtagState::default())),
             etag_notification: Arc::new(Notify::new()),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_harness_runtime(
+        mut self,
+        runtime: Result<crate::config::HarnessRuntimePaths, crate::HarnessError>,
+    ) -> Self {
+        self.harness_runtime = runtime;
+        self
+    }
+
+    async fn source_catalog(&self) -> Result<&HarnessSourceCatalog, CodexCredentialCatalogError> {
+        self.harness_catalog
+            .get_or_try_init(|| async {
+                let runtime = self.harness_runtime.as_ref().map_err(|error| {
+                    CodexCredentialCatalogError::Upstream {
+                        detail: error.to_string(),
+                    }
+                })?;
+                HarnessSourceCatalog::load(runtime).await
+            })
+            .await
+    }
+
+    async fn harness_client_descriptors(
+        &self,
+        accounts: &[ProviderAccount],
+    ) -> ClientCatalogResult {
+        if !accounts
+            .iter()
+            .any(|account| super::harness_oauth::is_harness_kind(account.authentication_kind()))
+        {
+            return Ok(Vec::new());
+        }
+        let catalog = self.source_catalog().await?;
+        let mut models = BTreeMap::new();
+        for account in accounts
+            .iter()
+            .filter(|account| super::harness_oauth::is_harness_kind(account.authentication_kind()))
+        {
+            let source = if account.authentication_kind()
+                == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
+            {
+                &catalog.opencode
+            } else {
+                &catalog.pi
+            };
+            for model in source
+                .iter()
+                .filter(|model| account.model_access().allows(model.id.as_str()))
+            {
+                models
+                    .entry(model.id.clone())
+                    .or_insert_with(|| ProviderModelDescriptor {
+                        model: model.id.clone(),
+                        content: ProviderModelContent::Adapted(model.presentation.clone()),
+                    });
+            }
+        }
+        Ok(models.into_values().collect())
+    }
+
+    /// 固定源码目录只附着对应认证种类的账号，不经 Codex `/codex/models`
+    pub async fn harness_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, CodexCredentialCatalogError> {
+        let accounts = self.repository.list_for_provider().await?;
+        let now = SystemTime::now();
+        let accounts = accounts
+            .into_iter()
+            .filter(|account| {
+                eligible_catalog_account(account, now)
+                    && super::harness_oauth::is_harness_kind(account.authentication_kind())
+            })
+            .collect::<Vec<_>>();
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let catalog = self.source_catalog().await?;
+        let mut models =
+            BTreeMap::<UpstreamModelId, (ModelPresentation, BTreeSet<ProviderAccountId>)>::new();
+        for account in accounts {
+            let source = if account.authentication_kind()
+                == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
+            {
+                &catalog.opencode
+            } else {
+                &catalog.pi
+            };
+            for model in source
+                .iter()
+                .filter(|model| account.model_access().allows(model.id.as_str()))
+            {
+                let entry = models
+                    .entry(model.id.clone())
+                    .or_insert_with(|| (model.presentation.clone(), BTreeSet::new()));
+                entry.1.insert(account.id().clone());
+            }
+        }
+        Ok(models
+            .into_iter()
+            .map(|(model, (presentation, accounts))| {
+                ProviderModelCapabilities::new(
+                    model,
+                    ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), None)
+                        .with_upstream_feature_validation(),
+                )
+                .with_presentation(presentation)
+                .with_catalog_accounts(accounts)
+            })
+            .collect())
     }
 
     /// OAuth 目录使用 Key 范围内排序稳定的首个成功账号；API Key 聚合按完整对象优先稳定选源
@@ -316,6 +697,7 @@ impl CodexCredentialCatalogService {
             accounts.into_iter().partition(|account| {
                 account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_API_KEY
             });
+        let harness_result = self.harness_client_descriptors(&accounts).await;
         let mut catalogs = stream::iter(api_accounts)
             .map(|account| {
                 let profile = request_profile.clone();
@@ -344,11 +726,25 @@ impl CodexCredentialCatalogService {
             .flatten()
             .partition(|model| matches!(model.content, ProviderModelContent::Native(_)));
         let mut seen = BTreeSet::new();
-        let api_models = native
+        let mut api_models = native
             .into_iter()
             .chain(adapted)
             .filter(|model| seen.insert(model.model.clone()))
             .collect::<Vec<_>>();
+        let harness_error = match harness_result {
+            Ok(harness) => {
+                api_models.extend(
+                    harness
+                        .into_iter()
+                        .filter(|model| seen.insert(model.model.clone())),
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "fixed harness client catalog unavailable");
+                Some(error)
+            }
+        };
         accounts.retain(|account| {
             account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_OAUTH
         });
@@ -376,7 +772,7 @@ impl CodexCredentialCatalogService {
             }
         }
         if api_models.is_empty() {
-            Err(last_error)
+            Err(harness_error.unwrap_or(last_error))
         } else {
             Ok(api_models)
         }
@@ -522,6 +918,24 @@ impl CodexCredentialCatalogService {
             .filter(|account| account.provider().as_str() == "openai")
             .ok_or(CodexCredentialCatalogError::NoEligibleCredential)?;
         let scope = CodexCatalogScope::for_account(&account)?;
+        if super::harness_oauth::is_harness_kind(account.authentication_kind()) {
+            let catalog = self.source_catalog().await?;
+            let models = if account.authentication_kind()
+                == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
+            {
+                &catalog.opencode
+            } else {
+                &catalog.pi
+            };
+            let models = models
+                .iter()
+                .filter(|model| account.model_access().allows(model.id.as_str()))
+                .map(|model| model.id.as_str().to_owned())
+                .collect();
+            let refreshed = CodexPlanCatalog::new(scope, Utc::now(), models);
+            self.replace_plan_catalog(&refreshed).await?;
+            return Ok(refreshed);
+        }
         let mut candidates =
             match catalog_candidates_by_scope(self.repository.list_for_provider().await?) {
                 Ok(mut groups) => groups.remove(&scope).unwrap_or_default(),
@@ -567,6 +981,11 @@ impl CodexCredentialCatalogService {
         &self,
         account: &ProviderAccount,
     ) -> Result<(Vec<CodexCatalogModel>, SystemTime), CodexCredentialCatalogError> {
+        if super::harness_oauth::is_harness_kind(account.authentication_kind()) {
+            return Err(CodexCredentialCatalogError::Upstream {
+                detail: "fixed OAuth harness catalog has no Codex native model document".to_owned(),
+            });
+        }
         let client = CodexBackendClient::new(
             self.http.clone(),
             self.base_url.clone(),
@@ -729,6 +1148,11 @@ impl CodexCredentialCatalogService {
         account: &ProviderAccount,
         client_version: Option<&str>,
     ) -> Result<FetchedAccountModels, CodexCredentialCatalogError> {
+        if super::harness_oauth::is_harness_kind(account.authentication_kind()) {
+            return Err(CodexCredentialCatalogError::Upstream {
+                detail: "fixed OAuth harness catalog must not use Codex model endpoint".to_owned(),
+            });
+        }
         tokio::time::timeout(MODEL_CATALOG_TIMEOUT, async {
             let credential = self
                 .repository
@@ -959,10 +1383,10 @@ fn catalog_candidates_by_scope(
 ) -> Result<BTreeMap<CodexCatalogScope, Vec<ProviderAccount>>, CodexCredentialCatalogError> {
     let now = SystemTime::now();
     let mut groups = BTreeMap::<CodexCatalogScope, Vec<ProviderAccount>>::new();
-    for account in accounts
-        .into_iter()
-        .filter(|account| eligible_catalog_account(account, now))
-    {
+    for account in accounts.into_iter().filter(|account| {
+        eligible_catalog_account(account, now)
+            && !super::harness_oauth::is_harness_kind(account.authentication_kind())
+    }) {
         let scope = CodexCatalogScope::for_account(&account)?;
         groups.entry(scope).or_default().push(account);
     }
@@ -1070,4 +1494,77 @@ fn eligible_catalog_account(account: &ProviderAccount, now: SystemTime) -> bool 
             account.credential_state(),
             CredentialState::Unknown | CredentialState::Ready
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pinned_source_model_wrappers_expose_actual_oauth_chat_catalogs() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../");
+        let bundle = tempfile::tempdir().expect("temporary bundle");
+        let location = bundle.path().join("openai-harness");
+        let output = std::process::Command::new("python")
+            .arg(root.join("deploy/harness-sources/assemble.py"))
+            .arg("assemble")
+            .arg("--output")
+            .arg(&location)
+            .output()
+            .expect("pinned source assembly");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let catalog = HarnessSourceCatalog::load(&crate::config::HarnessRuntimePaths {
+            worker_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("harness-worker"),
+            opencode_checkout: location.join("sources/opencode"),
+            pi_checkout: location.join("sources/pi"),
+        })
+        .await
+        .expect("source wrappers");
+        assert_eq!(catalog.opencode.len(), 16);
+        for &(alias, base) in OPENCODE_FAST_BASE {
+            assert!(
+                catalog
+                    .opencode
+                    .iter()
+                    .any(|model| model.id.as_str() == base)
+            );
+            let variant = catalog
+                .opencode
+                .iter()
+                .find(|model| model.id.as_str() == alias)
+                .expect("fast variant from pinned model snapshot");
+            assert_eq!(opencode_fast_base(alias), Some(base));
+            assert!(
+                variant
+                    .presentation
+                    .service_tiers()
+                    .iter()
+                    .any(|tier| tier.id() == "priority")
+            );
+        }
+        assert_eq!(opencode_fast_base("unlisted-fast"), None);
+        assert!(
+            !catalog
+                .opencode
+                .iter()
+                .any(|model| model.id.as_str() == "gpt-5.5-pro")
+        );
+        assert_eq!(catalog.pi.len(), 42);
+        assert!(
+            catalog
+                .pi
+                .iter()
+                .any(|model| model.id.as_str() == "gpt-5.6-terra")
+        );
+        assert!(
+            !catalog
+                .pi
+                .iter()
+                .any(|model| model.id.as_str().starts_with("classifier:"))
+        );
+    }
 }

@@ -14,21 +14,21 @@ use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
 
 use super::{
-    AttemptContext, CodexCanonicalDecoder, CodexCanonicalOutcome, CodexCredentialLease,
-    CodexProvider, CodexUpstreamDiagnostics, MiddlewareHeader, ReplayBoundary, map_canonical_error,
-    provider_error,
+    AttemptContext, CodexAccountFailure, CodexCanonicalDecoder, CodexCanonicalOutcome,
+    CodexCredentialLease, CodexProvider, CodexUpstreamDiagnostics, MiddlewareHeader,
+    ReplayBoundary, map_canonical_error, provider_error,
 };
 use crate::credential::harness_oauth::{HarnessMethod, method_for_kind};
+use crate::credential::{CodexCredentialSelector, opencode_fast_base};
 use crate::harness::{
     HarnessError, HarnessSession, HarnessWorkerConfig, ResponseItem, ResponsesCall,
     ResponsesHarness, ResponsesRequestIdentity,
 };
-use crate::request_identity::account_session_with_headers;
+use crate::request_identity::{account_session_with_headers, account_thread_with_headers};
 
 const RESPONSES_BASE_URL: &str = "https://api.openai.com/v1";
 
 impl CodexProvider {
-    #[expect(clippy::too_many_arguments)]
     pub(super) fn execute_harness_generate(
         self: Arc<Self>,
         generate: GenerateRequest,
@@ -69,12 +69,11 @@ impl CodexProvider {
             generate.protocol_payload().context(),
             &headers,
         );
-        let raw_thread = headers
-            .iter()
-            .find(|header| header.name().eq_ignore_ascii_case("thread-id"))
-            .and_then(|header| std::str::from_utf8(header.value()).ok())
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_owned);
+        let raw_thread = account_thread_with_headers(
+            generate.protocol_payload().body(),
+            generate.protocol_payload().context(),
+            &headers,
+        );
         let session_id = raw_thread
             .or_else(|| raw_session.clone())
             .unwrap_or_else(|| context.request_id().as_str().to_owned());
@@ -82,7 +81,47 @@ impl CodexProvider {
             session_affinity_id: raw_session.filter(|parent| parent != &session_id),
         };
         let mut body = generate.protocol_payload().body().clone();
-        body.insert("model".to_owned(), Value::String(model.as_str().to_owned()));
+        if has_account_bound_history(&body) && (!lease.affinity_hit() || lease.account_switch()) {
+            return Err(provider_error(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            )
+            .with_retry_prohibited()
+            .with_diagnostic(super::ProviderDiagnostic::new(
+                "account-bound Responses history cannot be replayed without its original account",
+            )));
+        }
+        // 会话身份已从正文/上下文解释并按账号映到源码头，不作为 Responses 业务选项重发
+        body.remove("session_id");
+        body.remove("thread_id");
+        let request_model = if method == HarnessMethod::OpenCode {
+            opencode_fast_base(model.as_str()).unwrap_or(model.as_str())
+        } else {
+            model.as_str()
+        };
+        if request_model != model.as_str() {
+            let tier = body
+                .get("service_tier")
+                .and_then(Value::as_str)
+                .map(str::trim);
+            let disabled = context.account_fast_mode(lease.account_id().as_str())
+                == Some(gateway_core::account::FastMode::Disabled);
+            let target = match tier {
+                Some(tier)
+                    if tier.eq_ignore_ascii_case("priority")
+                        || tier.eq_ignore_ascii_case("fast") =>
+                {
+                    Some(if disabled { "default" } else { "priority" })
+                }
+                None if !disabled => Some("priority"),
+                Some(tier) if !disabled && tier.eq_ignore_ascii_case("default") => Some("priority"),
+                _ => None,
+            };
+            if let Some(target) = target {
+                body.insert("service_tier".to_owned(), Value::String(target.to_owned()));
+            }
+        }
+        body.insert("model".to_owned(), Value::String(request_model.to_owned()));
         // 当前 call 的账号映射在桥内执行，不能先调用 Codex 的正文账号归一
         let service_tier = body
             .get("service_tier")
@@ -93,7 +132,7 @@ impl CodexProvider {
                 HarnessMethod::OpenCode => ResponsesHarness::OpenCode,
                 HarnessMethod::Pi => ResponsesHarness::Pi,
             },
-            model: model.as_str().to_owned(),
+            model: request_model.to_owned(),
             base_url: RESPONSES_BASE_URL.to_owned(),
             installation_id: lease.installation_id().to_owned(),
             session_id,
@@ -111,14 +150,18 @@ impl CodexProvider {
             event_window: 16,
             timeout: None,
         };
+        #[cfg(debug_assertions)]
+        let dial_loopback = self.harness_test_dial_loopback;
+        #[cfg(not(debug_assertions))]
+        let dial_loopback = None;
         let runtime = HarnessWorkerConfig {
             node: PathBuf::from("node"),
             worker_dir: paths.worker_dir,
             opencode_checkout: paths.opencode_checkout,
             pi_checkout: paths.pi_checkout,
             proxy: lease.account().outbound_proxy().cloned(),
-            allow_remote_dial: true,
-            dial_loopback: None,
+            allow_remote_dial: dial_loopback.is_none(),
+            dial_loopback,
         };
         let kind = ProviderKind::new("openai")
             .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
@@ -136,8 +179,17 @@ impl CodexProvider {
             lease.capacity_snapshot(),
         ));
         let can_update_account = lease.allows_account_state_mutation();
-        let events = harness_response_stream(runtime, request, context, model, service_tier);
-        let stream = ProviderStream::new(metadata, events, Arc::new(lease));
+        let lease = Arc::new(lease);
+        let events = harness_response_stream(
+            runtime,
+            request,
+            context,
+            model,
+            service_tier,
+            Arc::clone(&self.selector),
+            Arc::clone(&lease),
+        );
+        let stream = ProviderStream::new(metadata, events, lease);
         Ok(if can_update_account {
             stream.with_filtered_account_feedback(
                 Arc::clone(&self.account_feedback),
@@ -149,12 +201,37 @@ impl CodexProvider {
     }
 }
 
+fn has_account_bound_history(body: &serde_json::Map<String, Value>) -> bool {
+    // 只有已证明的同账号会话可重放不透明的 reasoning 和上游关联 ID
+    // 无法证明归属时不能删除这些字段继续发送，那会破坏工具结果的配对
+    fn bound(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.iter().any(|(key, value)| {
+                matches!(
+                    key.as_str(),
+                    "id" | "call_id"
+                        | "encrypted_content"
+                        | "thinkingSignature"
+                        | "textSignature"
+                        | "providerMetadata"
+                ) && !value.is_null()
+                    || bound(value)
+            }),
+            Value::Array(items) => items.iter().any(bound),
+            _ => false,
+        }
+    }
+    body.get("input").is_some_and(bound)
+}
+
 fn harness_response_stream(
     runtime: HarnessWorkerConfig,
     request: ResponsesCall,
     context: AttemptContext,
     model: UpstreamModelId,
     service_tier: Option<String>,
+    selector: Arc<CodexCredentialSelector>,
+    lease: Arc<CodexCredentialLease>,
 ) -> EventStream {
     Box::pin(async_stream::try_stream! {
         let session = HarnessSession::open(runtime).await.map_err(|error| {
@@ -171,6 +248,7 @@ fn harness_response_stream(
             .with_raw_sse_passthrough();
         let mut sent = UpstreamSendState::NotSent;
         let mut status = None;
+        let mut retry_after = None;
         let mut terminal_events = Vec::new();
         let mut completed = false;
         loop {
@@ -179,6 +257,18 @@ fn harness_response_stream(
                 Ok(ResponseItem::Request(_)) => sent = UpstreamSendState::Ambiguous,
                 Ok(ResponseItem::Event(event)) if event.kind == "head" => {
                     status = event.payload.get("status").and_then(Value::as_u64);
+                    if status.is_some_and(|status| status > 0) {
+                        sent = UpstreamSendState::Sent;
+                    }
+                    retry_after = event.payload.get("headers").and_then(Value::as_array)
+                        .and_then(|headers| headers.iter().find_map(|header| {
+                            let pair = header.as_array()?;
+                            if pair.first()?.as_str()?.eq_ignore_ascii_case("retry-after") {
+                                gateway_protocol::openai::parse_retry_after_seconds(pair.get(1)?.as_str()?)
+                            } else {
+                                None
+                            }
+                        }));
                 }
                 Ok(ResponseItem::Event(event)) if event.kind == "wire" => {
                     let raw = event.payload.get("frame_base64")
@@ -232,7 +322,20 @@ fn harness_response_stream(
                 Err(error) => {
                     tracing::warn!(error = %error, upstream_status = ?status,
                         "OpenAI Responses harness call failed");
-                    Err(harness_error_with_status(error, sent, status))?;
+                    let error = harness_error_with_status(error, sent, status, retry_after);
+                    if lease.allows_account_state_mutation() && sent == UpstreamSendState::Sent {
+                        let failure = match error.kind() {
+                            ProviderErrorKind::Unauthorized => Some(CodexAccountFailure::CredentialExpired),
+                            ProviderErrorKind::RateLimited => Some(CodexAccountFailure::RateLimited {
+                                retry_after: error.retry_after(),
+                            }),
+                            _ => None,
+                        };
+                        if let Some(failure) = failure {
+                            let _ = selector.record_failure(lease.account(), failure, None).await;
+                        }
+                    }
+                    Err(error)?;
                     return;
                 }
             }
@@ -246,6 +349,7 @@ fn harness_error_with_status(
     error: HarnessError,
     sent: UpstreamSendState,
     status: Option<u64>,
+    retry_after: Option<u64>,
 ) -> ProviderError {
     let kind = match status {
         Some(401) => ProviderErrorKind::Unauthorized,
@@ -255,7 +359,14 @@ fn harness_error_with_status(
         Some(500..=599) => ProviderErrorKind::Unavailable,
         _ => return harness_error(error, sent),
     };
-    provider_error(kind, sent)
+    let mut error = provider_error(kind, sent);
+    if let Some(status) = status.and_then(|status| u16::try_from(status).ok()) {
+        error = error.with_status(status);
+    }
+    if let Some(seconds) = retry_after {
+        error = error.with_retry_after(std::time::Duration::from_secs(seconds));
+    }
+    error
 }
 
 fn harness_error(error: HarnessError, sent: UpstreamSendState) -> ProviderError {

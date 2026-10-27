@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { downstreamHeaders } from "./downstream-headers.mjs";
-import { piInput } from "./input.mjs";
+import { piInput, validateOptions } from "./input.mjs";
 import { managedFetch } from "./managed-fetch.mjs";
 
 function text(value) {
@@ -16,6 +16,7 @@ export async function runPi(input, emit, signal, callId) {
   const root = process.env.CPR_HARNESS_PI_ROOT;
   const responses = await import(source(root, "packages/ai/src/api/openai-responses.ts"));
   const body = input.responses_body;
+  validateOptions(body, "pi");
   const transcript = body ? piInput(body, input.model) : {
     messages: [
       ...(input.instructions ? [{ role: "system", content: input.instructions, timestamp: 1 }] : []),
@@ -51,6 +52,10 @@ export async function runPi(input, emit, signal, callId) {
     ...(body?.tool_choice != null ? { toolChoice: body.tool_choice } : {}),
     ...(body?.max_output_tokens != null || input.max_output_tokens != null ? { maxTokens: body?.max_output_tokens ?? input.max_output_tokens } : {}),
     ...(body?.temperature != null || input.temperature != null ? { temperature: body?.temperature ?? input.temperature } : {}),
+    ...(body?.top_p != null || body?.parallel_tool_calls != null ? { samplingParams: {
+      ...(body?.top_p != null ? { top_p: body.top_p } : {}),
+      ...(body?.parallel_tool_calls != null ? { parallel_tool_calls: body.parallel_tool_calls } : {}),
+    } } : {}),
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
     fetch: (url, init) => managedFetch(url, init, callId, requestId, emit),
     signal,

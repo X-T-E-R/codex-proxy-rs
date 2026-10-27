@@ -2940,6 +2940,98 @@ async fn oauth_transport_settings_preserve_tokens_refresh_schedule_and_health() 
     );
 }
 
+#[tokio::test]
+async fn fixed_oauth_harness_rejects_websocket_transport_without_changing_codex_default() {
+    use gateway_core::account::NewProviderAccount;
+    use provider_openai::credential::{
+        CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING, CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+        CodexCredentialData, CodexOAuthCredentialData, ResponsesTransport,
+    };
+
+    for (id, kind) in [
+        (
+            "acct_harness_transport_opencode",
+            CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+        ),
+        (
+            "acct_harness_transport_pi",
+            CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+        ),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        let account = ProviderAccount::new(
+            ProviderAccountId::new(id).unwrap(),
+            ProviderKind::new("openai").unwrap(),
+            id.to_owned(),
+            None,
+            kind.to_owned(),
+            CredentialRevision::new(1).unwrap(),
+            None,
+        )
+        .with_account_facts(
+            true,
+            CredentialState::Ready,
+            QuotaState::unknown(),
+            None,
+            None,
+        );
+        let credential = CodexCredentialCodec::encode_complete(CodexCredentialData::OAuth(
+            CodexOAuthCredentialData {
+                transport: ResponsesTransport::Http,
+                schema_version: 1,
+                principal: None,
+                installation_id: Uuid::new_v4().to_string(),
+                access_token: "test-oauth-access".to_owned(),
+                refresh_token: Some("test-refresh".to_owned()),
+                id_token: None,
+                oauth_client_id: Some("test-client".to_owned()),
+                oauth_scope: Some("chatgpt.tokens.use.direct".to_owned()),
+                authentication_kind: kind.to_owned(),
+                cookies: Vec::new(),
+            },
+        ))
+        .unwrap();
+        store
+            .create_account(NewProviderAccount {
+                account: account.clone(),
+                credential,
+                model_access: None,
+            })
+            .await
+            .unwrap();
+        let config = valid_config();
+        let bundle = provider_openai::initialize(
+            config.config.clone(),
+            provider_ports_with(Arc::clone(&store), Arc::new(TestOAuthPending::default())),
+        )
+        .await
+        .unwrap();
+        let admin = bundle.admin_provider();
+        let material = |transport| {
+            ProviderDocument::new(OpaqueProviderData::new(
+                json!({"transport":transport}).as_object().unwrap().clone(),
+            ))
+        };
+        assert!(
+            admin
+                .prepare_rotation(PrepareCredentialRotation {
+                    account: account_record(&account),
+                    provider_material: material("http"),
+                })
+                .await
+                .is_ok()
+        );
+        let error = admin
+            .prepare_rotation(PrepareCredentialRotation {
+                account: account_record(&account),
+                provider_material: material("prefer_websocket"),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ProviderAdminErrorKind::Invalid);
+    }
+}
+
 #[derive(Default)]
 struct RecordingDiagnostics(std::sync::Mutex<Vec<gateway_core::diagnostics::OperationalFailure>>);
 #[async_trait::async_trait]

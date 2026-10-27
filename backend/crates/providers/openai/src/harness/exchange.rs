@@ -138,14 +138,17 @@ pub(crate) async fn forward(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("text/event-stream");
-    if send_head(
-        io.stdin,
-        http_id,
-        status,
-        &[(String::from("content-type"), content_type.to_owned())],
-    )
-    .await
-    .is_err()
+    let mut response_headers = vec![(String::from("content-type"), content_type.to_owned())];
+    if let Some(retry_after) = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+    {
+        response_headers.push((String::from("retry-after"), retry_after.to_owned()));
+    }
+    if send_head(io.stdin, http_id, status, &response_headers)
+        .await
+        .is_err()
     {
         return Err(HarnessError::Upstream);
     }

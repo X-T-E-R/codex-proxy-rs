@@ -546,6 +546,11 @@ impl CodexCredentialAdmin {
         }
         let connection: Connection = serde_json::from_value(material)
             .map_err(|_| CodexCredentialAdminError::InvalidInput)?;
+        if super::harness_oauth::is_harness_kind(current.account.authentication_kind())
+            && connection.transport != ResponsesTransport::Http
+        {
+            return Err(CodexCredentialAdminError::InvalidInput);
+        }
         let mut data = CodexCredentialCodec::decode_complete(&current.credential)
             .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
         data.oauth_mut()

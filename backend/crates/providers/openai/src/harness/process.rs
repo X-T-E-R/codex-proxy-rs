@@ -373,6 +373,30 @@ async fn spawn_worker(
     })
 }
 
+fn scope_harness_history_ids(body: &mut Value, installation_id: &str) {
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        let Some(fields) = item.as_object_mut() else {
+            continue;
+        };
+        let ids: &[(&str, &str)] = match fields.get("type").and_then(Value::as_str) {
+            Some("message") => &[("id", "msg")],
+            Some("function_call") => &[("id", "fc"), ("call_id", "call")],
+            Some("function_call_output") => &[("call_id", "call")],
+            // 加密 reasoning / compaction 的 opaque item ID 与正文共同由同账号绑定保护
+            _ => &[],
+        };
+        for (key, prefix) in ids {
+            if let Some(Value::String(value)) = fields.get_mut(*key) {
+                // 固定类型前缀让源码保留 server-issued item ID，原始前缀也不泄出账号指纹
+                *value = format!("{prefix}_{}", account_scoped_id(installation_id, value));
+            }
+        }
+    }
+}
+
 async fn drive(
     state: &State,
     call: &ResponsesCall,
@@ -412,6 +436,10 @@ async fn drive(
         thread_id: session_id.clone(),
         client_request_id: session_id.clone(),
     };
+    let mut scoped_body = call.responses_body.clone();
+    if let Some(body) = scoped_body.as_mut() {
+        scope_harness_history_ids(body, &installation_id);
+    }
     let payload = protocol::CallPayload {
         harness: match call.harness {
             ResponsesHarness::OpenCode => "opencode",
@@ -422,7 +450,7 @@ async fn drive(
         session_id: &session_id,
         request_id: &request_id,
         bearer: call.bearer.expose_secret(),
-        responses_body: call.responses_body.as_ref(),
+        responses_body: scoped_body.as_ref(),
         prompt: &call.prompt,
         instructions: call.instructions.as_deref(),
         max_output_tokens: call.max_output_tokens,
