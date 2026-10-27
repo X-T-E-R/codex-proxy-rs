@@ -365,9 +365,10 @@ Responses WebSocket 接受文本消息，`response.create` 在同一连接串行
 `interrupted` 时，才按官方中断语义保留原连接续接能力。部分输出是否被丢弃以上游终态为准。
 控制帧发送成功不等于上游已确认中断；若上游仍返回 `response.completed`，按正常完成处理
 
-OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选择上游 WebSocket；
+Codex OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选择上游 WebSocket；
 可将账号上游传输方式设为 `http`，固定使用 HTTP/SSE。API Key 账号默认使用 HTTP/SSE，
-也可配置 `prefer_websocket`。必须依赖 WS 的协议预热、非持久化新链和连接内续接不使用 HTTP-only 账号。
+也可配置 `prefer_websocket`。必须依赖上游 WS 的协议预热、非持久化新链和连接内续接不使用 HTTP-only 账号。
+OpenCode 和 pi OAuth 账号固定使用源库的 HTTP/SSE 路径，不接受 `prefer_websocket` 账号设置；下游仍可使用 HTTP 或 WebSocket。携带 Codex turn-state 或 WS Responses Lite 状态的请求只选择 Codex 账号；已经绑定 OpenCode 的续接携带该状态时要求客户端重放完整历史。
 客户端配置的 `supports_websockets` 只控制第一段连接，不是服务端传输策略开关。
 上游在响应终态前发送 Close 1000 仍属于失败，不能按“正常关闭”计为成功
 
@@ -380,11 +381,17 @@ Codex OAuth backend 的候选上游为 WS 时，无 `previous_response_id` 的�
 该阈值为已观察到的上游消息大小边界预留余量，不是网关输入长度上限或 OpenAI 公布的统一限制；
 API Key 账号、小请求、显式 warmup、未知外部 previous ID 和持久化续接不因该大小策略改用 HTTP
 
-OAuth 的大 connection-local WS 续接，以及 HTTP `store=false` 成功后标记为 `ReplayRequired`
+Codex OAuth 的大 connection-local WS 续接，以及 HTTP `store=false` 成功后标记为 `ReplayRequired`
 的 WS 增量，均在发送前返回 `status: 400 / previous_response_not_found`。客户端应清除旧 ID，
 携带完整历史及工具调用／输出重试。官方 Codex 支持重连 WS 后完整重发，也可能按自身重试预算
 切到 HTTP；其他客户端需要自行实现此合同。代理不缓存 transcript，不把增量输入当作独立新链，
 连接内续接失去原连接时仍需客户端恢复；HTTP 链后续步骤可能增加一次恢复信号、重连及全量上传
+
+OpenCode OAuth 的 `store:true` 返回带版本化域标记的公开 response ID。客户端将该 ID 放在后续
+`previous_response_id`；网关查到原 pin 后只向同一账号发送原始上游 ID。pin 丢失或原账号、凭据版本
+不再可用时，在发送前返回 `400 / previous_response_not_found`；客户端须去掉旧 ID 并携完整历史重放。
+pin 属于其他 Client Key 时拒绝该调用方访问，不透露账号；该公开 ID 不会交给 Codex 或其他账号。
+pi 固定源码使用 `store:false`；`store:true` 新链在选号时排除 pi，固定到 pi 账号的请求在发送前拒绝。
 
 已建立模型执行的 Responses、Images 和 Search HTTP 响应按以下规则返回关联 ID：
 `x-gateway-request-id` 为模型执行 ID；`x-request-id` 保留有效上游值，只有上游
@@ -405,13 +412,13 @@ HTML 或截断正文当作 message。
 `GET /v1/models` 默认返回 OpenAI 兼容列表 `{"object": "list", "data": [...]}`；请求携带非空
 `client_version` query 参数（Codex 客户端）时改为返回 Codex 专用目录合同 `{"models": [...]}`
 
-OpenAI Provider 按客户端传入的 `client_version` 请求上游目录，完整保留每个模型 JSON 对象，包括
+Codex OAuth 账号按客户端传入的 `client_version` 请求上游目录，完整保留每个模型 JSON 对象，包括
 `base_instructions`、`model_messages`、`service_tiers`、工具与能力字段，以及未知嵌套字段、显式 `null`
-和字段缺失的区别。
-API Key 上游返回完整 Codex `models` 目录时沿用该合同；仅返回普通 `data` 模型列表时使用通用画像，
-未提供的推理能力保持未知，不补充推理档位。
-模型别名仅替换 `slug`，不替换上游展示名、提示词、能力或 `priority`；保持原生模型顺序，新增别名附在后面。
-目录按当前路由快照的模型存在性及账号模型政策过滤，避免公布已知无法路由的模型；新模型需待后台目录对账后进入列表。
+和字段缺失的区别。API Key 上游返回完整 Codex `models` 目录时沿用该合同；仅返回普通 `data` 模型列表时使用通用画像，未提供的推理能力保持未知，不补充推理档位。
+
+OpenCode 与 pi 的新 OAuth 账号使用随发行包固定的源目录：OpenCode 的 8 个基础模型及其 8 个 `-fast` 变体、pi 的 42 个 chat 模型。它们以通用画像进入 Codex 客户端目录，不伪造 Codex 原生模型对象；账号模型权限仍可收窄集合。OpenCode 的 `-fast` 是模型变体而非上游 slug，实际请求发送基础模型和有效 `service_tier`；该目录随固定源码和发行包更新，不依赖运行机访问 models.dev。
+
+用户配置的模型别名仅替换 `slug`，不替换上游展示名、提示词、能力或 `priority`；保持原生模型顺序，新增别名附在后面。目录按当前路由快照的模型存在性及账号模型政策过滤，避免公布已知无法路由的模型；Codex 新模型需待后台目录对账，固定 harness 新模型需随源码版本更新后进入列表。
 xAI 没有 Codex 原生目录，使用官方 CLI proxy 当前目录生成通用画像。推理菜单读取
 `reasoning_efforts` 对象列表，默认值只取菜单中的显式标记；缺失时保持未知
 
@@ -1132,7 +1139,7 @@ OpenAI 新建授权可以带 `harness`，值为 `codex`、`opencode` 或 `pi`。
 - OAuth 文件导入接受 camelCase 与 snake_case 的三个 token 字段，内部统一保存为
   `accessToken`、`refreshToken`、`idToken`，不接受含义模糊的 `token`。
   仅有 refresh token 时先换取 access token
-- 普通 OAuth 的身份补全复用官方 `token_data.rs::parse_chatgpt_jwt_claims`：优先解析 `idToken`，缺失字段再由
+- Codex OAuth 的身份补全复用官方 `token_data.rs::parse_chatgpt_jwt_claims`：优先解析 `idToken`，缺失字段再由
   `accessToken` 补齐；`email` 优先 JWT 顶层值、其次 `https://api.openai.com/profile.email`，用户 ID
   优先 `chatgpt_user_id`、其次 `user_id`。该路径不调用 `whoami`，也不信任导入文档顶层的
   `userId/accountId`
@@ -1144,10 +1151,10 @@ OpenAI 新建授权可以带 `harness`，值为 `codex`、`opencode` 或 `pi`。
   PAT 格式无效、被上游拒绝、验证服务不可用和身份响应无效，不回显令牌或原始上游响应。
   PAT 不保存附带的 refresh token、ID token 或推测的过期时间，不参加 OAuth RT 刷新；
   失效后需取得新 PAT 再导入
-- 首次 OAuth 保留回调 `state`、PKCE 与官方 token exchange，并持久化 `idToken`、`accessToken`、
+- Codex OAuth 首次授权保留回调 `state`、PKCE 与官方 token exchange，并持久化 `idToken`、`accessToken`、
   `refreshToken`。刷新响应中的三个 token 字段均按官方语义独立轮换：返回新值时替换，省略时分别保留
-  现值。重新授权也保留这些回调保护，但只轮换目标账号的 token。回调地址只承载 `code`/`state`，
-  不以 host/path 形式作为拒绝条件
+  现值。重新授权也保留这些回调保护，但只轮换目标账号的 token。Codex 回调地址只承载 `code`/`state`，
+  不以 host/path 形式作为拒绝条件；OpenCode 和 pi 回调按前述授权流程核对固定的 origin/path
 - OAuth 账号文件导入和 OAuth complete（包括重新授权）在 credential 提交后后台尝试一次额度观测，不等待
   观测完成才返回成功。观测失败只记录告警，不回滚已提交的账号；手工或后台 RT 刷新只更新 token，
   不隐式等同于手工额度刷新，也不更新既有账号资料或 OAuth principal。xAI 导入与 OAuth complete
@@ -1354,7 +1361,8 @@ GET 和 POST 均返回 `enabled`、`leadMinutes`、`nextDiscoveryAtDisplay`、`n
 全局 `mode` 为 `default`、`enabled` 或 `disabled`，默认 `default` 保留原请求/分组决定；账号 `mode` 为
 `inherit`、`enabled` 或 `disabled`。账号显式配置覆盖全局，但分组 `disabled` 仍禁止快速模式。
 生效后仅对支持 priority 的 OpenAI 推理请求设置 `service_tier=priority`，保留显式 flex 等非默认档位，
-不用于 Images、独立 Search 或 xAI。HTTP/WS 共用所选账号策略，同一次请求的同账号重试保持冻结值
+不用于 Images、独立 Search 或 xAI。HTTP/WS 共用所选账号策略，同一次请求的同账号重试保持冻结值。
+OpenCode 固定目录的 `-fast` 是基础模型的变体而非上游 slug：缺失或默认档位按变体发送 `priority`；最终 Fast 关闭时，显式 `priority` 改为 `default`，缺省档位按基础模型默认值发送。显式 `flex`、`ultrafast` 等非默认档位仍保持原值。pi 与原 Codex 路径不使用这组变体映射
 
 全局 `autoOffOnQuotaReset` 为布尔值，默认 `false`；账号该字段为 `null` 时继承全局，`true/false`
 显式覆盖。账号读值另含 `effectiveMode`、`effectiveAutoOffOnQuotaReset`、`global` 和

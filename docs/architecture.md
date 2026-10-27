@@ -500,11 +500,13 @@ xAI Provider 负责 Codex custom 工具与 Grok function 工具的双向转换�
 
 ### OpenCode 与 pi Responses
 
-OpenAI Provider 拥有 OpenCode 与 pi 的 Responses worker。Provider 启动 Node 进程，并持有上游 HTTP、账号出站代理和响应体窗口。worker 直接执行固定提交的上游 TypeScript：OpenCode `ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17`，pi `f9daca3480732d0042b1df3a6e27221f597a620d`。OAuth、Responses 正文和工具 ID 规则留在这两份源码里，不在 Rust 中另写一套。
+OpenAI Provider 拥有 OpenCode 与 pi 的 Responses worker。Provider 启动 Node 进程，并持有上游 HTTP、账号出站代理和响应体窗口。worker 将已选号的 Responses 输入转换为两份固定 TypeScript 源码的调用形状，由源码生成出站正文、请求头与工具事件：OpenCode `ab4d1f3ab1a05278b4d0392124b9e7f1c8131f17`，pi `f9daca3480732d0042b1df3a6e27221f597a620d`。OAuth 换票和刷新同样复用这两份源码；账号调度、ID 隔离与受管拨号留在网关。
 
 OpenCode route 的默认 transport 是 WebSocket。这条路径改用同一协议导出的 HTTP/SSE transport，请求不携带 `openai-beta`。pi 在 `baseUrl` 恰好为 `https://api.openai.com/v1` 且凭据不以 `sk-` 开头时，按上游规则省略 `max_output_tokens`、`temperature` 和 `prompt_cache_retention`。现有 Codex OAuth 仍经过 `encode_generate_request`，不会仅因 User-Agent 进入这条路径。
 
-调用方提供已经决定的有效 `service_tier`、这一次执行的 request ID、原始会话 ID、可选的原始 parent/fork affinity，以及选定账号的持久 `installation_id`。桥在进入两份源库之前用 `account_scoped_id(installation_id, 原值)` 把会话和 affinity 各映射一次，与 Codex 出站关联同一算法；已经映射过的值不能再送进来。request ID 只关联这次进程帧，并写入 OpenCode `LLMRequest.id`，不参与这次映射。OpenCode 的 `session-id` 使用映射后的 affinity，缺省时使用映射后的当前会话 ID；`thread-id` 和 `x-client-request-id` 都是映射后的当前会话 ID，同一 `installation_id` 的后续 step 重复它们。pi 的 `session_id`、`x-client-request-id` 和 `prompt_cache_key` 同样跟随该会话 ID。换账号必须换另一个 `installation_id`。桥不生成源码没有的逐请求指纹头，也不从访问令牌推导账号 ID。这个 `installation_id` 不是安装级 host ID，OAuth client ID 也不在这条调用上。Codex `scope_headers` 同时映射连字符 `session-id` 和 pi 的下划线 `session_id`。这条桥不调用 `normalize_codex_request_body`，也不根据模型目录改写档位。账号上的 Fast 冻结仍留在请求路径。Provider 选号仍由调用方在调用前完成。
+Provider 先选号并冻结账号 Fast 策略，再向桥传入本次 request ID、原始会话 ID、可选 parent/fork affinity 和账号持久 `installation_id`。桥用 `account_scoped_id(installation_id, 原值)` 各映射一次会话、affinity 与显式缓存键；已映射的值不再送入这一步。request ID 仅关联本次调用并写入 OpenCode `LLMRequest.id`。OpenCode 的 `session-id` 使用映射后的 affinity，缺省时使用当前会话 ID；`thread-id` 和 `x-client-request-id` 均为当前会话 ID，跨同账号 step 复用。pi 的 `session_id` 与 `x-client-request-id` 跟随当前映射会话；没有显式缓存键时源码由该会话派生 `prompt_cache_key`，有显式键时仅缓存正文使用账号映射后的键，不改变两个会话头。换账号更换 `installation_id`，它不同于安装级 host ID 或 OAuth client ID；桥不从访问令牌推导账号身份，也不生成源码没有的逐请求指纹头。
+
+新路径不调用 Codex 的 `normalize_codex_request_body`。OpenCode 固定目录中的八个 `-fast` 项是变体，出站改用对应基础模型；缺省或默认档位使用 `priority`，客户端显式 `flex` 等非默认档位保留。账号或分组 Fast 关闭时，显式 `priority` 改为 `default`，缺省档位沿用基础模型默认值。Codex 原路径不使用该变体映射。
 
 pi 的 `apiKey` 是调用方传入的账号访问令牌。令牌不以 `sk-` 开头时源码省略 `max_output_tokens`、`temperature` 和长缓存字段，仍写入 `service_tier`；以 `sk-` 开头时保留这些字段。桥不用占位 `unused` 或下游 API key 代替账号令牌。
 
@@ -512,15 +514,15 @@ pi 的 `apiKey` 是调用方传入的账号访问令牌。令牌不以 `sk-` 开
 
 一次调用超时或取消后，桥取消该次 worker 调用和它已经发出的上游流，并等到该次调用的帧结束，才允许同一会话开始下一次调用。旧调用没有在限时内结束时，桥重启 worker。下一次调用不读取上一轮的帧、流或令牌。
 
-事件按调用方给出的窗口交付。窗口耗尽时 worker 等待，调用方取走一条事件后才继续，并卸下这次等待挂上的取消监听；取消会打断这次等待。响应体窗口只限制尚未消费的响应字节，不代替事件窗口。调用方通过响应流逐条取走事件，桥不在内存里累计整次响应。
+请求正文通过受管分块帧送入 worker 和出站 HTTP，不受单帧 8 MiB 上限截断。事件按调用方给出的窗口交付；窗口耗尽时 worker 等待，调用方取走一条事件后才继续，取消会打断等待。响应体窗口只限制尚未消费的响应字节，不代替事件窗口。调用方通过响应流逐条取走事件，桥不在内存里累计整次响应。
 
 发往上游之前，Rust 核对原始 URL 的协议是 `https`、主机是 `api.openai.com`，路径是 `/v1` 或以 `/v1/` 开头，并且请求里恰好有一个值为该次账号令牌的 `Authorization`。其他认证头或重复的认证头会拒绝发送。测试回环地址只在这道核对通过之后替换目标。
 
 worker 启动时报告实际加载的源码文件。Rust 用仓库里的 `source-manifest.json` 核对 OpenCode 与 pi 的提交，以及每个加载文件的路径和 sha256。文件不在清单中或内容不一致时拒绝启动。清单包含这条路径会动态导入的源码，不只是入口文件。
 
-当前调用携带一轮文本提示。事件保留源码给出的原文，历史、工具参数、reasoning 和 usage 仍从该原文读取，完整接入不更换调用入口。
+完整输入历史、函数工具及关联 ID、reasoning 和可表达的媒体内容进入源库的 transcript 转换；不能表达的选项或工具限制在发送前拒绝。事件保留原始 SSE 与 canonical 事实；账单和账号反馈仍经现有 Provider 链路。OpenCode 的 `store:true` 响应对外使用带域标记的 ID，Core 续接 pin 用公开 ID 查找并保留原始上游 ID；续接只允许同一 Client Key、账号、认证通道与凭据版本。pin 丢失时在选号前要求客户端携完整历史重放，不把该 ID 交给旧 Codex。pi 源码固定 `store:false`，显式 `store:true` 在发送前拒绝。
 
-账号选择、凭据事务、管理端和发行镜像都还没有调用该 worker。运行需要 Node.js 22.19.0 或更高版本，以及 worker 目录里按锁文件安装的 `effect`、`openai`、`partial-json`。`runtime` 与 `runtime-prebuilt` 镜像不包含 Node.js 和该 worker。
+Provider 的账号选择、OAuth 凭据事务与管理端直接使用该路径。运行需要 Node.js 22.19.0 或更高版本，以及 worker 锁定的依赖；`runtime` 和 `runtime-prebuilt` 镜像均随发行包内置 Node.js 26.12.0、worker 和固定源码。直接运行归档的路径设置见[部署与运维](../deploy/README.md#镜像升级与源码构建)。
 
 ### 后台账号导入
 
