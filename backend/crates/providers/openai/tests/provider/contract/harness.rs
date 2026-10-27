@@ -623,7 +623,11 @@ async fn selected_harness_completes_fixed_source_mock_and_protects_account_histo
         assert_eq!(threads[1], threads[3]);
         for request in &requests[..4] {
             let sent: Value = serde_json::from_slice(&request.body).expect("upstream JSON");
-            assert_eq!(sent["service_tier"], "priority");
+            if kind == CODEX_AUTHENTICATION_KIND_PI_OPENAI {
+                assert!(sent.get("service_tier").is_none());
+            } else {
+                assert_eq!(sent["service_tier"], "priority");
+            }
             assert_eq!(sent["top_p"], 0.7);
             assert_eq!(sent["parallel_tool_calls"], false);
             assert!(
