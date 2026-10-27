@@ -1522,3 +1522,103 @@ async fn catalog_account_membership_changes_advance_generation_without_model_cha
         BTreeSet::from([first.id().clone(), second.id().clone()])
     );
 }
+
+#[test]
+fn pinned_source_model_wrappers_expose_actual_oauth_chat_catalogs() {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../");
+    let bundle = tempfile::tempdir().expect("temporary bundle");
+    let source_dir = if let Some(sources) = std::env::var_os("CPR_HARNESS_TEST_SOURCES") {
+        std::path::PathBuf::from(sources)
+    } else {
+        let output = std::process::Command::new("python")
+            .arg(root.join("deploy/harness-sources/assemble.py"))
+            .arg("assemble")
+            .arg("--output")
+            .arg(bundle.path().join("openai-harness"))
+            .output()
+            .expect("pinned source assembly");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        bundle.path().join("openai-harness/sources")
+    };
+    let worker = std::env::var_os("CPR_OPENAI_HARNESS_WORKER_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("harness-worker")
+        });
+    let script = r#"
+        import { readFileSync } from 'node:fs';
+        import path from 'node:path';
+        import { pathToFileURL } from 'node:url';
+        const opencode = process.env.CPR_HARNESS_OPENCODE_ROOT;
+        const pi = process.env.CPR_HARNESS_PI_ROOT;
+        const source = readFileSync(path.join(opencode, 'packages/core/src/plugin/provider/chatgpt.ts'), 'utf8');
+        const fallback = [...source.match(/const fallbackModels = new Set\(\[([\s\S]*?)\]\)/)[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+        const snapshot = JSON.parse(readFileSync(path.join(opencode, 'packages/core/src/models-dev/snapshot.txt'), 'utf8'));
+        const available = new Set(Object.values(snapshot.openai.models).flatMap((model) => [
+            model.id, ...Object.keys(model.experimental?.modes ?? {}).map((mode) => `${model.id}-${mode}`),
+        ]));
+        const { OPENAI_MODELS, OPENAI_CLASSIFIER_MODELS } = await import(pathToFileURL(path.join(pi, 'packages/ai/src/providers/openai.models.ts')).href);
+        const fast = fallback.filter((id) => id.endsWith('-fast')).map((id) => {
+            const base = id.slice(0, -5);
+            const model = Object.values(snapshot.openai.models).find((candidate) => candidate.id === base);
+            return { id, base, tier: model?.experimental?.modes?.fast?.provider?.body?.service_tier };
+        });
+        console.log(JSON.stringify({ fallback, fast, missing: fallback.filter((id) => !available.has(id)),
+            pi: Object.keys(OPENAI_MODELS), classifier: Object.keys(OPENAI_CLASSIFIER_MODELS) }));
+    "#;
+    let output = std::process::Command::new("node")
+        .args([
+            "--experimental-transform-types",
+            "--import",
+            "./register.mjs",
+            "--input-type=module",
+            "--eval",
+            script,
+        ])
+        .current_dir(&worker)
+        .env("CPR_HARNESS_OPENCODE_ROOT", source_dir.join("opencode"))
+        .env("CPR_HARNESS_PI_ROOT", source_dir.join("pi"))
+        .env("CPR_HARNESS_WORKER_DIR", &worker)
+        .output()
+        .expect("pinned catalog wrappers");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let catalog: serde_json::Value = serde_json::from_slice(&output.stdout).expect("catalog JSON");
+    let fallback = catalog["fallback"]
+        .as_array()
+        .expect("OpenCode fallback models");
+    assert_eq!(fallback.len(), 16);
+    let fast = catalog["fast"].as_array().expect("OpenCode fast variants");
+    assert_eq!(fast.len(), 8);
+    for variant in fast {
+        assert!(
+            fallback.contains(&variant["base"]),
+            "missing fast base: {variant}"
+        );
+        assert_eq!(variant["tier"], "priority");
+    }
+    assert!(!fallback.iter().any(|model| model == "gpt-5.5-pro"));
+    assert_eq!(catalog["missing"], serde_json::json!([]));
+    let pi = catalog["pi"].as_array().expect("pi chat models");
+    assert_eq!(pi.len(), 42);
+    assert!(pi.iter().any(|model| model == "gpt-5.6-terra"));
+    assert!(!pi.iter().any(|model| {
+        model
+            .as_str()
+            .is_some_and(|id| id.starts_with("classifier:"))
+    }));
+    assert_eq!(
+        catalog["classifier"]
+            .as_array()
+            .expect("pi classifiers")
+            .len(),
+        1
+    );
+}

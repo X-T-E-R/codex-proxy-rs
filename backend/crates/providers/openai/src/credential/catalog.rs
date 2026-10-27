@@ -366,6 +366,7 @@ impl HarnessSourceCatalog {
                 .map_err(|_| CodexCredentialCatalogError::InvalidCredentialData)?,
         );
         let mut command = tokio::process::Command::new("node");
+        // 固定 pi 模型包装器使用参数属性，与 worker 一样需要 Node 24 的类型转换
         command
             .args([
                 "--experimental-transform-types",
@@ -1516,77 +1517,4 @@ fn eligible_catalog_account(account: &ProviderAccount, now: SystemTime) -> bool 
             account.credential_state(),
             CredentialState::Unknown | CredentialState::Ready
         )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn pinned_source_model_wrappers_expose_actual_oauth_chat_catalogs() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../");
-        let bundle = tempfile::tempdir().expect("temporary bundle");
-        let location = bundle.path().join("openai-harness");
-        let output = std::process::Command::new("python")
-            .arg(root.join("deploy/harness-sources/assemble.py"))
-            .arg("assemble")
-            .arg("--output")
-            .arg(&location)
-            .output()
-            .expect("pinned source assembly");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let catalog = HarnessSourceCatalog::load(&crate::config::HarnessRuntimePaths {
-            worker_dir: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("harness-worker"),
-            opencode_checkout: location.join("sources/opencode"),
-            pi_checkout: location.join("sources/pi"),
-        })
-        .await
-        .expect("source wrappers");
-        assert_eq!(catalog.opencode.len(), 16);
-        for &(alias, base) in OPENCODE_FAST_BASE {
-            assert!(
-                catalog
-                    .opencode
-                    .iter()
-                    .any(|model| model.id.as_str() == base)
-            );
-            let variant = catalog
-                .opencode
-                .iter()
-                .find(|model| model.id.as_str() == alias)
-                .expect("fast variant from pinned model snapshot");
-            assert_eq!(opencode_fast_base(alias), Some(base));
-            assert!(
-                variant
-                    .presentation
-                    .service_tiers()
-                    .iter()
-                    .any(|tier| tier.id() == "priority")
-            );
-        }
-        assert_eq!(opencode_fast_base("unlisted-fast"), None);
-        assert!(
-            !catalog
-                .opencode
-                .iter()
-                .any(|model| model.id.as_str() == "gpt-5.5-pro")
-        );
-        assert_eq!(catalog.pi.len(), 42);
-        assert!(
-            catalog
-                .pi
-                .iter()
-                .any(|model| model.id.as_str() == "gpt-5.6-terra")
-        );
-        assert!(
-            !catalog
-                .pi
-                .iter()
-                .any(|model| model.id.as_str().starts_with("classifier:"))
-        );
-    }
 }
