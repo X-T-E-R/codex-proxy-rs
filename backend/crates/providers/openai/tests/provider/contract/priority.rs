@@ -316,7 +316,14 @@ async fn harness_account_priority_policy_freezes_per_account_before_runtime_fail
             ),
         ] {
             let store = Arc::new(MemoryAccountStore::default());
-            super::harness::seed_harness(&store, kind).await;
+            super::harness::seed_harness_with_models(
+                &store,
+                "acct_provider_contract",
+                kind,
+                "test-harness-bearer",
+                vec!["gpt-5.4".to_owned()],
+            )
+            .await;
             let policy = Arc::new(AccountPolicy {
                 mode: Mutex::new(account_mode),
                 calls: AtomicUsize::new(0),

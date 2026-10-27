@@ -19,7 +19,7 @@ async fn seed_harness_as(store: &MemoryAccountStore, id: &str, kind: &str, token
     seed_harness_with_models(store, id, kind, token, Vec::new()).await;
 }
 
-async fn seed_harness_with_models(
+pub(super) async fn seed_harness_with_models(
     store: &MemoryAccountStore,
     id: &str,
     kind: &str,
@@ -370,6 +370,40 @@ fn harness_request_with_fields(
                 .with_service_tiers(vec![ModelServiceTier::new("priority", "fast", "Fast")]),
         ),
     )
+}
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn additional_model_cannot_select_a_different_harness_account() {
+    let store = Arc::new(MemoryAccountStore::default());
+    seed_harness_with_models(
+        &store,
+        "acct_affinity_switch_a",
+        CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+        "source-token",
+        vec!["future-terra".to_owned()],
+    )
+    .await;
+    seed_harness_as(
+        &store,
+        "acct_provider_contract",
+        CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+        "other-token",
+    )
+    .await;
+    let error = provider(&store)
+        .execute(
+            harness_request_with_model("other_account", false, "future-terra", None),
+            harness_attempt(
+                "req_additional_other_account",
+                BTreeSet::from([ProviderAccountId::new("acct_affinity_switch_a").unwrap()]),
+            ),
+        )
+        .await
+        .err()
+        .expect("unregistered harness account cannot be selected");
+    assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
+    assert_eq!(error.send_state(), UpstreamSendState::NotSent);
 }
 
 #[cfg(debug_assertions)]

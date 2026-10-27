@@ -1640,15 +1640,18 @@ fn registered_model_and_alias_only_appear_for_the_source_account_and_its_policy(
             )
             .is_ok()
     );
-    assert!(matches!(
-        snapshot.plan(
-            &alias,
-            &super::operation(),
-            restricted,
-            &RoutingContext::default()
-        ),
-        Err(RoutingError::NoCapableProvider { .. })
-    ));
+    // 发现型 OpenAI 目录不把来源当推理门禁；API Key 可以把目录外模型交给上游。
+    // harness 的实际账号资格由 Provider 选号时继续精确检查。
+    assert!(
+        snapshot
+            .plan(
+                &alias,
+                &super::operation(),
+                restricted,
+                &RoutingContext::default()
+            )
+            .is_ok()
+    );
     assert_eq!(
         snapshot
             .plan(
@@ -1701,4 +1704,13 @@ fn registered_model_and_alias_only_appear_for_the_source_account_and_its_policy(
             .public_models_for_scope(&blocked.all_account_scope())
             .contains(&alias)
     );
+    assert!(matches!(
+        blocked.plan(
+            &alias,
+            &super::operation(),
+            blocked.all_account_scope(),
+            &RoutingContext::default()
+        ),
+        Err(RoutingError::NoCapableProvider { .. })
+    ));
 }

@@ -1217,16 +1217,21 @@ impl RuntimeSnapshot {
             {
                 continue;
             }
-            // 目录的来源账号必须也位于本 Key 范围内；映射和显式别名按目标模型裁决。
-            if !self.catalog_model_allowed_for_scope_with_policy(
-                provider,
-                public_model,
-                &account_scope,
-                enforce_account_model_policy,
-            ) {
+            // OpenAI 发现型目录的来源只约束展示：API Key 可透传未被自身目录列出的模型；
+            // harness 在选定账号时按固定来源/额外模型精确校验，不能在此按合并目录误挡 API Key。
+            // 完整目录及其他 Provider 保持来源账号约束；映射/别名按目标模型裁决。
+            if (provider.as_str() != "openai"
+                || self.exhaustive_provider_catalogs.contains(provider))
+                && !self.catalog_model_allowed_for_scope_with_policy(
+                    provider,
+                    public_model,
+                    &account_scope,
+                    enforce_account_model_policy,
+                )
+            {
                 continue;
             }
-            // 管理诊断仍跳过账号限制，但不跳过模型的来源归属。
+            // 管理诊断仍跳过账号限制，但不跳过完整目录的模型来源。
             if enforce_account_model_policy
                 && !account_scope.allows_provider_model(provider, upstream_model.as_str())
             {
