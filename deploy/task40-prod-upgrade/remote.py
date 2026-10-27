@@ -470,7 +470,11 @@ class Deployment:
         require(expected is not None, 'gate_expected_runtime_missing')
         require(all(current[k] == expected[k] for k in ('id', 'imageId', 'startedAt')) and
                 current['running'] and current['health'] == 'healthy' and health(), 'gate_runtime_drift')
-        require(pin(BASE / '.env')[2] == (self.m['image'] if phase == 'candidate_verified_pending_gate' else OLD_IMAGE), 'gate_pin_drift')
+        target_pin = self.m['image'] if phase == 'candidate_verified_pending_gate' else OLD_IMAGE
+        require(pin(BASE / '.env')[2] == target_pin, 'gate_pin_drift')
+        require(self.stamps() == self.file_stamps and
+                opaque_env_digest(BASE / '.env') == self.result['envOpaqueDigest'] and
+                self.effective_image() == target_pin, 'gate_configuration_or_service_image_drift')
         require((self.gate / 'maintenance').read_text() == self.root.name and
                 json.loads((self.gate / 'binding.json').read_text()) == self.binding, 'gate_owner_drift')
         updated = dict(self.binding)
@@ -479,6 +483,10 @@ class Deployment:
         preserve(self.result['beforeFacts'], facts())
         atomic(self.gate / 'binding.json', updated)
         require(json.loads((self.gate / 'binding.json').read_text()) == updated, 'gate_rebind_not_persisted')
+        require(self.stamps() == self.file_stamps and
+                opaque_env_digest(BASE / '.env') == self.result['envOpaqueDigest'] and
+                self.effective_image() == target_pin and pin(BASE / '.env')[2] == target_pin,
+                'gate_configuration_or_service_image_drift')
         (self.gate / 'maintenance').unlink()
         require(not (self.gate / 'maintenance').exists(), 'gate_maintenance_not_released')
         self.result['restartRecoveryGate'] = {'phase': 'rebound', 'runtime': updated['runtime']}
@@ -592,13 +600,16 @@ class Deployment:
         self.result['success'] = phase == 'candidate_verified_pending_gate'
         self.result['rollback'] = phase == 'rollback_verified_pending_gate'
 
-    def resume(self, retry_readonly=False):
-        # 每次接管保留独立终态；只读阻断才准许同 run 再次取得新 GO
+    def resume(self, retry_readonly=False, active_held=False):
+        # 每次接管保留独立终态；无结果接管以进程退出和未改进度证据重获一次新 GO
         origin = self.root / 'result.json'
-        source = (self.root / 'takeover-result.json' if retry_readonly else
-                  origin if origin.exists() else self.root / 'progress.json')
+        prior = self.root / 'takeover-result.json'
+        if retry_readonly and not prior.exists():
+            retry_evidence(self.root, active_held=active_held)
+        source = prior if retry_readonly and prior.exists() else (
+                 origin if origin.exists() else self.root / 'progress.json')
         initial = json.loads(source.read_text())
-        if retry_readonly:
+        if retry_readonly and prior.exists():
             require(initial.get('retryableReadOnly') is True and
                     initial.get('takeoverCommandsIssued') is False, 'takeover_retry_not_readonly')
         require(initial['phase'] not in ('deployed', 'rolled_back_same52', 'blocked_unchanged',
@@ -735,16 +746,67 @@ class Deployment:
             if lock is not None:
                 self.result['restartRecoveryGate'] = {'phase': 'maintenance_requires_operator' if
                     (self.gate / 'maintenance').exists() else 'released_requires_operator'}
-            self.result['retryableReadOnly'] = (not action_started and lock is not None and
-                maintenance_owner == self.root.name and
-                (self.gate / 'maintenance').exists() and
-                (self.gate / 'maintenance').read_text() == self.root.name)
+            # 首个只读探测可在拿闸锁前失败；先留零动作证据，下次重新取双锁核现场
+            maintenance = BASE / '.runtime/restart-recovery/maintenance'
+            try:
+                owned_maintenance = maintenance.read_text() == self.root.name
+            except OSError:
+                owned_maintenance = False
+            self.result['retryableReadOnly'] = not action_started and owned_maintenance
         finally:
             if lock is not None:
                 lock.close()
             self.result['takeoverFinishedAt'] = now()
             atomic(self.root / ('takeover-retry-result.json' if retry_readonly else 'takeover-result.json'), self.result)
         return self.result
+
+
+def retry_evidence(root, active_held=False):
+    # 控制器和执行器分别取得锁检查：无结果的首次接管必须证实进程退出且进度原封不动
+    active = None
+    try:
+        if not active_held:
+            active = (BASE / '.runtime/deployments/task40-active.lock').open('r')
+            fcntl.flock(active, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with (BASE / '.runtime/restart-recovery/lifecycle.lock').open('r') as gate_lock:
+            fcntl.flock(gate_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            require((BASE / '.runtime/restart-recovery/maintenance').read_text() == root.name,
+                    'takeover_retry_gate_owner_drift')
+            claim = json.loads((root / 'takeover-attempt-claimed.json').read_text())
+            require(type(claim.get('pid')) is int and claim['pid'] > 1 and
+                    claim.get('protocol') == 'readonly_progress_barrier_v1',
+                    'takeover_original_process_identity_unproven')
+            try:
+                os.kill(claim['pid'], 0)
+            except ProcessLookupError:
+                pass
+            else:
+                raise RuntimeError('takeover_original_process_not_confirmed_exited')
+            prior = root / 'takeover-result.json'
+            if prior.exists():
+                value = json.loads(prior.read_text())
+                require(value.get('retryableReadOnly') is True and
+                        value.get('takeoverCommandsIssued') is False,
+                        'takeover_retry_not_readonly')
+                mode = 'read_only_result'
+            else:
+                source = root / claim.get('sourceFile', '')
+                progress = root / 'progress.json'
+                require(claim.get('sourceFile') in ('progress.json', 'result.json') and
+                        source.name == ('result.json' if (root / 'result.json').exists() else 'progress.json') and
+                        source.exists() and progress.exists() and
+                        not (root / 'progress.json.tmp').exists() and
+                        not (root / 'takeover-result.json.tmp').exists() and
+                        not (root / (source.name + '.tmp')).exists() and
+                        hashlib.sha256(source.read_bytes()).hexdigest() == claim.get('sourceDigest') and
+                        hashlib.sha256(progress.read_bytes()).hexdigest() == claim.get('progressDigest'),
+                        'takeover_progress_changed_or_unknown_no_reissue')
+                mode = 'orphaned_read_only'
+            fcntl.flock(gate_lock, fcntl.LOCK_UN)
+            return {'phase': 'retry_admissible', 'mode': mode}
+    finally:
+        if active is not None:
+            active.close()
 
 
 def baseline():
@@ -814,13 +876,16 @@ def verify(root):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['run', 'resume', 'receipt', 'verify'])
+    parser.add_argument('action', choices=['run', 'resume', 'retry-admission', 'receipt', 'verify'])
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--GO', action='store_true')
     parser.add_argument('--retry-readonly', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     app = Deployment(args.root)
+    if args.action == 'retry-admission':
+        print(json.dumps(retry_evidence(args.root)))
+        return
     if args.action == 'receipt':
         retry = args.root / 'takeover-retry-result.json'
         first = args.root / 'takeover-result.json'
@@ -851,16 +916,21 @@ def main():
             require(args.GO and (args.root / 'attempt-claimed.json').exists() and launch.exists() and
                     not result_path.exists(), 'new_takeover_GO_and_claim_required')
             if retry:
-                value = json.loads(prior.read_text())
-                require((args.root / 'takeover-attempt-claimed.json').exists() and
-                        value.get('retryableReadOnly') is True and value.get('takeoverCommandsIssued') is False,
-                        'takeover_retry_not_readonly')
+                retry_evidence(args.root, active_held=True)
             else:
                 require(not prior.exists(), 'takeover_already_finished')
+            source = prior if retry and prior.exists() else (
+                args.root / 'result.json' if (args.root / 'result.json').exists() else args.root / 'progress.json')
+            progress = args.root / 'progress.json'
             claim = args.root / ('takeover-retry-attempt-claimed.json' if retry else 'takeover-attempt-claimed.json')
             with claim.open('x') as file:
-                json.dump({'at': now(), 'singleAttempt': True}, file)
-            result = app.resume(retry_readonly=retry)
+                json.dump({'at': now(), 'pid': os.getpid(), 'protocol': 'readonly_progress_barrier_v1',
+                           'sourceFile': source.name,
+                           'sourceDigest': hashlib.sha256(source.read_bytes()).hexdigest(),
+                           'progressDigest': hashlib.sha256(progress.read_bytes()).hexdigest()}, file)
+                file.flush()
+                os.fsync(file.fileno())
+            result = app.resume(retry_readonly=retry, active_held=True)
             print(json.dumps({'phase': result['phase'], 'success': result['success'], 'rollback': result['rollback']}))
             return
         with (args.root / 'launch.guard').open('a') as guard:

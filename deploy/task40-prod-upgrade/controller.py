@@ -140,6 +140,15 @@ print(p.stdout.decode() if p.returncode==0 else json.dumps({'phase':'verificatio
     raise RuntimeError('fresh_receipt_unverified_inspect_run')
 
 
+def retry_admission(root):
+    code = """import json,subprocess
+r=payload
+p=subprocess.run(['python3',r+'/remote.py','retry-admission','--root',r],capture_output=True,timeout=20)
+print(p.stdout.decode() if p.returncode==0 else json.dumps({'phase':'retry_blocked'}))
+"""
+    return ssh(code, root, timeout=35)
+
+
 def start_remote_takeover(root, retry=False):
     code = """import fcntl,json,os,subprocess
 from pathlib import Path
@@ -151,8 +160,8 @@ with active.open('r') as lock:
  fcntl.flock(lock,fcntl.LOCK_UN)
 assert (r/'attempt-claimed.json').exists()
 if retry:
- prior=json.loads((r/'takeover-result.json').read_text())
- assert (r/'takeover-attempt-claimed.json').exists() and prior.get('retryableReadOnly') is True and prior.get('takeoverCommandsIssued') is False
+ check=subprocess.run(['python3',str(r/'remote.py'),'retry-admission','--root',str(r)],capture_output=True,timeout=15)
+ assert check.returncode==0 and json.loads(check.stdout).get('phase')=='retry_admissible'
  assert not (r/'takeover-retry-result.json').exists()
 else:
  assert not (r/'takeover-result.json').exists() and not (r/'takeover-launch-claimed.json').exists()
@@ -265,9 +274,14 @@ def takeover(run_dir):
             observed = receipt(j['remoteRoot'])
             retry = bool(j.get('takeoverIntent'))
             if retry:
-                remote.require(observed['phase'] == 'recovery_requires_operator' and
-                               observed.get('retryableReadOnly') is True and
-                               observed.get('takeoverCommandsIssued') is False,
+                pending = observed['phase'] == 'takeover_pending' and observed.get('attemptClaimed') is True
+                completed = (observed['phase'] == 'recovery_requires_operator' and
+                             observed.get('retryableReadOnly') is True and
+                             observed.get('takeoverCommandsIssued') is False)
+                remote.require(pending or completed, 'takeover_retry_requires_confirmed_no_new_actions')
+                evidence = retry_admission(j['remoteRoot'])
+                remote.require(evidence.get('phase') == 'retry_admissible' and
+                               evidence.get('mode') == ('orphaned_read_only' if pending else 'read_only_result'),
                                'takeover_retry_requires_confirmed_no_new_actions')
                 j['takeoverRetryIntent'] = True
             else:

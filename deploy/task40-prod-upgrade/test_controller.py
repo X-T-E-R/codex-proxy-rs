@@ -1,8 +1,10 @@
 """隔离模拟 Docker/PG/恢复闸的单次切换与失败收据；绝不连接 lag。"""
 import datetime as dt
+import hashlib
 import importlib.util
 import itertools
 import json
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -279,6 +281,40 @@ class ContractTest(unittest.TestCase):
             self.assertTrue((site.gate / 'maintenance').exists())
             self.assertEqual(json.loads((site.run / 'result.json').read_text())['success'], False)
 
+    def test_gate_release_rechecks_stamps_and_target_service_image(self):
+        for drift in ('file', 'service'):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp, MockSite(tmp) as site:
+                original = remote.Deployment.save
+                def change_after_candidate(app, phase):
+                    original(app, phase)
+                    if phase == 'candidate_verified_pending_gate':
+                        if drift == 'file':
+                            (site.base / 'docker-compose.yml').write_text('changed')
+                        else:
+                            site.compose_target_override = remote.OLD_IMAGE
+                with patch.object(remote.Deployment, 'save', new=change_after_candidate):
+                    result = site.deploy()
+                self.assertEqual(result['phase'], 'recovery_requires_operator')
+                self.assertFalse(result['success'])
+                self.assertEqual(result['restartRecoveryGate']['phase'], 'maintenance_requires_operator')
+                self.assertTrue((site.gate / 'maintenance').exists())
+                binding = json.loads((site.gate / 'binding.json').read_text())
+                self.assertEqual(binding['runtime']['id'], site.old['id'])
+
+    def test_gate_still_holds_maintenance_if_compose_drifts_after_binding_write(self):
+        with tempfile.TemporaryDirectory() as tmp, MockSite(tmp) as site:
+            original = remote.atomic
+            def change_after_binding(path, value):
+                original(path, value)
+                if path == site.gate / 'binding.json' and value['runtime']['revision'] == SOURCE:
+                    site.compose_target_override = remote.OLD_IMAGE
+            with patch.object(remote, 'atomic', side_effect=change_after_binding):
+                result = site.deploy()
+            self.assertEqual(result['phase'], 'recovery_requires_operator')
+            self.assertFalse(result['success'])
+            self.assertEqual(result['restartRecoveryGate']['phase'], 'maintenance_requires_operator')
+            self.assertTrue((site.gate / 'maintenance').exists())
+
     def test_maintenance_owner_lost_before_terminal_is_operator_not_success(self):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp) as site:
             original = remote.Deployment.save
@@ -392,6 +428,27 @@ class ContractTest(unittest.TestCase):
             self.assertFalse(any(e[0] == 'python3' for e in site.events))
             self.assertTrue((site.gate / 'maintenance').exists())
 
+    def test_readonly_image_probe_failure_before_gate_lock_allows_fresh_retry(self):
+        with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'stop_unknown_stopped') as site:
+            site.deploy()
+            (site.run / 'attempt-claimed.json').touch()
+            real_image = site.image
+            calls = itertools.count()
+            def transient_image(value, source):
+                if next(calls) == 0:
+                    raise RuntimeError('command_result_unknown')
+                return real_image(value, source)
+            with patch.object(remote, 'image', side_effect=transient_image):
+                first = remote.Deployment(site.run).resume()
+            self.assertEqual(first['takeoverErrorCode'], 'command_result_unknown')
+            self.assertTrue(first['retryableReadOnly'])
+            self.assertFalse(first['takeoverCommandsIssued'])
+            self.assertTrue((site.gate / 'maintenance').exists())
+            with patch.object(remote, 'set_pin', side_effect=site.set_pin):
+                second = remote.Deployment(site.run).resume(retry_readonly=True)
+            self.assertEqual(second['phase'], 'rolled_back_same52', second.get('takeoverErrorCode'))
+            self.assertEqual(len([e for e in site.events if e[0] == 'python3']), 1)
+
     def test_takeover_rejects_opaque_env_change_before_recovery(self):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'stop_unknown_stopped') as site:
             site.deploy()
@@ -426,6 +483,8 @@ class ContractTest(unittest.TestCase):
                     return remote.Deployment(site.run).resume(retry_readonly=retry)
             with patch.object(controller, 'action_lock', return_value=ctx), \
                  patch.object(controller, 'receipt', side_effect=observed), \
+                 patch.object(controller, 'retry_admission', return_value={
+                     'phase': 'retry_admissible', 'mode': 'read_only_result'}), \
                  patch.object(controller, 'start_remote_takeover', side_effect=launch):
                 first = controller.takeover(site.run)
                 self.assertFalse(first['retryReadOnly'])
@@ -444,6 +503,48 @@ class ContractTest(unittest.TestCase):
                 self.assertEqual(len([e for e in site.events if e[0] == 'python3']), 1)
                 with self.assertRaisesRegex(RuntimeError, 'takeover_run_owner_or_claim_drift'):
                     controller.takeover(site.run)
+
+    def test_orphaned_takeover_needs_dead_pid_unchanged_progress_and_new_go(self):
+        with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'stop_unknown_stopped') as site:
+            site.deploy()
+            (site.run / 'attempt-claimed.json').touch()
+            (site.run / 'takeover-launch-claimed.json').touch()
+            args = ['remote.py', 'resume', '--root', str(site.run), '--GO']
+            with patch.object(sys, 'argv', args), \
+                 patch.object(remote.Deployment, 'resume', side_effect=SystemExit('hard_exit')):
+                with self.assertRaises(SystemExit):
+                    remote.main()
+            claim = json.loads((site.run / 'takeover-attempt-claimed.json').read_text())
+            self.assertEqual(claim['progressDigest'], hashlib.sha256(
+                (site.run / 'progress.json').read_bytes()).hexdigest())
+            self.assertFalse((site.run / 'takeover-result.json').exists())
+            with self.assertRaisesRegex(RuntimeError, 'original_process_not_confirmed_exited'):
+                remote.retry_evidence(site.run, active_held=True)
+            progress_path = site.run / 'progress.json'
+            original_progress = progress_path.read_bytes()
+            progress_path.write_bytes(original_progress + b' ')
+            with patch.object(remote.os, 'kill', side_effect=ProcessLookupError):
+                with self.assertRaisesRegex(RuntimeError, 'progress_changed_or_unknown_no_reissue'):
+                    remote.retry_evidence(site.run, active_held=True)
+            progress_path.write_bytes(original_progress)
+            remote.atomic(site.run / 'controller.json', {'remoteMayHaveStarted': True, 'takeoverIntent': True,
+                'remoteRoot': '/opt/codex-proxy-rs/.runtime/deployments/' + site.run.name})
+            ctx = MagicMock()
+            ctx.__enter__.return_value = None
+            ctx.__exit__.return_value = False
+            with patch.object(remote.os, 'kill', side_effect=ProcessLookupError), \
+                 patch.object(controller, 'action_lock', return_value=ctx), \
+                 patch.object(controller, 'receipt', return_value={'phase': 'takeover_pending', 'attemptClaimed': True}), \
+                 patch.object(controller, 'retry_admission', side_effect=lambda _: remote.retry_evidence(
+                     site.run, active_held=True)), \
+                 patch.object(controller, 'start_remote_takeover', side_effect=lambda _, retry: remote.Deployment(
+                     site.run).resume(retry_readonly=retry, active_held=True)), \
+                 patch.object(remote, 'set_pin', side_effect=site.set_pin):
+                accepted = controller.takeover(site.run)
+            self.assertTrue(accepted['retryReadOnly'])
+            outcome = json.loads((site.run / 'takeover-retry-result.json').read_text())
+            self.assertEqual(outcome['phase'], 'rolled_back_same52', outcome.get('takeoverErrorCode'))
+            self.assertEqual(len([e for e in site.events if e[0] == 'python3']), 1)
 
     def test_readonly_retry_still_never_replays_original_unknown_helper(self):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'recovery_unknown') as site:

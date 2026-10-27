@@ -48,7 +48,7 @@ python -B C:/Programs/AI/MLAIGateWay/outputs/cpr-prod-upstream-20261027/deploy/t
 
 该入口先等原本地 worker 与远端执行锁结束，以 `takeover-launch-claimed.json` 禁止重复接管。若维护闸仍由本 run 持有，接管按精确代际走回退 96c 路径：stop 返回未知但原 ID 已停止时不再 stop；恢复 helper 返回未知时最长只读等待2100秒，只消费**原退出代际**已 `complete` 的 receipt；Compose up 未知时须先确认新容器的镜像/source、ID/StartedAt 归属，不再次 up。若 worker 在重绑并清除维护闸后、写终态前退出，接管只读复核绑定、健康、pin、目标服务镜像、保全及原恢复 receipt，写出本 run 的终态收据，不再次切换。
 
-若首次接管在读取配置或闸状态时失败，`takeover-result.json` 同时记录 `retryableReadOnly=true`、`takeoverCommandsIssued=false`，且该次未声明新动作，先修正偏差（例如将 `.env` 恢复原字节），只读核对本 run 的旧 ID/StartedAt、维护闸 owner、pin 和原命令/receipt，再由父级签**新的恢复 GO** 对同一 `<新run目录>` 再执行上述 `takeover` 一次。第二次使用独立 `takeover-retry-*.json` 收据并重新取得双锁；首次或第二次只要已声明动作、结果未知或身份不明，就不得再发起接管。候选/回退容器身份不明、helper receipt 仍是 `prepared`、stop 未证实退出或恢复闸归属不符时保持当前状态等待人工核实。读取 `receipt` 的 `takeover_pending` 或最终 `takeover-result.json`／`takeover-retry-result.json` 后，再用 `verify` 复核；新的恢复授权不得复用 Task38 receipt、旧实例 ID 或旧 GO
+若首次接管在发出新动作前被镜像、配置或恢复闸只读检查阻断，`takeover-result.json` 同时记录 `retryableReadOnly=true`、`takeoverCommandsIssued=false`；修正偏差（例如恢复 `.env` 原字节）后，父级可签**新的恢复 GO** 对同一 `<新run目录>` 再执行上述 `takeover` 一次。若首次进程在写出收据前退出，`receipt` 显示 `takeover_pending`；第二次接管仅在远端确认原 PID 已退出、执行与生命周期锁已释放、初次 claim 与原 `progress.json`/源收据字节一致且无残余临时写入时准入。两条路径都重新取得双锁，核旧容器 ID/StartedAt、维护闸 owner、pin、配置和原命令/退出代际 receipt。第二次使用独立 `takeover-retry-*.json` 收据；首次或第二次若已有动作声明、结果未知且无法证明零动作、或容器身份不明，不再重复接管。helper receipt 仍是 `prepared`、stop 未证实退出或恢复闸归属不符时保持当前状态等待人工核实。读取 `receipt` 的 `takeover_pending` 或最终 `takeover-result.json`／`takeover-retry-result.json` 后，再用 `verify` 复核；新的恢复授权不得复用 Task38 receipt、旧实例 ID 或旧 GO
 
 测试（不会连接 lag、Docker 或生产 PG）：
 
