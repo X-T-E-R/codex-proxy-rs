@@ -2,7 +2,9 @@
 
 use super::*;
 use futures::FutureExt as _;
-use gateway_core::account::{CredentialRevision, NewProviderAccount, ProviderAccount};
+use gateway_core::account::{
+    AccountAdditionalModels, CredentialRevision, NewProviderAccount, ProviderAccount,
+};
 use provider_openai::credential::{
     CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING, CODEX_AUTHENTICATION_KIND_PI_OPENAI,
     CodexCredentialCodec, CodexCredentialData, CodexOAuthCredentialData, OpenAiSelectionDomain,
@@ -14,6 +16,16 @@ pub(super) async fn seed_harness(store: &MemoryAccountStore, kind: &str) {
 }
 
 async fn seed_harness_as(store: &MemoryAccountStore, id: &str, kind: &str, token: &str) {
+    seed_harness_with_models(store, id, kind, token, Vec::new()).await;
+}
+
+async fn seed_harness_with_models(
+    store: &MemoryAccountStore,
+    id: &str,
+    kind: &str,
+    token: &str,
+    models: Vec<String>,
+) {
     let credential = CodexCredentialCodec::encode_complete(CodexCredentialData::OAuth(
         CodexOAuthCredentialData {
             transport: ResponsesTransport::Http,
@@ -49,7 +61,8 @@ async fn seed_harness_as(store: &MemoryAccountStore, id: &str, kind: &str, token
         None,
         None,
     )
-    .with_refresh_schedule(true, None);
+    .with_refresh_schedule(true, None)
+    .with_additional_models(AccountAdditionalModels::new(models).expect("test model IDs"));
     store
         .create_account(NewProviderAccount {
             account,
@@ -68,7 +81,14 @@ async fn missing_harness_runtime_fails_closed_after_selecting_either_oauth_accou
     ] {
         for websocket in [false, true] {
             let store = Arc::new(MemoryAccountStore::default());
-            seed_harness(&store, kind).await;
+            seed_harness_with_models(
+                &store,
+                "acct_provider_contract",
+                kind,
+                "test-harness-bearer",
+                vec!["gpt-5.4".to_owned()],
+            )
+            .await;
             let payload = ProtocolPayload::json_object(
                 "openai",
                 Map::from_iter([
