@@ -128,6 +128,25 @@ jobs:
           tool: cargo-nextest@0.9.143
           fallback: none
 
+      - name: Setup pinned harness Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.12.0'
+
+      - name: Prepare pinned OpenAI harness tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/cpr-harness-tests"
+          python3 deploy/harness-sources/assemble.py assemble --output "$bundle"
+          npm ci --ignore-scripts --omit=dev --prefix backend/crates/providers/openai/harness-worker
+          {
+            echo "CPR_HARNESS_TEST_SOURCES=$bundle/sources"
+            echo "CPR_OPENAI_HARNESS_WORKER_DIR=$GITHUB_WORKSPACE/backend/crates/providers/openai/harness-worker"
+            echo "CPR_OPENCODE_SOURCE=$bundle/sources/opencode"
+            echo "CPR_PI_SOURCE=$bundle/sources/pi"
+          } >> "$GITHUB_ENV"
+
       - name: Build Rust tests once
         working-directory: backend
         run: |
