@@ -1654,7 +1654,7 @@ fn registered_model_and_alias_only_appear_for_the_source_account_and_its_policy(
             .plan(
                 &alias,
                 &super::operation(),
-                full.clone(),
+                full,
                 &RoutingContext::default()
             )
             .unwrap()

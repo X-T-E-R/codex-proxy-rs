@@ -524,8 +524,10 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 command.enabled,
                 command.concurrency_limit,
                 command.weight,
-                command.model_access.as_ref(),
-                command.additional_models.as_ref(),
+                AccountModelSettings {
+                    access: command.model_access.as_ref(),
+                    additional: command.additional_models.as_ref(),
+                },
                 command.outbound_proxy.as_ref(),
             )
             .await?;
@@ -874,14 +876,18 @@ pub(crate) async fn rotate_provider_account_in_transaction(
     Revision::new(to_u64(next)?)
 }
 
-pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
+struct AccountModelSettings<'a> {
+    access: Option<&'a gateway_core::account::AccountModelAccess>,
+    additional: Option<&'a gateway_core::account::AccountAdditionalModels>,
+}
+
+async fn update_provider_accounts_scheduling_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     account_ids: &[String],
     enabled: Option<bool>,
     concurrency_limit: Option<Option<AccountConcurrencyLimit>>,
     weight: Option<AccountWeight>,
-    model_access: Option<&gateway_core::account::AccountModelAccess>,
-    additional_models: Option<&gateway_core::account::AccountAdditionalModels>,
+    models: AccountModelSettings<'_>,
     outbound_proxy: Option<&gateway_admin::model::proxies::AccountProxySelection>,
 ) -> StoreResult<()> {
     let (proxy_id, proxy) = match outbound_proxy {
@@ -907,9 +913,9 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     .bind(outbound_proxy.is_some())
     .bind(proxy.as_ref().map(gateway_core::account::OutboundProxy::expose_url))
     .bind(proxy_id)
-    .bind(model_access.map(sqlx::types::Json))
+    .bind(models.access.map(sqlx::types::Json))
     .bind(concurrency_limit.is_some())
-    .bind(additional_models.map(sqlx::types::Json))
+    .bind(models.additional.map(sqlx::types::Json))
     .fetch_all(&mut **transaction)
     .await
     .map_err(|source| postgres_unavailable("set provider accounts state in admin transaction", source))?
@@ -1081,8 +1087,10 @@ pub(super) async fn import_provider_accounts_in_transaction(
             Some(settings.enabled),
             Some(settings.concurrency_limit),
             Some(settings.weight),
-            settings.model_access.as_ref(),
-            None,
+            AccountModelSettings {
+                access: settings.model_access.as_ref(),
+                additional: None,
+            },
             None,
         )
         .await?;
@@ -1147,8 +1155,10 @@ pub(super) async fn rotate_provider_account_admin_in_transaction(
             Some(settings.enabled),
             Some(settings.concurrency_limit),
             Some(settings.weight),
-            settings.model_access.as_ref(),
-            settings.additional_models.as_ref(),
+            AccountModelSettings {
+                access: settings.model_access.as_ref(),
+                additional: settings.additional_models.as_ref(),
+            },
             settings.outbound_proxy.as_ref(),
         )
         .await?;
