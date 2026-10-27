@@ -1,6 +1,7 @@
 //! Ops 错误查询族
 
 use super::super::*;
+use super::literal_contains_pattern;
 
 const REQUEST_ERROR_SELECT: &str = "select 'model_request'::text as source,
        mr.id as event_id, mr.id as request_id,
@@ -285,7 +286,7 @@ fn push_request_error_predicates(
         statement.push_bind(i32::from(status));
     }
     if let Some(search) = &filter.search {
-        push_prefix_search(
+        push_contains_search(
             statement,
             &[
                 "mr.id",
@@ -333,7 +334,7 @@ fn push_ops_event_predicates(
         statement.push_bind(i32::from(status));
     }
     if let Some(search) = &filter.search {
-        push_prefix_search(
+        push_contains_search(
             statement,
             &[
                 "oe.id",
@@ -379,14 +380,14 @@ fn push_response_id_filter(
     }
 }
 
-fn push_prefix_search(
+fn push_contains_search(
     statement: &mut QueryBuilder<Postgres>,
     columns: &[&str],
     value: &str,
     alias: &str,
     event: bool,
 ) {
-    let pattern = literal_prefix_pattern(value);
+    let pattern = literal_contains_pattern(value);
     statement.push(" and (");
     for (index, column) in columns.iter().enumerate() {
         if index > 0 {

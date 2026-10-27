@@ -256,7 +256,7 @@ async fn client_key_search_matches_names_and_labels_but_never_credential_values(
     let generated = format!("sk_{}", "K".repeat(43));
     for (id, name, key) in [
         ("key_generated", "Production", generated.as_str()),
-        ("key_custom", "生产_%专用", "legacy-token+/123"),
+        ("key_custom", r"生产_%专用\测试", "legacy-token+/123"),
     ] {
         sqlx::query(
             "insert into client_api_keys (id, name, label, key, created_at, updated_at)
@@ -272,9 +272,17 @@ async fn client_key_search_matches_names_and_labels_but_never_credential_values(
     let repository = PgClientApiKeyRepository::new(database.pool.clone());
     for (search, expected) in [
         ("PROD", 1),
+        ("DUCt", 1),
+        ("tion", 1),
         ("生产_%", 1),
+        ("_%专", 1),
+        ("%", 1),
+        ("_", 1),
+        (r"\", 1),
         ("生产X", 0),
         ("backend", 2),
+        ("END LAB", 2),
+        ("label", 2),
         (generated.as_str(), 0),
         (&generated[..10], 0),
         ("legacy-token+/123", 0),

@@ -409,6 +409,7 @@ async fn copying_builtin_prices_keeps_cache_read_and_write_fallback_costs() {
         "gpt-4o",
         "gpt-6-astra",
         "gpt-6.1-sol",
+        "gpt-6.1-terra",
         "gpt-6-sol",
         "gpt-6-luna",
     ] {

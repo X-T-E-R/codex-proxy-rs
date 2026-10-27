@@ -45,7 +45,7 @@ pub use ops_events::*;
 pub use plugins::PgPluginStore;
 pub use provider_accounts::*;
 pub use proxies::PgProxyRepository;
-use query_pattern::literal_prefix_pattern;
+use query_pattern::literal_contains_pattern;
 pub use retention::*;
 pub use runtime_settings::*;
 pub use snapshot::*;

@@ -1,7 +1,7 @@
 //! Usage 明细、诊断与过滤查询族
 
 use super::super::*;
-use super::{literal_contains_pattern, literal_prefix_pattern, usage_errors};
+use super::{literal_contains_pattern, usage_errors};
 use serde_json::Value;
 
 const MODEL_DIAGNOSTIC_DIMENSION_SQL: &str =
@@ -101,7 +101,7 @@ pub(crate) fn push_usage_filter(
         query.push_bind(value.clone());
     }
     if let Some(value) = &filter.search {
-        let pattern = literal_prefix_pattern(value);
+        let pattern = literal_contains_pattern(value);
         query.push(format!(" and ({alias}.requested_model_id like "));
         query.push_bind(pattern.clone());
         for column in [

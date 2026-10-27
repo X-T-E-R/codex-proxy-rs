@@ -6,7 +6,7 @@ use gateway_protocol::openai::sse::{
     response_failed_sse_data_from_error_event, response_failed_sse_event,
     response_failed_sse_event_with_id, sse_frame_end, sse_frame_is_done,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 fn sse_body_has_done(body: &str) -> bool {
     body.trim_end_matches(['\r', '\n'])
@@ -446,12 +446,12 @@ fn response_failed_projection_should_preserve_response_error_and_event_metadata(
 fn retry_after_projection_preserves_official_header_units_and_nested_precedence() {
     use gateway_protocol::openai::sse::set_response_failed_retry_after;
     for (header, expected) in [
-        (json!("10"), Some("10")),
-        (json!("0"), Some("0")),
-        (json!(10), Some("10")),
+        (json!("10"), Some(json!("10"))),
+        (json!("0"), Some(json!("0"))),
+        (json!(10), Some(json!(10))),
         (
             json!("Sun, 06 Nov 1994 08:49:37 GMT"),
-            Some("Sun, 06 Nov 1994 08:49:37 GMT"),
+            Some(json!("Sun, 06 Nov 1994 08:49:37 GMT")),
         ),
         (json!("invalid"), None),
         (json!("-1"), None),
@@ -463,10 +463,8 @@ fn retry_after_projection_preserves_official_header_units_and_nested_precedence(
         let projected =
             response_failed_sse_data_from_error_event(None, Some("resp_retry"), &original).unwrap();
         assert_eq!(
-            projected
-                .pointer("/response/error/headers/retry-after")
-                .and_then(Value::as_str),
-            expected
+            projected.pointer("/response/error/headers/retry-after"),
+            expected.as_ref()
         );
         assert!(
             projected
@@ -484,11 +482,68 @@ fn retry_after_projection_preserves_official_header_units_and_nested_precedence(
     );
     data["response"]["error"]["headers"] = json!({"Retry-After":"invalid"});
     assert!(set_response_failed_retry_after(&mut data, None));
-    assert_eq!(data["response"]["error"]["headers"]["retry-after"], "10");
+    assert_eq!(
+        data["response"]["error"]["headers"],
+        json!({"retry-after":"10"})
+    );
     let mut data = json!({"type":"response.failed", "response":{"error":{"code":"turn_rate_limit_exceeded", "retry_after_ms":10000}}});
     let original = data.clone();
     assert!(!set_response_failed_retry_after(&mut data, None));
     assert_eq!(data, original);
+}
+
+#[test]
+fn response_failed_projection_bridges_valid_retry_header_without_changing_event_metadata() {
+    for (event_headers, error_headers, expected_headers) in [
+        (
+            json!({"Retry-After":"24"}),
+            None,
+            Some(json!({"retry-after":"24"})),
+        ),
+        (
+            json!({"ReTrY-AfTeR":15}),
+            None,
+            Some(json!({"retry-after":15})),
+        ),
+        (
+            json!({"Retry-After":"Wed, 21 Oct 2015 07:28:00 GMT"}),
+            None,
+            Some(json!({"retry-after":"Wed, 21 Oct 2015 07:28:00 GMT"})),
+        ),
+        (
+            json!({"Retry-After":"24"}),
+            Some(json!({"ReTrY-AfTeR":"7","x-error-id":"keep"})),
+            Some(json!({"ReTrY-AfTeR":"7","x-error-id":"keep"})),
+        ),
+        (
+            json!({"Retry-After":"24","x-event-id":"event-only"}),
+            Some(json!({"Retry-After":"later","x-error-id":"keep"})),
+            Some(json!({"retry-after":"24","x-error-id":"keep"})),
+        ),
+        (
+            json!({"Retry-After":"24"}),
+            Some(json!(null)),
+            Some(json!({"retry-after":"24"})),
+        ),
+        (json!({"Retry-After":["24"]}), None, None),
+        (json!({"Retry-After":"later"}), None, None),
+    ] {
+        let mut original = json!({
+            "type":"error", "status":429, "headers":event_headers,
+            "error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"busy"}
+        });
+        if let Some(headers) = error_headers {
+            original["error"]["headers"] = headers;
+        }
+        let projected =
+            response_failed_sse_data_from_error_event(None, Some("resp_retry"), &original).unwrap();
+        assert_eq!(
+            projected.pointer("/response/error/headers"),
+            expected_headers.as_ref(),
+            "{original}"
+        );
+        assert_eq!(projected["headers"], original["headers"]);
+    }
 }
 
 #[test]

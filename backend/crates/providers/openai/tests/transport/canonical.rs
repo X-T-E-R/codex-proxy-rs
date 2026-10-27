@@ -594,7 +594,13 @@ fn decoder_should_use_non_reasoning_preview_web_search_price() {
 #[test]
 fn gpt_6_decoders_should_use_reasoning_preview_web_search_price() {
     let tools = vec![json!({ "type": "web_search_preview" })];
-    for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"] {
+    for model in [
+        "gpt-6-astra",
+        "gpt-6.1-sol",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+    ] {
         let created = json!({
             "type":"response.created",
             "response":{"id":"resp_preview_search_cost","model":model}

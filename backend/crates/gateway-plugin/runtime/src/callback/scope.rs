@@ -106,10 +106,13 @@ impl CallbackScope {
         &self,
         purpose: Option<gateway_plugin_sdk::call::upstream_adapter::UpstreamPathPurpose>,
     ) -> HttpAttempt {
+        let inference = purpose
+            == Some(gateway_plugin_sdk::call::upstream_adapter::UpstreamPathPurpose::Inference);
+        if let Some(managed) = &self.upstream {
+            managed.replay.start(inference);
+        }
         HttpAttempt(Arc::new(HttpAttemptObservation {
-            effects: if purpose
-                == Some(gateway_plugin_sdk::call::upstream_adapter::UpstreamPathPurpose::Inference)
-            {
+            effects: if inference {
                 None
             } else {
                 self.execution_effects.clone()
@@ -119,6 +122,10 @@ impl CallbackScope {
                 .as_ref()
                 .map(|managed| Arc::clone(&managed.send_state)),
             completed: Mutex::new(false),
+            replay: self
+                .upstream
+                .as_ref()
+                .map(|managed| Arc::clone(&managed.replay)),
         }))
     }
 }
@@ -129,6 +136,7 @@ pub(super) struct HttpAttemptObservation {
     effects: Option<Arc<ExecutionEffects>>,
     completed: Mutex<bool>,
     upstream: Option<Arc<super::upstream::SendWatermark>>,
+    replay: Option<Arc<super::replay::HttpReplay>>,
 }
 
 impl HttpAttempt {
@@ -139,10 +147,18 @@ impl HttpAttempt {
     pub(super) fn finish(self, observed: UpstreamSendState) {
         self.0.finish(observed);
     }
+
+    pub(super) fn finish_http(self, observed: UpstreamSendState, status: Option<u16>) {
+        self.0.finish_http(observed, status);
+    }
 }
 
 impl HttpAttemptObservation {
     pub(super) fn finish(&self, observed: UpstreamSendState) {
+        self.finish_http(observed, None);
+    }
+
+    fn finish_http(&self, observed: UpstreamSendState, status: Option<u16>) {
         let mut completed = self
             .completed
             .lock()
@@ -152,6 +168,9 @@ impl HttpAttemptObservation {
         }
         if let Some(upstream) = &self.upstream {
             upstream.observe(observed);
+        }
+        if let Some(replay) = &self.replay {
+            replay.finish(status.filter(|_| observed == UpstreamSendState::Sent));
         }
         if observed != UpstreamSendState::NotSent
             && let Some(effects) = &self.effects

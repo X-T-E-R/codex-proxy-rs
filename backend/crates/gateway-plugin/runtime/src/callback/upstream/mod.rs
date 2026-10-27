@@ -55,6 +55,7 @@ impl SendWatermark {
 pub(crate) struct ManagedUpstream {
     pub(crate) account: Arc<dyn UpstreamAccountConnection>,
     pub(crate) send_state: Arc<SendWatermark>,
+    pub(crate) replay: Arc<super::replay::HttpReplay>,
     pub(crate) effects: Option<Arc<ExecutionEffects>>,
     target: Arc<UpstreamTarget>,
     socket: tokio::sync::Mutex<Option<(String, Arc<ManagedWebSocket>)>>,
@@ -85,6 +86,7 @@ impl ManagedUpstream {
             owner,
             websocket_allowed,
             send_state: Arc::default(),
+            replay: Arc::default(),
             socket: tokio::sync::Mutex::new(socket),
         }))
     }

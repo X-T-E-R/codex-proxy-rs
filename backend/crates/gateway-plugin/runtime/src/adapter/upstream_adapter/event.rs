@@ -28,6 +28,7 @@ pub(super) struct EventDecoder {
     usage: Usage,
     contents: usize,
     pub(super) completed: bool,
+    pub(super) replay_blocked: bool,
 }
 
 pub(super) struct DecodedEvent {
@@ -50,6 +51,10 @@ impl EventDecoder {
         if self.completed || message.event.facts.len() > 64 {
             return Err(invalid(sent));
         }
+        // 同批失败即便丢弃输出，既有 wire、工具事实或续接仍阻止透明重放
+        self.replay_blocked |= !message.event.facts.is_empty()
+            || message.event.wire.is_some()
+            || message.continuation.is_some();
         let wire = message
             .event
             .wire

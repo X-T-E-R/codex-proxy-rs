@@ -455,8 +455,8 @@ async fn insights_share_bucket_states_without_merging_exact_percentiles() {
 }
 
 #[tokio::test]
-async fn prefix_search_ignores_request_ids_and_matches_snapshot_names() {
-    let Some(database) = TestDatabase::create("analytics_search_prefix").await else {
+async fn contains_search_ignores_request_ids_and_matches_snapshot_names() {
+    let Some(database) = TestDatabase::create("analytics_search_contains").await else {
         return;
     };
     let start = Utc::now() - TimeDelta::hours(1);
@@ -471,7 +471,7 @@ async fn prefix_search_ignores_request_ids_and_matches_snapshot_names() {
             ObservabilityRange::new(start - TimeDelta::seconds(1), start + TimeDelta::seconds(1))
                 .unwrap(),
             UsageRecordFilter {
-                search: Some("literal_".to_owned()),
+                search: Some("eral_".to_owned()),
                 ..Default::default()
             },
         )

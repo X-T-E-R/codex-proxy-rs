@@ -302,7 +302,32 @@ pub fn response_failed_sse_data_from_error_event(
     error_event: &Value,
 ) -> Option<Value> {
     let mut event = error_event.as_object()?.clone();
-    let error = event.remove("error").filter(Value::is_object)?;
+    let mut error = event.remove("error").filter(Value::is_object)?;
+    // WS 客户端可读事件级重试头，而 SSE 客户端只读 response.error.headers
+    // 仅桥接有效值，保留原始数字或日期及其他错误元数据
+    let retry_header = |value| {
+        super::events::retry_after_header_with_value(value).and_then(|(raw, header)| {
+            header
+                .to_str()
+                .ok()
+                .and_then(super::parse_retry_after_seconds)
+                .map(|_| raw.clone())
+        })
+    };
+    if retry_header(&error).is_none()
+        && let Some(retry_after) = retry_header(error_event)
+    {
+        let headers = error
+            .as_object_mut()?
+            .entry("headers")
+            .or_insert_with(|| json!({}));
+        if !headers.is_object() {
+            *headers = json!({});
+        }
+        let headers = headers.as_object_mut()?;
+        headers.retain(|name, _| !name.eq_ignore_ascii_case("retry-after"));
+        headers.insert("retry-after".to_owned(), retry_after);
+    }
     let mut response = response
         .and_then(Value::as_object)
         .cloned()
@@ -367,13 +392,12 @@ pub fn set_response_failed_retry_after(data: &mut Value, retry_after: Option<&st
     else {
         return false;
     };
-    let Some(headers) = error
-        .entry("headers")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-    else {
-        return false;
-    };
+    let headers = error.entry("headers").or_insert_with(|| json!({}));
+    if !headers.is_object() {
+        *headers = json!({});
+    }
+    let headers = headers.as_object_mut().expect("已创建错误头对象");
+    headers.retain(|name, _| !name.eq_ignore_ascii_case("retry-after"));
     headers.insert("retry-after".to_owned(), Value::String(header));
     true
 }

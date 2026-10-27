@@ -827,7 +827,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
                 page_size: PageSize::new(10).expect("page size"),
                 provider_kind: Some(ProviderKind::new("openai").expect("Provider kind")),
                 group_filter: None,
-                search: Some("ALPHA@EXAMPLE".to_owned()),
+                search: Some("PHA@EXAM".to_owned()),
                 status: Some(AccountStatus::Normal),
                 sort: None,
             },
@@ -866,11 +866,11 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
     assert_eq!(rate_limited.summary.rate_limited, 1);
     assert_eq!(rate_limited.summary.normal, 0);
 
-    let no_contains_compatibility = store
+    let email_domain_page = store
         .list_accounts(
             AccountListQuery {
-                page: 1,
-                page_size: PageSize::new(10).expect("page size"),
+                page: 2,
+                page_size: PageSize::new(2).expect("page size"),
                 provider_kind: None,
                 group_filter: None,
                 search: Some("example.invalid".to_owned()),
@@ -880,8 +880,10 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
             Default::default(),
         )
         .await
-        .expect("use structured account prefix search");
-    assert_eq!(no_contains_compatibility.total, 0);
+        .expect("search accounts by email domain before pagination");
+    assert_eq!(email_domain_page.total, 6);
+    assert_eq!(email_domain_page.items.len(), 2);
+    assert_eq!(email_domain_page.summary, usage_page.summary);
 
     let error_accounts = store
         .list_accounts(

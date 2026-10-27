@@ -233,6 +233,7 @@ struct PendingCall {
     execution: Option<OwnedSemaphorePermit>,
     deadline: CallDeadline,
     handler: Arc<dyn CallbackHandler>,
+    revoked: bool,
     transmitted: bool,
     cancellation: Option<RpcError>,
     context: CallContext,
@@ -242,10 +243,19 @@ struct PendingCall {
 }
 
 impl PendingCall {
-    fn finish(mut self, result: Result<RpcReply, RpcError>) {
+    fn revoke(&mut self) {
+        if self.revoked {
+            return;
+        }
+        self.revoked = true;
+        self.handler.finish(&self.context);
         for callback in self.callbacks.drain(..) {
             callback.abort();
         }
+    }
+
+    fn finish(mut self, result: Result<RpcReply, RpcError>) {
+        self.revoke();
         let stream = self.stream.take();
         let sender = self.result.take();
         // 先同步关闭调用资源，Core 才能在收到结果时看到全部发送副作用
@@ -261,7 +271,7 @@ impl PendingCall {
 
 impl Drop for PendingCall {
     fn drop(&mut self) {
-        self.handler.finish(&self.context);
+        self.revoke();
     }
 }
 
@@ -283,6 +293,10 @@ impl Shared {
             let observer = (!self.expected_stop.load(Ordering::Acquire))
                 .then(|| self.failure_observer.clone())
                 .flatten();
+            // 查询者能看到调用表清空之前同步封存受管回调
+            for call in state.calls.values_mut() {
+                call.revoke();
+            }
             (std::mem::take(&mut state.calls), observer)
         };
         self.execution.close();
@@ -319,6 +333,7 @@ impl Shared {
             call.handler.streaming(&call.context);
             let _ = initial.send(result);
         } else {
+            call.revoke();
             let pending = state.calls.remove(&id).ok_or(RpcError::Protocol(None))?;
             drop(state);
             pending.finish(result);
@@ -350,6 +365,11 @@ impl Shared {
         {
             return Ok(());
         }
+        state
+            .calls
+            .get_mut(&id)
+            .ok_or(RpcError::Protocol(None))?
+            .revoke();
         let call = state.calls.remove(&id).ok_or(RpcError::Protocol(None))?;
         drop(state);
         if call.stream.is_none() || call.result.is_some() {
@@ -474,16 +494,14 @@ impl Shared {
             );
         }
         if !call.transmitted {
+            call.revoke();
             if let Some(call) = state.calls.remove(&id) {
                 call.finish(Err(error));
             }
             return;
         }
         call.cancellation = Some(error.clone());
-        call.handler.finish(&call.context);
-        for callback in call.callbacks.drain(..) {
-            callback.abort();
-        }
+        call.revoke();
         if let Some(result) = call.result.take() {
             let _ = result.send(Err(error.clone()));
         }
@@ -854,6 +872,7 @@ impl RpcSession {
                 execution: Some(execution),
                 deadline: deadline.clone(),
                 handler: self.callbacks.clone(),
+                revoked: false,
                 transmitted: false,
                 cancellation: None,
                 context,

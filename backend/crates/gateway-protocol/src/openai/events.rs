@@ -282,18 +282,26 @@ fn retry_after_seconds_header(value: &Value) -> Option<u64> {
 
 /// 读取事件 headers 中的 Retry-After，保留原值并遵守 HTTP 头的校验与覆盖规则
 pub(super) fn retry_after_header_from_value(value: &Value) -> Option<http::HeaderValue> {
+    retry_after_header_with_value(value).map(|(_, header)| header)
+}
+
+/// 同时保留原始 JSON 值，WS 转 SSE 时数字与日期不丢失
+pub(super) fn retry_after_header_with_value(value: &Value) -> Option<(&Value, http::HeaderValue)> {
     let headers = value.get("headers")?.as_object()?;
     // 官方先按 HTTP 头值校验，再覆盖大小写不同的同名头；最后才解释重试时间
     // 合法但无法解析为时间的末项也会覆盖前值，非法头值和数组不参与覆盖
     headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-        .filter_map(|(_, value)| match value {
-            Value::String(value) => http::HeaderValue::from_str(value).ok(),
-            Value::Number(_) | Value::Bool(_) => {
-                http::HeaderValue::from_str(&value.to_string()).ok()
-            }
-            Value::Null | Value::Array(_) | Value::Object(_) => None,
+        .filter_map(|(_, value)| {
+            let header = match value {
+                Value::String(value) => http::HeaderValue::from_str(value).ok(),
+                Value::Number(_) | Value::Bool(_) => {
+                    http::HeaderValue::from_str(&value.to_string()).ok()
+                }
+                Value::Null | Value::Array(_) | Value::Object(_) => None,
+            }?;
+            Some((value, header))
         })
         .next_back()
 }

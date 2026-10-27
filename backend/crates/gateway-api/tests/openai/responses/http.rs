@@ -3434,3 +3434,71 @@ async fn responses_route_should_keep_alive_while_request_middleware_waits_for_fi
         assert_eq!(trace.client_statuses(), vec![200]);
     }
 }
+
+#[tokio::test]
+async fn websocket_rate_limit_error_projects_retry_after_for_sse_clients() {
+    let trace = Arc::new(Trace::default());
+    let error_data = json!({
+        "type":"error", "status":429, "headers":{"Retry-After":"24","x-event-id":"event-only"},
+        "error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"busy"}
+    });
+    let error_wire = ProviderEvent::wire(
+        ProtocolWireEvent::json_with_raw_sse_metadata(
+            "openai",
+            Some("error".to_owned()),
+            error_data.clone(),
+            Bytes::from(encode_sse_event("error", &error_data.to_string())),
+            None,
+            None,
+        )
+        .expect("valid upstream error wire"),
+    );
+    let started_wire = ProviderEvent::canonical_with_wire(
+        vec![started()],
+        ProtocolWireEvent::json(
+            "openai",
+            Some("response.created".to_owned()),
+            json!({
+                "type":"response.created", "response":{"id":"resp_test","status":"in_progress"}
+            }),
+        )
+        .expect("valid upstream started wire"),
+    );
+    let session = FakeSession::streaming(
+        Arc::clone(&trace),
+        vec![
+            NextStep::Event(CoordinatedEvent::single(
+                started_wire,
+                CommitRequirement::CommitBeforeDelivery,
+            )),
+            NextStep::Event(CoordinatedEvent::single(
+                error_wire,
+                CommitRequirement::AlreadyCommitted,
+            )),
+            NextStep::Error(EngineError::Provider(ProviderError::new(
+                ProviderErrorKind::RateLimited,
+                UpstreamSendState::Sent,
+            ))),
+        ],
+    );
+    let response = stream_execution_response(Box::new(session), None).await;
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read SSE body");
+    let events = parse_sse_events(&String::from_utf8(body.to_vec()).unwrap()).unwrap();
+    let failed = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("response.failed"))
+        .expect("translated response.failed event");
+    let failed: Value = serde_json::from_str(&failed.data).unwrap();
+    assert_eq!(failed["status"], 429);
+    assert_eq!(
+        failed["response"]["error"]["headers"],
+        json!({"retry-after":"24"})
+    );
+    assert_eq!(failed["headers"], error_data["headers"]);
+    assert_eq!(
+        failed["response"]["error"]["code"],
+        "turn_rate_limit_exceeded"
+    );
+}

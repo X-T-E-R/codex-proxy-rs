@@ -496,7 +496,7 @@ OpenAI HTTP 明确未发送的瞬时建连失败（含 TLS 握手 EOF）在单�
 真正的 HTTP 非 2xx 响应使用 `Retry-After` 响应头；SSE 与 WebSocket 的 `response.failed` 使用
 `response.error.headers["retry-after"]`。网关合成的 WebSocket `type: "error"` 使用真实非 2xx `status` 和事件顶层
 `headers["retry-after"]`。字段值遵循 HTTP 秒数或日期语义，例如 `"10"` 表示建议等待 10 秒。
-代理不因此写入账号冷却、换号或透明重试，其他会话仍可使用该账号
+OpenAI 原生上游事件不因此写入账号冷却、换号或透明重试，其他会话仍可使用该账号
 
 Responses 的 HTTP/SSE 与 WebSocket 按顺序即时交付正常事件，不暂存前导等待后续输出。
 未启用中间件链时，无输出的 `response.created`、`response.in_progress`
@@ -758,6 +758,8 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 - `status`: `normal`、`quota_exhausted`、`rate_limited`、`disabled`、`error`
 - `sortBy`: `email`、`status`、`planType`、`usage`、`lastUsedAt`、`expiresAt`
 - `sortDirection`: `asc`、`desc`
+
+账号列表的 `search` 仅按字面量包含匹配名称和邮箱，不区分大小写；`%`、`_` 和 `\` 按普通字符处理
 
 账号视图的 `capacity` 返回查询时的普通并发容量：`usedSlots` 不含独立审批池和排队请求，
 读取运行态失败时为 `null`；`totalSlots` 是应用账号独立配置或全局默认值后的上限，`null` 表示不限。
@@ -1436,7 +1438,7 @@ HTTP 返回 `403` 和 `image_generation_disabled`，WebSocket 每个 `response.c
 创建时省略或 `null` 表示无覆盖；更新时省略保留、`null` 清除。与通用字段同时提交时必须一致，否则拒绝整个请求；
 响应中的兼容字段从同一映射派生，不是第二份配置
 
-密钥列表的 `search` 仅匹配名称和标签，不匹配密钥值或可见前缀；搜索不区分大小写，使用字面量前缀匹配。
+密钥列表的 `search` 仅匹配名称和标签，不匹配密钥值或可见前缀；搜索不区分大小写，使用字面量包含匹配，`%`、`_` 和 `\` 按普通字符处理。
 创建和更新时去除名称首尾空白，并按忽略大小写、首尾空格的名称查重，重复返回 `409`。
 更新排除当前记录，并发写入同样执行查重；失败不会留下审计或配置版本变更。
 历史重名数据不自动改名，已有凭据继续有效；再次保存时需使用未被其他密钥占用的名称
@@ -2078,7 +2080,7 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 
 `error` 按错误码、错误分类、错误消息、受控错误详情、状态码或常见中英文错误词（如 `过载`、`overloaded`）匹配请求终态及保留的中间尝试事件，
 最多 512 字节且不允许控制字符，首尾空白忽略，空值不参与筛选。
-`search` 对模型、账号和 Key 名称保留前缀搜索，同时支持上述错误搜索。
+`search` 对模型、账号和 Key 名称使用字面量包含匹配，同时支持上述错误搜索，`%`、`_` 和 `\` 按普通字符处理。
 ASCII 标识符只按完整别名扩展分类，具体原码如 `turn_rate_limit_exceeded` 按字面量包含匹配，不泛化为全部限流或配额错误；
 自然语言短语可命中常见错误词，例如“服务过载错误”匹配过载类
 `errorTypes` 接受逗号分隔的错误类型枚举（`overloaded`、`status_503`、`rate_limited`、`upstream_unavailable`、`timeout`、`no_available_provider`、`capacity_unavailable`、`provider_infrastructure_unavailable`、`unauthorized`、`continuation_recovery_required`、`invalid_request`、`process_interrupted`），
@@ -2092,7 +2094,7 @@ ASCII 标识符只按完整别名扩展分类，具体原码如 `turn_rate_limit
 `success` 沿用成功用量记录范围，`error` 包含最终 `failed`、`incomplete` 的请求。
 `all` 的基本范围合并成功用量记录及全部非成功请求，包括执行中和已取消请求。
 `all` 带 `error` 或 `errorTypes` 时，也纳入匹配错误的成功预热或恢复请求；`search` 的错误匹配同样覆盖这些保留记录，
-名称前缀匹配仍沿用基本范围。显式 `success` 或 `error` 不放宽该状态的范围。
+名称包含匹配仍沿用基本范围。显式 `success` 或 `error` 不放宽该状态的范围。
 每个请求只返回一行，中间错误不改变最终分类；`logicalOutcome` 保留真实结果。
 状态筛选只影响明细列表，不改变顶部统计，独立运维事件仍通过 `/api/admin/operations/errors` 查询
 
@@ -2140,7 +2142,7 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 请求明细的 `clientApiKeyName`、`accountName` 按字面量包含匹配请求保存的历史名称快照，区分大小写，
 不解析为 ID，也不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
 
-请求列表与运维错误列表的 `search` 按字面量前缀匹配模型、Key/账号引用和已存账号名称/邮箱快照，Key 名称匹配不区分大小写，
+请求列表与运维错误列表的 `search` 按字面量包含匹配模型、Key/账号引用和已存账号名称/邮箱快照，Key 名称匹配不区分大小写，`%`、`_` 和 `\` 按普通字符处理，
 同时匹配错误码、分类、消息、受控详情及上述中英文错误词。运维错误列表的错误匹配以该行来源为准，不替换为请求的其他尝试。
 运维错误列表另接受 `requestId`、`upstreamRequestId`、`responseId` 精确定位；两者均不支持密钥值搜索。
 请求详情通过 `/api/admin/usage/records/detail?id=...` 查询

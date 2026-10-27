@@ -15,6 +15,7 @@ mod log;
 mod middleware;
 mod model;
 pub(crate) mod private_state;
+mod replay;
 pub(crate) mod request_limits;
 mod resources;
 mod scope;
@@ -454,6 +455,18 @@ impl CallbackHandler for PluginCallbacks {
                 );
                 (middleware, is_private_state)
             };
+            // 仅单次受管 HTTP 拒绝可证明重放；其他能力不能推定没有外部副作用
+            if let Some(managed) = &scope.upstream
+                && !matches!(
+                    method.as_str(),
+                    "host.upstream.http.do"
+                        | "host.upstream.http.do_stream"
+                        | "host.upstream.http.stream_read"
+                        | "host.upstream.http.stream_close"
+                )
+            {
+                managed.replay.invalidate();
+            }
             if matches!(
                 method.as_str(),
                 gateway_plugin_sdk::call::middleware::http::DISPATCH_METHOD
@@ -542,7 +555,13 @@ impl CallbackHandler for PluginCallbacks {
                 request_limits: &request_limits,
             };
             if method.starts_with("host.upstream.") {
-                return upstream::dispatch(&http, &method, params, payload).await;
+                return upstream::dispatch(&http, &method, params, payload)
+                    .await
+                    .inspect_err(|_| {
+                        if let Some(managed) = &scope.upstream {
+                            managed.replay.invalidate();
+                        }
+                    });
             }
             http.dispatch(&method, params, payload).await
         })

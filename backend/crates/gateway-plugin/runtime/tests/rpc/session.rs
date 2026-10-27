@@ -921,3 +921,109 @@ async fn managed_next_suspends_only_its_parent_and_not_a_concurrent_call() {
     assert!(session.is_ready());
     session.shutdown(Duration::from_secs(1)).await;
 }
+
+struct GatedFinish {
+    ready: Arc<Notify>,
+    entered: std::sync::mpsc::Sender<()>,
+    started: std::sync::atomic::AtomicBool,
+    finished: std::sync::atomic::AtomicBool,
+    released: Mutex<bool>,
+    release: Condvar,
+}
+
+impl CallbackHandler for GatedFinish {
+    fn finish(&self, _: &CallContext) {
+        if self.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.entered.send(()).unwrap();
+        // 受控屏障模拟资源撤销过程，不依赖调度器时机
+        let released = self.released.lock().unwrap();
+        let (released, timeout) = self
+            .release
+            .wait_timeout_while(released, Duration::from_secs(5), |released| !*released)
+            .unwrap();
+        assert!(!timeout.timed_out() && *released);
+        self.finished.store(true, Ordering::Release);
+    }
+
+    fn call(
+        &self,
+        _: CallContext,
+        method: String,
+        _: serde_json::Value,
+        _: Vec<u8>,
+    ) -> BoxFuture<'static, Result<RpcReply, PluginFault>> {
+        let ready = Arc::clone(&self.ready);
+        Box::pin(async move {
+            assert_eq!(method, "test.stream_ready");
+            ready.notified().await;
+            Ok(RpcReply {
+                result: json!({}),
+                payload: vec![],
+            })
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stream_drop_waits_for_callback_revocation_after_end_or_process_failure() {
+    for method in ["stream_single", "stream_single_crash"] {
+        let (_cache, prepared, handshake, processes) = prepared_session();
+        let (entered, entry) = std::sync::mpsc::channel();
+        let callbacks = Arc::new(GatedFinish {
+            ready: Arc::new(Notify::new()),
+            entered,
+            started: std::sync::atomic::AtomicBool::new(false),
+            finished: std::sync::atomic::AtomicBool::new(false),
+            released: Mutex::new(false),
+            release: Condvar::new(),
+        });
+        let session = Arc::new(
+            RpcSession::start(
+                prepared,
+                handshake,
+                RpcLimits::default(),
+                &processes,
+                callbacks.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let stream = session
+            .call_stream(
+                method,
+                session.context(Stage::Request, Duration::from_secs(5)),
+                json!({}),
+                vec![],
+            )
+            .await
+            .unwrap();
+        callbacks.ready.notify_one();
+        entry.recv_timeout(Duration::from_secs(5)).unwrap();
+        let observed = Arc::clone(&callbacks);
+        let (started, received) = std::sync::mpsc::channel();
+        let (completed, completion) = std::sync::mpsc::channel();
+        let dropped = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            drop(stream);
+            completed
+                .send(observed.finished.load(Ordering::Acquire))
+                .unwrap();
+        });
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        // I/O 线程可能在撤销屏障阻塞，用同步通道而非同一 runtime 的计时器
+        let early = completion.recv_timeout(Duration::from_millis(100));
+        *callbacks.released.lock().unwrap() = true;
+        callbacks.release.notify_one();
+        let was_early = early.is_ok();
+        let revoked =
+            early.unwrap_or_else(|_| completion.recv_timeout(Duration::from_secs(1)).unwrap());
+        dropped.join().unwrap();
+        session.shutdown(Duration::from_secs(1)).await;
+        assert!(
+            !was_early && revoked,
+            "{method}: stream drop outran revocation"
+        );
+    }
+}
