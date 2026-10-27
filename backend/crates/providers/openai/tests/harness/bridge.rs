@@ -46,8 +46,11 @@ const INSTRUCTIONS: &str = "You are concise.";
 #[tokio::test]
 async fn pinned_sources_complete_opencode_and_pi_responses() {
     let (opencode, pi) = checkouts();
-    assert_eq!(git_head(&opencode), OPENCODE_SOURCE_COMMIT);
-    assert_eq!(git_head(&pi), PI_SOURCE_COMMIT);
+    // 本地 checkout 核 git commit；CI 的发行快照由 assemble.py 校验固定提交与每个源码字节
+    if std::env::var_os("CPR_HARNESS_TEST_SOURCES").is_none() {
+        assert_eq!(git_head(&opencode), OPENCODE_SOURCE_COMMIT);
+        assert_eq!(git_head(&pi), PI_SOURCE_COMMIT);
+    }
     let origin = Origin::serve(OriginMode::Sse).await;
     let session = open_session(worker_config(&opencode, &pi, origin.addr, None)).await;
     assert!(node_at_least(&session.node_version(), 22, 19, 0));
@@ -1764,9 +1767,13 @@ async fn open_session(config: HarnessWorkerConfig) -> HarnessSession {
 }
 
 fn checkouts() -> (PathBuf, PathBuf) {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../../../../sources");
-    let opencode = root.join("opencode/checkout");
-    let pi = root.join("pi/checkout");
+    let (opencode, pi) = if let Some(root) = std::env::var_os("CPR_HARNESS_TEST_SOURCES") {
+        let root = PathBuf::from(root);
+        (root.join("opencode"), root.join("pi"))
+    } else {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../../../../sources");
+        (root.join("opencode/checkout"), root.join("pi/checkout"))
+    };
     assert!(
         opencode
             .join("packages/ai/src/protocols/openai-responses.ts")

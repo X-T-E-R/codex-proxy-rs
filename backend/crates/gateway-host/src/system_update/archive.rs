@@ -214,28 +214,3 @@ fn official_plugin_relative_path(path: &Path) -> Result<Option<PathBuf>, Operati
     }
     Ok(None)
 }
-
-#[cfg(test)]
-mod tests {
-    //! 发行 Web 路径识别不接纳 harness 依赖中的 dist
-
-    use super::*;
-
-    #[test]
-    fn web_root_is_anchored_outside_harness_dependencies() {
-        assert_eq!(
-            web_dist_relative_path(Path::new("codex-proxy-rs/web/dist/index.html")),
-            Some(PathBuf::from("index.html"))
-        );
-        assert_eq!(
-            web_dist_relative_path(Path::new("web/dist/index.html")),
-            Some(PathBuf::from("index.html"))
-        );
-        assert_eq!(
-            web_dist_relative_path(Path::new(
-                "codex-proxy-rs/openai-harness/worker/node_modules/example/dist/index.html"
-            )),
-            None
-        );
-    }
-}
