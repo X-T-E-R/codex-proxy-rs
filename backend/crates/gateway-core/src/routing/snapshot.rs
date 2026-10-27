@@ -365,12 +365,16 @@ impl RuntimeSnapshotCompiler {
             let cached = previous.filter(|previous| {
                 previous.extensions().map(|set| set.id()) == extensions.as_ref().map(|set| set.id())
             });
-            // 账号增删额外 ID 必须同步刷新来源目录，不能复用旧代次的账号归属。
-            let models_changed = cached.is_some_and(|previous| {
+            // 账号增删额外 ID 或调整模型限制，会改变 OpenAI 源目录的账号归属。
+            // 只刷新该 Provider，其他 Provider 仍复用已发布目录。
+            let openai_accounts_changed = cached.is_some_and(|previous| {
                 let assignments = facts
                     .provider_accounts
                     .iter()
-                    .filter(|account| !account.additional_models.models().is_empty())
+                    .filter(|account| {
+                        account.provider_kind == "openai"
+                            && !account.additional_models.models().is_empty()
+                    })
                     .map(|account| {
                         (
                             account.account_id.clone(),
@@ -379,15 +383,21 @@ impl RuntimeSnapshotCompiler {
                     })
                     .collect::<BTreeMap<_, _>>();
                 assignments != *previous.additional_model_assignments
+                    || facts.provider_accounts.iter().any(|account| {
+                        account.provider_kind == "openai"
+                            && previous
+                                .account_directory
+                                .account(&account.account_id)
+                                .is_none_or(|prior| prior.model_access() != &account.model_access)
+                    })
             });
-            let refresh_models = refresh_catalog || models_changed;
             let snapshot = compile_runtime_snapshot(
                 facts,
                 catalogs.as_ref(),
                 provider_kinds,
                 cached,
-                refresh_models,
-                models_changed,
+                refresh_catalog,
+                openai_accounts_changed,
                 self.privacy_compiler.clone(),
             )
             .await?;
@@ -404,11 +414,13 @@ impl RuntimeSnapshotCompiler {
                     return Err(RuntimeSnapshotCompileError::RevisionChanged);
                 }
                 let snapshot = snapshot
-                    .with_provider_catalog_generations(if cached.is_some() && !refresh_models {
-                        BTreeMap::new()
-                    } else {
-                        observed_generations
-                    })
+                    .with_provider_catalog_generations(
+                        if cached.is_some() && !refresh_catalog && !openai_accounts_changed {
+                            BTreeMap::new()
+                        } else {
+                            observed_generations
+                        },
+                    )
                     .with_extensions(extensions);
                 return Ok(snapshot);
             }
@@ -423,7 +435,7 @@ async fn compile_runtime_snapshot(
     provider_kinds: Vec<ProviderKind>,
     previous: Option<&RuntimeSnapshot>,
     refresh_catalog: bool,
-    account_models_changed: bool,
+    openai_accounts_changed: bool,
     privacy_compiler: Option<Arc<dyn crate::settings::privacy::PrivacyPolicyCompiler>>,
 ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
     // 目录读取失败不能抹掉已知归属；成功返回空目录则仍是权威的模型撤回
@@ -431,12 +443,13 @@ async fn compile_runtime_snapshot(
     let mut catalog_accounts = BTreeMap::new();
     let mut exhaustive_provider_catalogs = BTreeSet::new();
     for provider in &provider_kinds {
-        let models = if refresh_catalog || previous.is_none() {
+        let openai_changed = openai_accounts_changed && provider.as_str() == "openai";
+        let models = if refresh_catalog || previous.is_none() || openai_changed {
             catalogs.query_model_capabilities(provider).await.ok()
         } else {
             None
         };
-        if account_models_changed && provider.as_str() == "openai" && models.is_none() {
+        if openai_changed && models.is_none() {
             return Err(RuntimeSnapshotCompileError::CatalogChanged);
         }
         if let Some(previous) = previous.filter(|_| models.is_none()) {
@@ -505,7 +518,7 @@ async fn compile_runtime_snapshot(
     for account in facts.provider_accounts {
         let provider_kind = ProviderKind::new(account.provider_kind)
             .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?;
-        if !account.additional_models.models().is_empty() {
+        if provider_kind.as_str() == "openai" && !account.additional_models.models().is_empty() {
             additional_model_assignments
                 .insert(account.account_id.clone(), account.additional_models);
         }

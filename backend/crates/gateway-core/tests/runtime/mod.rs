@@ -875,3 +875,125 @@ fn empty_snapshot(value: u64) -> RuntimeSnapshot {
 fn revision(value: u64) -> ConfigRevision {
     ConfigRevision::new(value).expect("positive revision")
 }
+
+struct AccountPolicyCatalog {
+    opened: AtomicBool,
+    openai_queries: AtomicUsize,
+    other_queries: AtomicUsize,
+}
+
+impl ProviderCatalogPort for AccountPolicyCatalog {
+    fn catalog_generations(&self) -> BTreeMap<ProviderKind, ProviderCatalogGeneration> {
+        ["openai", "audit"]
+            .into_iter()
+            .map(|name| {
+                (
+                    ProviderKind::new(name).unwrap(),
+                    ProviderCatalogGeneration::new(1),
+                )
+            })
+            .collect()
+    }
+
+    fn query_model_capabilities(
+        &self,
+        provider: &ProviderKind,
+    ) -> BoxFuture<'_, Result<Vec<ProviderModelCapabilities>, ProviderCatalogUnavailable>> {
+        let is_openai = provider.as_str() == "openai";
+        Box::pin(async move {
+            if !is_openai {
+                self.other_queries.fetch_add(1, Ordering::SeqCst);
+                return Ok(Vec::new());
+            }
+            self.openai_queries.fetch_add(1, Ordering::SeqCst);
+            let source = ProviderAccountId::new("acct_policy_source").unwrap();
+            let mut models = vec![
+                ProviderModelCapabilities::new(
+                    UpstreamModelId::new("gpt-base").unwrap(),
+                    ModelCapabilities::new(Default::default(), None),
+                )
+                .with_catalog_accounts([source.clone()].into()),
+            ];
+            if self.opened.load(Ordering::SeqCst) {
+                models.push(
+                    ProviderModelCapabilities::new(
+                        UpstreamModelId::new("future-terra").unwrap(),
+                        ModelCapabilities::new(Default::default(), None),
+                    )
+                    .with_catalog_accounts([source].into()),
+                );
+            }
+            Ok(models)
+        })
+    }
+}
+
+fn openai_model_policy_facts(revision_number: u64, allow_extra: bool) -> SnapshotFacts {
+    use gateway_core::account::{
+        AccountAdditionalModels, AccountModelAccess, AccountModelAccessMode,
+    };
+    let policy = if allow_extra {
+        AccountModelAccess::all()
+    } else {
+        AccountModelAccess::new(AccountModelAccessMode::Allowlist, vec!["gpt-base".into()]).unwrap()
+    };
+    SnapshotFacts::new(
+        revision(revision_number),
+        revision(revision_number),
+        SettingsValues::new(3, "smart", BTreeMap::new(), None, None),
+        vec![],
+        vec![],
+        vec![
+            SnapshotProviderAccountFacts::new(
+                ProviderAccountId::new("acct_policy_source").unwrap(),
+                "openai",
+            )
+            .with_model_access(policy)
+            .with_additional_models(
+                AccountAdditionalModels::new(vec!["future-terra".into()]).unwrap(),
+            ),
+        ],
+        vec![],
+    )
+}
+
+#[test]
+fn committed_model_policy_change_refreshes_only_openai_catalog_before_publication() {
+    block_on(async {
+        let store = Arc::new(TestSnapshotStore::new(Ok(openai_model_policy_facts(
+            1, false,
+        ))));
+        let catalog = Arc::new(AccountPolicyCatalog {
+            opened: AtomicBool::new(false),
+            openai_queries: AtomicUsize::new(0),
+            other_queries: AtomicUsize::new(0),
+        });
+        let compiler = Arc::new(RuntimeSnapshotCompiler::new(store.clone(), catalog.clone()));
+        let initial = compiler.compile().await.unwrap();
+        let extra = gateway_core::routing::PublicModelId::new("future-terra").unwrap();
+        assert!(!initial.contains_public_model_for_scope(&extra, &initial.all_account_scope()));
+        let handle = RuntimeSnapshotHandle::new(initial);
+        let publisher = RuntimeSnapshotPublisher::new(
+            compiler,
+            handle.clone(),
+            Arc::new(TestSnapshotSubscriptions::default()),
+        );
+
+        catalog.opened.store(true, Ordering::SeqCst);
+        *store.facts.lock().unwrap() = Ok(openai_model_policy_facts(2, true));
+        *store.current_revision.lock().unwrap() = Ok(revision(2));
+        publisher.publish_committed(revision(2)).await;
+        let published = handle.acquire().unwrap();
+        assert_eq!(published.revision(), revision(2));
+        assert!(published.contains_public_model_for_scope(&extra, &published.all_account_scope()));
+        assert_eq!(catalog.openai_queries.load(Ordering::SeqCst), 2);
+        assert_eq!(catalog.other_queries.load(Ordering::SeqCst), 1);
+
+        *store.facts.lock().unwrap() = Ok(openai_model_policy_facts(3, true));
+        *store.current_revision.lock().unwrap() = Ok(revision(3));
+        publisher.publish_committed(revision(3)).await;
+        assert_eq!(handle.revision(), Some(revision(3)));
+        assert_eq!(catalog.openai_queries.load(Ordering::SeqCst), 2);
+        assert_eq!(catalog.other_queries.load(Ordering::SeqCst), 1);
+    });
+}

@@ -390,6 +390,13 @@ impl CodexProvider {
     #[must_use]
     pub fn with_harness_test_dial_loopback(mut self, address: std::net::SocketAddr) -> Self {
         self.harness_runtime = crate::config::OpenAiConfig::default().harness_paths();
+        // 测试的 Provider 与目录必须读取同一份隔离源码，否则选号只看额外模型。
+        self.catalog = Arc::new(
+            self.catalog
+                .as_ref()
+                .clone()
+                .with_harness_runtime(self.harness_runtime.clone()),
+        );
         self.harness_test_dial_loopback = Some(address);
         self
     }
@@ -661,12 +668,6 @@ impl Provider for CodexProvider {
                 UpstreamSendState::NotSent,
             ));
         };
-        let supports_priority = candidate.model_presentation().is_some_and(|model| {
-            model
-                .service_tiers()
-                .iter()
-                .any(|tier| tier.id() == "priority")
-        });
         let adapter = context.upstream_adapter(candidate.provider(), upstream_model)?;
         if adapter.is_none()
             && generate
@@ -791,7 +792,10 @@ impl Provider for CodexProvider {
                     .map(|affinity| affinity.key()),
             };
             let result = if allow_harness {
-                let origins = self.catalog.harness_default_origins(upstream_model.as_str()).await;
+                let origins = self
+                    .catalog
+                    .harness_default_origins(upstream_model.as_str())
+                    .await;
                 self.selector
                     .select_responses_with_context(
                         &request,
@@ -848,6 +852,24 @@ impl Provider for CodexProvider {
         if fast_mode != gateway_core::account::FastMode::Default
             && generate.protocol_payload().protocol() == PROVIDER_NAME
         {
+            // 目录画像按模型 ID 合并，快档证据必须在选号后回到此账号的来源。
+            // Disabled 只处理客户端显式档位，不依赖任何目录能力。
+            let supports_priority = if fast_mode != gateway_core::account::FastMode::Enabled {
+                false
+            } else if crate::credential::harness_oauth::is_harness_kind(
+                lease.account().authentication_kind(),
+            ) {
+                self.catalog
+                    .harness_account_supports_priority(lease.account(), upstream_model.as_str())
+                    .await
+            } else {
+                candidate.model_presentation().is_some_and(|model| {
+                    model
+                        .service_tiers()
+                        .iter()
+                        .any(|tier| tier.id() == "priority")
+                })
+            };
             let mut request =
                 CodexResponsesRequest::from_body(generate.protocol_payload().body().clone());
             if request.apply_fast_policy(fast_mode, supports_priority) {

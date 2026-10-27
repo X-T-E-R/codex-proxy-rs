@@ -343,3 +343,208 @@ async fn harness_account_priority_policy_freezes_per_account_before_runtime_fail
         }
     }
 }
+
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn mixed_harness_catalog_uses_selected_pi_model_tier_not_shared_opencode_tier() {
+    use gateway_core::account::{CredentialRevision, NewProviderAccount, ProviderAccount};
+    use provider_openai::credential::{
+        CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING, CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+        CodexCredentialCodec, CodexCredentialData, CodexOAuthCredentialData, ResponsesTransport,
+    };
+
+    const CHILD: &str = "CPR_TEST_PI_SOURCE_TIER_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../");
+        let bundle = tempfile::tempdir().unwrap();
+        let output_dir = bundle.path().join("openai-harness");
+        let assembled = std::process::Command::new("python")
+            .arg(root.join("deploy/harness-sources/assemble.py"))
+            .arg("assemble")
+            .arg("--output")
+            .arg(&output_dir)
+            .output()
+            .expect("assemble pinned sources");
+        assert!(
+            assembled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&assembled.stderr)
+        );
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                std::thread::current().name().unwrap(),
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env(
+                "CPR_OPENAI_HARNESS_WORKER_DIR",
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("harness-worker"),
+            )
+            .env("CPR_OPENCODE_SOURCE", output_dir.join("sources/opencode"))
+            .env("CPR_PI_SOURCE", output_dir.join("sources/pi"))
+            .output()
+            .expect("isolated test process");
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+
+    let origin = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer pi-test-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                json!({"type":"response.created","response":{"id":"resp_pi_tier","status":"in_progress","output":[]}}),
+                json!({"type":"response.completed","response":{"id":"resp_pi_tier","model":"gpt-5.6-terra","status":"completed","output":[],"usage":{"input_tokens":8,"output_tokens":4,"total_tokens":12}}})),
+            "text/event-stream",
+        ))
+        .expect(3)
+        .mount(&origin)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    for (id, kind, token) in [
+        (
+            "acct_affinity_switch_a",
+            CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING,
+            "opencode-test-token",
+        ),
+        (
+            "acct_provider_contract",
+            CODEX_AUTHENTICATION_KIND_PI_OPENAI,
+            "pi-test-token",
+        ),
+    ] {
+        let credential = CodexCredentialCodec::encode_complete(CodexCredentialData::OAuth(
+            CodexOAuthCredentialData {
+                transport: ResponsesTransport::Http,
+                schema_version: 1,
+                principal: None,
+                installation_id: uuid::Uuid::new_v4().to_string(),
+                access_token: token.to_owned(),
+                refresh_token: Some("test-refresh".to_owned()),
+                id_token: None,
+                oauth_client_id: Some("test-client".to_owned()),
+                oauth_scope: Some(
+                    "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct"
+                        .to_owned(),
+                ),
+                authentication_kind: kind.to_owned(),
+                cookies: Vec::new(),
+            },
+        ))
+        .unwrap();
+        let account = ProviderAccount::new(
+            ProviderAccountId::new(id).unwrap(),
+            ProviderKind::new("openai").unwrap(),
+            id.to_owned(),
+            None,
+            kind.to_owned(),
+            CredentialRevision::new(1).unwrap(),
+            None,
+        )
+        .with_account_facts(
+            true,
+            CredentialState::Ready,
+            QuotaState::unknown(),
+            None,
+            None,
+        )
+        .with_refresh_schedule(true, None);
+        store
+            .create_account(NewProviderAccount {
+                account,
+                credential,
+                model_access: None,
+            })
+            .await
+            .unwrap();
+    }
+    let policy = Arc::new(AccountPolicy {
+        mode: Mutex::new(AccountPriorityMode::Enabled),
+        calls: AtomicUsize::new(0),
+    });
+    let provider = Arc::new(
+        Arc::try_unwrap(priority_provider(
+            &store,
+            OFFICIAL_CODEX_BASE_URL.to_owned(),
+            &policy,
+        ))
+        .unwrap_or_else(|_| panic!("provider owner"))
+        .with_harness_test_dial_loopback(*origin.address()),
+    );
+    for (index, (mode, explicit)) in [
+        (FastMode::Enabled, None),
+        (FastMode::Enabled, Some("priority")),
+        (FastMode::Disabled, Some("priority")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut body = Map::from_iter([
+            ("model".to_owned(), json!("gpt-5.6-terra")),
+            ("input".to_owned(), json!("hello")),
+            (
+                "session_id".to_owned(),
+                json!(format!("pi_source_tier_{index}")),
+            ),
+        ]);
+        if let Some(tier) = explicit {
+            body.insert("service_tier".to_owned(), json!(tier));
+        }
+        let request = planned_request_with_presentation(
+            "openai",
+            Operation::Generate(GenerateRequest::from_protocol_payload(
+                ProtocolPayload::json_object("openai", body).unwrap(),
+            )),
+            "gpt-5.6-terra",
+            Some(
+                gateway_core::routing::ModelPresentation::new(None, None)
+                    .with_service_tiers(vec![ModelServiceTier::new("priority", "fast", "Fast")]),
+            ),
+        );
+        let context = AttemptContext::new(
+            RequestAttemptContext::new(
+                ModelRequestId::new(format!("req_pi_source_tier_{index}")).unwrap(),
+                ClientApiKeyId::new("key_openai_contract").unwrap(),
+            )
+            .with_fast_mode(mode),
+            NonZeroU32::MIN,
+            SystemTime::now() + Duration::from_secs(30),
+            account_policy(),
+            AccountAttemptContext::new(
+                BTreeSet::from([ProviderAccountId::new("acct_affinity_switch_a").unwrap()]),
+                None,
+                None,
+            )
+            .with_account_scope(contract_account_scope()),
+            None,
+            CancellationToken::new(),
+        )
+        .with_transport(AttemptTransport::Fallback);
+        let mut stream = provider
+            .clone()
+            .execute(request, context)
+            .await
+            .expect("selected pi worker");
+        while let Some(event) = stream.next().await {
+            event.expect("pi response");
+        }
+    }
+    let requests = origin.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    let tiers = requests
+        .iter()
+        .map(captured_request_body)
+        .map(|body| body.get("service_tier").cloned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tiers,
+        vec![None, Some(json!("priority")), Some(json!("default"))]
+    );
+}

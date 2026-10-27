@@ -435,17 +435,19 @@ impl HarnessSourceCatalog {
         Ok(Self { opencode, pi })
     }
 
+    fn source_for_account(&self, account: &ProviderAccount) -> &[HarnessSourceModel] {
+        if account.authentication_kind() == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING {
+            &self.opencode
+        } else {
+            &self.pi
+        }
+    }
+
     fn for_account(
         &self,
         account: &ProviderAccount,
     ) -> Result<Vec<HarnessSourceModel>, CodexCredentialCatalogError> {
-        let source = if account.authentication_kind()
-            == super::CODEX_AUTHENTICATION_KIND_CHATGPT_TOKEN_SHARING
-        {
-            &self.opencode
-        } else {
-            &self.pi
-        };
+        let source = self.source_for_account(account);
         source
             .iter()
             .cloned()
@@ -465,7 +467,9 @@ impl HarnessSourceCatalog {
                     }),
             )
             .filter(|model| {
-                model.as_ref().map_or(true, |model| account.model_access().allows(model.id.as_str()))
+                model.as_ref().map_or(true, |model| {
+                    account.model_access().allows(model.id.as_str())
+                })
             })
             .collect()
     }
@@ -622,9 +626,31 @@ impl CodexCredentialCatalogService {
             return (false, false);
         };
         (
-            catalog.opencode.iter().any(|item| item.id.as_str() == model),
+            catalog
+                .opencode
+                .iter()
+                .any(|item| item.id.as_str() == model),
             catalog.pi.iter().any(|item| item.id.as_str() == model),
         )
+    }
+
+    /// 同名模型在两套 harness 的快档能力可不同，选定账号后只读取该来源的画像。
+    pub(crate) async fn harness_account_supports_priority(
+        &self,
+        account: &ProviderAccount,
+        model: &str,
+    ) -> bool {
+        let Ok(catalog) = self.source_catalog().await else {
+            return false;
+        };
+        catalog.source_for_account(account).iter().any(|item| {
+            item.id.as_str() == model
+                && item
+                    .presentation
+                    .service_tiers()
+                    .iter()
+                    .any(|tier| tier.id() == "priority")
+        })
     }
 
     async fn harness_client_descriptors(
