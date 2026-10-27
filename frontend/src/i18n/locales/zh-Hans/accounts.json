@@ -54,6 +54,9 @@
       }
     },
     "account": "账号",
+    "identity": {
+      "emailNotProvided": "邮箱未获取"
+    },
     "connectionTest": {
       "duration": "响应耗时",
       "title": "测试连接",

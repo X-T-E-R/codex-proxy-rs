@@ -9,6 +9,8 @@ export function accountIdentityLabel(account: AccountIdentity): string {
   const email = account.email?.trim()
   if (email)
     return email
+  if ((account.authenticationKind === 'pi_openai' || account.authenticationKind === 'chatgpt_token_sharing') && account.name?.trim())
+    return account.name.trim()
   if (typeof account.accountId === 'string')
     return account.accountId
   return String(account.id)

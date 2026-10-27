@@ -2,6 +2,7 @@
 import type { Account } from '@/api'
 
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import AccountPlanBadge from '@/components/account/AccountPlanBadge.vue'
 import { stablePresetVisualToneClass } from '@/utils/color'
@@ -31,17 +32,26 @@ const props = withDefaults(
   },
 )
 
-const emailText = computed(() => accountIdentityLabel(props.account))
+const { t } = useI18n({ useScope: 'global' })
+const identityLabel = computed(() => accountIdentityLabel(props.account))
+const harnessWithoutEmail = computed(() =>
+  !props.account.email?.trim()
+  && (props.account.authenticationKind === 'pi_openai' || props.account.authenticationKind === 'chatgpt_token_sharing'),
+)
 
 const visibleNotes = computed(() => props.showNotes ? props.account.notes : undefined)
 
 const displayTitle = computed(() =>
-  visibleNotes.value || props.titleMode === 'email' || props.account.authenticationKind === 'api_key' ? emailText.value : emailText.value.split('@')[0],
+  visibleNotes.value || props.titleMode === 'email' || props.account.authenticationKind === 'api_key' || harnessWithoutEmail.value
+    ? identityLabel.value
+    : identityLabel.value.split('@')[0],
 )
 
-const secondaryText = computed(() =>
-  props.titleMode === 'email' || props.account.authenticationKind === 'api_key' ? null : emailText.value,
-)
+const secondaryText = computed(() => {
+  if (harnessWithoutEmail.value)
+    return t('accounts.identity.emailNotProvided')
+  return props.titleMode === 'email' || props.account.authenticationKind === 'api_key' ? null : identityLabel.value
+})
 
 const initial = computed(() => displayTitle.value.slice(0, 1).toUpperCase())
 

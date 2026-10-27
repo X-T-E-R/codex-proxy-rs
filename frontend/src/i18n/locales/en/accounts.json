@@ -54,6 +54,9 @@
       }
     },
     "account": "Account",
+    "identity": {
+      "emailNotProvided": "Email not available"
+    },
     "connectionTest": {
       "duration": "Response time",
       "title": "Test connection",

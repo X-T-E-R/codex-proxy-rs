@@ -54,6 +54,9 @@
       }
     },
     "account": "賬號",
+    "identity": {
+      "emailNotProvided": "電郵未取得"
+    },
     "connectionTest": {
       "duration": "響應耗時",
       "title": "測試連接",

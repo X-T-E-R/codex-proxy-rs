@@ -33,7 +33,7 @@ const quotaEntries = computed(() => groupedAccountQuotaWindows(
 ))
 const profileOpen = shallowRef(false)
 const forecastOpen = shallowRef(false)
-const hasForecast = computed(() => props.account.authenticationKind !== 'api_key')
+const hasForecast = computed(() => props.account.capabilities.quota)
 const hasPersonalInfo = computed(() => props.account.capabilities.profile || props.account.capabilities.subscription)
 const hasActions = computed(() => hasPersonalInfo.value || hasForecast.value || props.account.capabilities.quotaRefresh || props.account.capabilities.resetCredits)
 watch(hasPersonalInfo, (available) => {

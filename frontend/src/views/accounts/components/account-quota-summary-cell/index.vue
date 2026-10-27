@@ -53,6 +53,12 @@ const additionalEntryCount = computed(() => Math.max(summaryEntries.value.length
         <div class="h-1 w-full rounded-full bg-cp-success" :title="t('accounts.quota.unavailableHelp')" aria-hidden="true" />
       </div>
     </template>
+    <template v-else-if="!account.capabilities.quota">
+      <div class="flex min-w-0 items-start justify-between gap-2 text-[10px] leading-3 text-cp-text-quaternary">
+        <span class="min-w-0 font-bold">{{ t('accounts.quota.queryUnsupported') }}</span>
+        <AccountCapacityIndicator :capacity="account.capacity" @show-details="emit('showConcurrency')" />
+      </div>
+    </template>
     <template v-else-if="summaryEntries.length > 0">
       <div
         v-if="hasUsage"
