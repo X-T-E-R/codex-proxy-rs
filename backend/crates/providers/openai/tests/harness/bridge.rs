@@ -269,8 +269,9 @@ async fn worker_exit_releases_authorization_holder() {
     assert_eq!(session.authorization_holders(), 0);
     assert!(!session.stderr_snapshot().contains(TOKEN));
     assert!(!error.to_string().contains(TOKEN));
-    assert!(!process_alive(pid));
     session.shutdown().await.expect("shutdown");
+    // shutdown 等待子进程退出并回收后，kill -0 才能准确验证 PID 不再存在
+    assert!(!process_alive(pid));
     timeout(Duration::from_secs(5), origin.disconnected.notified())
         .await
         .expect("origin connection stayed open after worker exit");
