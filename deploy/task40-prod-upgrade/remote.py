@@ -204,6 +204,15 @@ def health():
         return False
 
 
+def configured_service_image(raw):
+    # 只返回目标服务已解析的镜像，不把含其它配置与凭据的 Compose JSON 写入收据
+    config = json.loads(raw)
+    services = config.get('services')
+    require(isinstance(services, dict) and isinstance(services.get(SERVICE), dict) and
+            isinstance(services[SERVICE].get('image'), str), 'compose_target_service_image_missing')
+    return services[SERVICE]['image']
+
+
 def gate_enter(root):
     gate = BASE / '.runtime/restart-recovery'
     require((gate / 'binding.json').is_file(), 'restart_gate_required')
@@ -241,6 +250,9 @@ class Deployment:
         for path in self.files:
             cmd += ['-f', path]
         return command(cmd + args, timeout=180)
+
+    def effective_image(self):
+        return configured_service_image(self.compose(['config', '--format', 'json']))
 
     def stamps(self):
         return {path: [Path(path).stat().st_size, Path(path).stat().st_mtime_ns] for path in
@@ -281,14 +293,14 @@ class Deployment:
         require(self.workdir and Path(self.workdir).resolve().is_relative_to(BASE) and self.files and
                 all(Path(path).resolve().is_relative_to(BASE) for path in self.files) and
                 not any('override' in Path(path).name for path in self.files), 'compose_scope_drift')
-        require(pin(BASE / '.env')[2] == OLD_IMAGE and
-                self.compose(['config', '--images']).decode().splitlines().count(OLD_IMAGE) == 1,
-                'unique_effective_image_required')
+        require(pin(BASE / '.env')[2] == OLD_IMAGE and self.effective_image() == OLD_IMAGE,
+                'target_service_image_or_pin_drift')
         require(shutil.disk_usage(BASE).free >= 2 * 1024**3, 'disk_space_low')
         self.before = facts()
         self.file_stamps = self.stamps()
         self.result.update(beforeRuntime=old, beforeFacts=self.before, targetImage=target,
-                           admittedFileStamps=self.file_stamps, envOpaqueDigest=opaque_env_digest(BASE / '.env'))
+                           admittedFileStamps=self.file_stamps, envOpaqueDigest=opaque_env_digest(BASE / '.env'),
+                           envOriginalDigest=hashlib.sha256((BASE / '.env').read_bytes()).hexdigest())
         self.save('ready')
 
     def activity(self):
@@ -407,7 +419,7 @@ class Deployment:
         self.pin_changed = target_pin == self.m['image']
         self.refresh_env_stamp()
         self.save('pin_changed_' + phase)
-        require(self.compose(['config', '--images']).decode().splitlines().count(target_pin) == 1, 'compose_pin_drift')
+        require(self.effective_image() == target_pin, 'compose_pin_drift')
         self.owned(expected, target_pin, False)
         self.result.setdefault('composeCommands', {})[phase] = {'issuedAt': now(), 'outcome': 'intent',
             'oldContainerId': expected['id'], 'targetImage': target_pin}
@@ -565,8 +577,7 @@ class Deployment:
                 all(current[k] == expected[k] for k in ('id', 'imageId', 'revision', 'startedAt', 'project', 'service')) and
                 current['running'] and current['health'] == 'healthy' and health(), 'takeover_settled_runtime_drift')
         require(self.binding['runtime'] == {k: current[k] for k in ('id', 'project', 'service', 'revision')} and
-                not (self.gate / 'maintenance').exists() and
-                self.compose(['config', '--images']).decode().splitlines().count(target_pin) == 1,
+                not (self.gate / 'maintenance').exists() and self.effective_image() == target_pin,
                 'takeover_settled_gate_or_compose_drift')
         _, old_receipt = self.recovery_receipt(self.old)
         require(old_receipt and old_receipt['phase'] == 'complete', 'takeover_old_receipt_unproven')
@@ -581,20 +592,28 @@ class Deployment:
         self.result['success'] = phase == 'candidate_verified_pending_gate'
         self.result['rollback'] = phase == 'rollback_verified_pending_gate'
 
-    def resume(self):
-        # 新的一次恢复授权只接管本 run；源结果保留在 result.json，写 takeover-result.json
+    def resume(self, retry_readonly=False):
+        # 每次接管保留独立终态；只读阻断才准许同 run 再次取得新 GO
         origin = self.root / 'result.json'
-        source = origin if origin.exists() else self.root / 'progress.json'
+        source = (self.root / 'takeover-result.json' if retry_readonly else
+                  origin if origin.exists() else self.root / 'progress.json')
         initial = json.loads(source.read_text())
+        if retry_readonly:
+            require(initial.get('retryableReadOnly') is True and
+                    initial.get('takeoverCommandsIssued') is False, 'takeover_retry_not_readonly')
         require(initial['phase'] not in ('deployed', 'rolled_back_same52', 'blocked_unchanged',
                                           'preflight_blocked') and
                 (self.root / 'attempt-claimed.json').exists(), 'takeover_source_not_recoverable')
         self.result = initial
         self.result['resumedFrom'] = {key: initial.get(key) for key in
-            ('phase', 'errorCode', 'recoveryErrorCode', 'restartRecoveryGate')}
-        self.result.pop('errorCode', None)
-        self.result.pop('recoveryErrorCode', None)
+            ('phase', 'errorCode', 'recoveryErrorCode', 'takeoverErrorCode', 'restartRecoveryGate')}
+        for key in ('errorCode', 'recoveryErrorCode', 'takeoverErrorCode', 'takeoverFinishedAt'):
+            self.result.pop(key, None)
         self.result['success'] = self.result['rollback'] = False
+        self.result['retryableReadOnly'] = False
+        self.result['takeoverCommandsIssued'] = False
+        action_started = False
+        maintenance_owner = None
         lock = None
         try:
             self.old = self.result['beforeRuntime']
@@ -630,9 +649,12 @@ class Deployment:
             current_stamps = self.stamps()
             require(all(current_stamps[path] == stamp for path, stamp in self.file_stamps.items()
                         if path != str(BASE / '.env')), 'takeover_config_drift')
-            # .env 仅可因本 run 的已记录 pin 操作变更，其余字节须原样
+            require(self.effective_image() == actual_pin, 'takeover_service_image_drift')
+            # .env 可为本 run 已记录 pin，或原始字节完整恢复后仅 mtime 变化
             if current_stamps[str(BASE / '.env')] != self.file_stamps[str(BASE / '.env')]:
-                require(self.result.get('pinCommands'), 'takeover_env_change_not_claimed')
+                restored = (actual_pin == OLD_IMAGE and self.result.get('envOriginalDigest') ==
+                            hashlib.sha256((BASE / '.env').read_bytes()).hexdigest())
+                require(self.result.get('pinCommands') or restored, 'takeover_env_change_not_claimed')
                 self.file_stamps[str(BASE / '.env')] = current_stamps[str(BASE / '.env')]
                 self.result['admittedFileStamps'] = self.file_stamps
             self.pin_changed = actual_pin == self.m['image']
@@ -648,6 +670,10 @@ class Deployment:
                 return self.result
             old_identity = all(current[k] == self.old[k] for k in ('id', 'imageId', 'revision', 'startedAt'))
             old_claim = self.result.get('stopCommands', {}).get(self.old['id'])
+            # 持久化即将执行的意图；此后即使进程消失也不能因只读失败而重获执行授权
+            action_started = True
+            self.result['takeoverCommandsIssued'] = True
+            self.save('takeover_action_intent')
             if old_identity and current['running']:
                 rollback_cmd = self.result.get('composeCommands', {}).get('rollback')
                 require(not old_claim and not rollback_cmd and actual_pin == OLD_IMAGE and
@@ -709,11 +735,15 @@ class Deployment:
             if lock is not None:
                 self.result['restartRecoveryGate'] = {'phase': 'maintenance_requires_operator' if
                     (self.gate / 'maintenance').exists() else 'released_requires_operator'}
+            self.result['retryableReadOnly'] = (not action_started and lock is not None and
+                maintenance_owner == self.root.name and
+                (self.gate / 'maintenance').exists() and
+                (self.gate / 'maintenance').read_text() == self.root.name)
         finally:
             if lock is not None:
                 lock.close()
             self.result['takeoverFinishedAt'] = now()
-            atomic(self.root / 'takeover-result.json', self.result)
+            atomic(self.root / ('takeover-retry-result.json' if retry_readonly else 'takeover-result.json'), self.result)
         return self.result
 
 
@@ -736,7 +766,7 @@ def baseline():
            '-p', SERVICE]
     for file in old['composeFiles'].split(','):
         cmd += ['-f', file]
-    require(command(cmd + ['config', '--images']).decode().splitlines().count(OLD_IMAGE) == 1,
+    require(configured_service_image(command(cmd + ['config', '--format', 'json'])) == OLD_IMAGE,
             'baseline_compose_pin_drift')
     with (gate / 'lifecycle.lock').open('r') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -748,12 +778,13 @@ def baseline():
             'freeBytes': shutil.disk_usage(BASE).free,
             'recoveryBindingRuntime': binding['runtime'], 'helperSource': binding['helperSource'],
             'helperImage': binding['helperImage'], 'maintenanceExists': False,
-            'effectiveImageCount': 1, 'recoveryLock': 'unheld'}
+            'serviceImage': OLD_IMAGE, 'recoveryLock': 'unheld'}
 
 
 def verify(root):
-    result_path = root / 'takeover-result.json'
-    result = json.loads((result_path if result_path.exists() else root / 'result.json').read_text())
+    result_path = next((path for path in (root / 'takeover-retry-result.json', root / 'takeover-result.json',
+                        root / 'result.json') if path.exists()), root / 'result.json')
+    result = json.loads(result_path.read_text())
     require(result['phase'] in ('deployed', 'rolled_back_same52'), 'terminal_health_not_admitted')
     for path in (BASE / '.runtime/deployments/task40-active.lock',
                  BASE / '.runtime/restart-recovery/lifecycle.lock', root / 'launch.guard'):
@@ -773,12 +804,11 @@ def verify(root):
             {key: current[key] for key in ('id', 'project', 'service', 'revision')}, 'fresh_gate_drift')
     app = Deployment(root)
     app.workdir, app.files = current['workingDir'], current['composeFiles'].split(',')
-    require(app.compose(['config', '--images']).decode().splitlines().count(expected_image) == 1,
-            'fresh_compose_drift')
+    require(app.effective_image() == expected_image, 'fresh_compose_drift')
     fresh = facts()
     preserve(result['beforeFacts'], fresh)
     return {'phase': 'verified', 'capturedAt': now(), 'runId': root.name,
-            'runtime': current, 'envPin': expected_image, 'effectiveImageCount': 1,
+            'runtime': current, 'envPin': expected_image, 'serviceImage': expected_image,
             'facts': fresh, 'healthz': 204, 'recoveryGate': 'rebound', 'locks': 'unheld'}
 
 
@@ -787,15 +817,22 @@ def main():
     parser.add_argument('action', choices=['run', 'resume', 'receipt', 'verify'])
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--GO', action='store_true')
+    parser.add_argument('--retry-readonly', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     app = Deployment(args.root)
     if args.action == 'receipt':
-        result = args.root / 'takeover-result.json'
-        if result.exists():
-            print(result.read_text())
-        elif (args.root / 'takeover-attempt-claimed.json').exists():
+        retry = args.root / 'takeover-retry-result.json'
+        first = args.root / 'takeover-result.json'
+        if (args.root / 'takeover-retry-launch-claimed.json').exists() and not retry.exists():
+            print(json.dumps({'phase': 'takeover_pending', 'attemptClaimed':
+                              (args.root / 'takeover-retry-attempt-claimed.json').exists()}))
+        elif retry.exists():
+            print(retry.read_text())
+        elif (args.root / 'takeover-attempt-claimed.json').exists() and not first.exists():
             print(json.dumps({'phase': 'takeover_pending', 'attemptClaimed': True}))
+        elif first.exists():
+            print(first.read_text())
         else:
             result = args.root / 'result.json'
             print(result.read_text() if result.exists() else json.dumps({'phase': 'pending', 'attemptClaimed': (args.root / 'attempt-claimed.json').exists()}))
@@ -807,12 +844,23 @@ def main():
     with lock_path.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.action == 'resume':
-            require(args.GO and (args.root / 'attempt-claimed.json').exists() and
-                    (args.root / 'takeover-launch-claimed.json').exists() and
-                    not (args.root / 'takeover-result.json').exists(), 'new_takeover_GO_and_claim_required')
-            with (args.root / 'takeover-attempt-claimed.json').open('x') as claim:
-                json.dump({'at': now(), 'singleAttempt': True}, claim)
-            result = app.resume()
+            retry = args.retry_readonly
+            launch = args.root / ('takeover-retry-launch-claimed.json' if retry else 'takeover-launch-claimed.json')
+            prior = args.root / 'takeover-result.json'
+            result_path = args.root / ('takeover-retry-result.json' if retry else 'takeover-result.json')
+            require(args.GO and (args.root / 'attempt-claimed.json').exists() and launch.exists() and
+                    not result_path.exists(), 'new_takeover_GO_and_claim_required')
+            if retry:
+                value = json.loads(prior.read_text())
+                require((args.root / 'takeover-attempt-claimed.json').exists() and
+                        value.get('retryableReadOnly') is True and value.get('takeoverCommandsIssued') is False,
+                        'takeover_retry_not_readonly')
+            else:
+                require(not prior.exists(), 'takeover_already_finished')
+            claim = args.root / ('takeover-retry-attempt-claimed.json' if retry else 'takeover-attempt-claimed.json')
+            with claim.open('x') as file:
+                json.dump({'at': now(), 'singleAttempt': True}, file)
+            result = app.resume(retry_readonly=retry)
             print(json.dumps({'phase': result['phase'], 'success': result['success'], 'rollback': result['rollback']}))
             return
         with (args.root / 'launch.guard').open('a') as guard:

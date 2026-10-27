@@ -64,8 +64,13 @@ def receipt(root):
     code = """import json
 from pathlib import Path
 r=Path(payload)
-p=r/'result.json'
-print(p.read_text() if p.exists() else json.dumps({'phase':'pending','attemptClaimed':(r/'attempt-claimed.json').exists(),'launchClaimed':(r/'launch-claimed.json').exists()}))
+p=next((p for p in (r/'takeover-retry-result.json',r/'takeover-result.json',r/'result.json') if p.exists()),None)
+if (r/'takeover-retry-launch-claimed.json').exists() and not (r/'takeover-retry-result.json').exists():
+ print(json.dumps({'phase':'takeover_pending','attemptClaimed':(r/'takeover-retry-attempt-claimed.json').exists()}))
+elif (r/'takeover-attempt-claimed.json').exists() and not (r/'takeover-result.json').exists():
+ print(json.dumps({'phase':'takeover_pending','attemptClaimed':True}))
+else:
+ print(p.read_text() if p else json.dumps({'phase':'pending','attemptClaimed':(r/'attempt-claimed.json').exists(),'launchClaimed':(r/'launch-claimed.json').exists()}))
 """
     return ssh(code, root)
 
@@ -135,23 +140,33 @@ print(p.stdout.decode() if p.returncode==0 else json.dumps({'phase':'verificatio
     raise RuntimeError('fresh_receipt_unverified_inspect_run')
 
 
-def start_remote_takeover(root):
+def start_remote_takeover(root, retry=False):
     code = """import fcntl,json,os,subprocess
 from pathlib import Path
-r=Path(payload)
+r=Path(payload['root'])
+retry=payload['retry']
 active=Path('/opt/codex-proxy-rs/.runtime/deployments/task40-active.lock')
 with active.open('r') as lock:
  fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
  fcntl.flock(lock,fcntl.LOCK_UN)
-assert (r/'attempt-claimed.json').exists() and not (r/'takeover-result.json').exists()
-with (r/'takeover-launch-claimed.json').open('x') as claim:
- json.dump({'at':'operator_GO','singleAttempt':True},claim)
-with (r/'takeover-console.private').open('xb') as log:
- p=subprocess.Popen(['python3',str(r/'remote.py'),'resume','--root',str(r),'--GO'],stdin=subprocess.DEVNULL,
-                    stdout=log,stderr=log,start_new_session=True,close_fds=True)
-print(json.dumps({'phase':'detached_takeover_started','pid':p.pid}))
+assert (r/'attempt-claimed.json').exists()
+if retry:
+ prior=json.loads((r/'takeover-result.json').read_text())
+ assert (r/'takeover-attempt-claimed.json').exists() and prior.get('retryableReadOnly') is True and prior.get('takeoverCommandsIssued') is False
+ assert not (r/'takeover-retry-result.json').exists()
+else:
+ assert not (r/'takeover-result.json').exists() and not (r/'takeover-launch-claimed.json').exists()
+claim=r/('takeover-retry-launch-claimed.json' if retry else 'takeover-launch-claimed.json')
+with claim.open('x') as file:
+ json.dump({'at':'operator_GO','singleAttempt':True},file)
+logname='takeover-retry-console.private' if retry else 'takeover-console.private'
+with (r/logname).open('xb') as log:
+ argv=['python3',str(r/'remote.py'),'resume','--root',str(r),'--GO']
+ if retry:argv+=['--retry-readonly']
+ p=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,close_fds=True)
+print(json.dumps({'phase':'detached_takeover_started','pid':p.pid,'retryReadOnly':retry}))
 """
-    return ssh(code, root)
+    return ssh(code, {'root': root, 'retry': retry})
 
 
 def start_remote(root):
@@ -246,20 +261,31 @@ def takeover(run_dir):
             j = read(run_dir / 'controller.json')
             remote.require(j.get('remoteMayHaveStarted') is True and
                            j['remoteRoot'].endswith('/' + run_dir.name) and
-                           not j.get('takeoverIntent'), 'takeover_run_owner_or_claim_drift')
+                           not j.get('takeoverRetryIntent'), 'takeover_run_owner_or_claim_drift')
             observed = receipt(j['remoteRoot'])
-            remote.require(observed['phase'] in ('pending', 'recovery_requires_operator') and
-                           observed.get('attemptClaimed', True), 'takeover_remote_not_recoverable')
-            j['takeoverIntent'] = True
-            j['takeoverAdmission'] = {'at': remote.now(), 'remotePhase': observed['phase']}
+            retry = bool(j.get('takeoverIntent'))
+            if retry:
+                remote.require(observed['phase'] == 'recovery_requires_operator' and
+                               observed.get('retryableReadOnly') is True and
+                               observed.get('takeoverCommandsIssued') is False,
+                               'takeover_retry_requires_confirmed_no_new_actions')
+                j['takeoverRetryIntent'] = True
+            else:
+                remote.require(observed['phase'] in ('pending', 'recovery_requires_operator') and
+                               observed.get('attemptClaimed', True), 'takeover_remote_not_recoverable')
+                j['takeoverIntent'] = True
+            j['takeoverAdmission'] = {'at': remote.now(), 'remotePhase': observed['phase'],
+                                      'retryReadOnly': retry}
+            j.pop('takeoverAckUnknown', None)
             save(run_dir / 'controller.json', j)
             try:
-                j['takeoverLaunch'] = start_remote_takeover(j['remoteRoot'])
+                j['takeoverLaunch'] = start_remote_takeover(j['remoteRoot'], retry=retry)
             except RuntimeError:
                 j['takeoverAckUnknown'] = True
             save(run_dir / 'controller.json', j)
             return {'phase': 'takeover_single_attempt', 'runDirectory': str(run_dir),
-                    'remoteRoot': j['remoteRoot'], 'launchAckUnknown': j.get('takeoverAckUnknown', False)}
+                    'remoteRoot': j['remoteRoot'], 'retryReadOnly': retry,
+                    'launchAckUnknown': j.get('takeoverAckUnknown', False)}
 
 
 def main():
