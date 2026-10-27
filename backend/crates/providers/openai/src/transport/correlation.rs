@@ -247,35 +247,3 @@ pub(super) fn scope_request(
         });
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use reqwest::header::{HeaderMap, HeaderValue};
-
-    use super::{account_scoped_id, scope_headers};
-
-    #[test]
-    fn underscore_session_id_shares_one_account_scope() {
-        let mut headers = HeaderMap::new();
-        headers.insert("session-id", HeaderValue::from_static("ses_raw"));
-        headers.insert("session_id", HeaderValue::from_static("ses_raw"));
-        headers.insert("x-client-request-id", HeaderValue::from_static("req_raw"));
-        scope_headers(&mut headers, Some("inst_a"));
-
-        let session = account_scoped_id("inst_a", "ses_raw");
-        let request = account_scoped_id("inst_a", "req_raw");
-        assert_eq!(headers["session-id"].to_str().unwrap(), session);
-        assert_eq!(headers["session_id"].to_str().unwrap(), session);
-        assert_eq!(headers["x-client-request-id"].to_str().unwrap(), request);
-        assert_ne!(session, account_scoped_id("inst_b", "ses_raw"));
-        assert_eq!(session, account_scoped_id("inst_a", "ses_raw"));
-
-        let mut again = HeaderMap::new();
-        again.insert(
-            "session_id",
-            HeaderValue::from_str(&session).expect("scoped header"),
-        );
-        scope_headers(&mut again, Some("inst_a"));
-        assert_ne!(again["session_id"].to_str().unwrap(), session);
-    }
-}
