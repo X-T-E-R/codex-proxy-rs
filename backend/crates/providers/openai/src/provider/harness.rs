@@ -17,8 +17,8 @@ use super::{
     AttemptContext, CodexAccountFailure, CodexCanonicalDecoder, CodexCanonicalOutcome,
     CodexCredentialLease, CodexProvider, CodexUpstreamDiagnostics, ContinuationBinding,
     MiddlewareHeader, OPENCODE_RESPONSE_ID_PREFIX, OpenAiContinuationScope, OpenAiSessionCapture,
-    ReplayBoundary, attach_openai_session_update, continuation_replay_required_error,
-    map_canonical_error, provider_error,
+    ProviderDiagnostic, ReplayBoundary, attach_openai_session_update,
+    continuation_replay_required_error, map_canonical_error, provider_error,
 };
 use crate::credential::harness_oauth::{HarnessMethod, method_for_kind};
 use crate::credential::{CodexCredentialSelector, opencode_fast_base};
@@ -450,9 +450,10 @@ fn harness_response_stream(
                 }
                 Ok(ResponseItem::Event(_)) => {},
                 Err(error) => {
-                    tracing::warn!(error = %error, upstream_status = ?status,
-                        "OpenAI Responses harness call failed");
                     let error = harness_error_with_status(error, sent, status, retry_after);
+                    tracing::warn!(failure_kind = error.kind().as_str(), upstream_status = ?error.upstream_status(),
+                        diagnostic_code = ?error.diagnostic().and_then(ProviderDiagnostic::code),
+                        "OpenAI Responses harness call failed");
                     if lease.allows_account_state_mutation() && sent == UpstreamSendState::Sent {
                         let failure = match error.kind() {
                             ProviderErrorKind::Unauthorized => Some(CodexAccountFailure::CredentialExpired),
@@ -541,7 +542,18 @@ fn harness_error_with_status(
         Some(500..=599) => ProviderErrorKind::Unavailable,
         _ => return harness_error(error, sent),
     };
-    let mut error = provider_error(kind, sent);
+    // Worker 异常可能含上游正文或请求细节，只从已确认的状态和已知拒绝提取静态分类
+    let diagnostic = if status == Some(403)
+        && matches!(&error, HarnessError::Worker { detail }
+            if detail.contains("The ChatGPT user is not eligible for subscription sharing"))
+    {
+        ProviderDiagnostic::new("ChatGPT subscription sharing is not available for this account")
+            .with_classification("harness_http", "subscription_sharing_ineligible")
+    } else {
+        ProviderDiagnostic::new("Responses upstream rejected the request")
+            .with_classification("harness_http", "upstream_http_rejected")
+    };
+    let mut error = provider_error(kind, sent).with_diagnostic(diagnostic);
     if let Some(status) = status.and_then(|status| u16::try_from(status).ok()) {
         error = error.with_status(status);
     }

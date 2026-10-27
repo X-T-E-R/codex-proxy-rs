@@ -398,6 +398,8 @@ pi 固定源码使用 `store:false`；`store:true` 新链在选号时排除 pi�
 `x-oai-request-id` 时复用其值，没有上游 ID 时使用模型执行 ID。`x-oai-request-id` 不是必需字段，
 也不要求客户端识别它；OpenAI 与 xAI 路由使用相同规则。失败响应的关联 ID 不采用会话 opening ID，
 错误正文读取失败时仍返回已知上游 ID；已采集的 turn state 等允许的会话头继续按原合同交付。
+上游已返回 HTTP 失败状态但没有完整响应正文时，返回该状态与安全的网关错误正文；
+上游权限拒绝使用 `403 upstream_permission_denied`，账号权限和下游 Client Key 权限分别判断。
 尚未建立执行的入口拒绝继续使用 middleware 的入口关联
 
 WebSocket 在尚未交付上游业务事件时合成的错误，除下述容量恢复合同外，保留已确认的失败状态，
@@ -951,14 +953,16 @@ OAuth 等待回调期间不持有保护；提交仍拒绝已删除或连接配�
 {
   "type": "error",
   "source": "upstream",
-  "gatewayErrorCode": "rate_limited",
+  "gatewayErrorCode": "upstream_permission_denied",
+  "providerErrorKind": "permission_denied",
+  "diagnosticCode": "subscription_sharing_ineligible",
   "sendState": "sent",
-  "error": "upstream unavailable",
-  "providerErrorCode": "usage_exhausted",
-  "providerErrorType": "invalid_request_error",
-  "upstreamStatus": 429,
-  "upstreamContentType": "application/json",
-  "upstreamBody": "{\"error\":{...}}"
+  "error": "upstream denied access for this account",
+  "providerErrorCode": null,
+  "providerErrorType": null,
+  "upstreamStatus": 403,
+  "upstreamContentType": null,
+  "upstreamBody": null
 }
 ```
 
@@ -967,10 +971,12 @@ OAuth 等待回调期间不持有保护；提交仍拒绝已删除或连接配�
 
 - `source` 为 `gateway`、`provider` 或 `upstream`：分别表示尚未进入 Provider、Provider 本地且未发送、
   已发送/可能已发送或已经捕获到上游事实
-- `gatewayErrorCode` 是 `GatewayErrorKind` 的稳定机器值，管理端据此生成中文摘要
+- `gatewayErrorCode` 是 `GatewayErrorKind` 的稳定机器值，管理端据此生成中文摘要；上游 `403` 的权限拒绝为 `upstream_permission_denied`，需要检查账号上游资格，不能当作网关登录失效
+- `providerErrorKind` 是 Provider 的稳定错误分类；非 Provider 错误为 `null`
+- `diagnosticCode` 是 Provider 已确认的有限安全原因码，例如 `subscription_sharing_ineligible`；未分类时为 `null`，不包含 worker 异常或上游正文
 - `sendState` 为 `not_sent`、`sent`、`ambiguous`，非 Provider 错误为 `null`
-- `error`、`providerErrorCode`、`providerErrorType`、`upstreamStatus`、`upstreamContentType` 和
-  `upstreamBody` 是实际捕获的原始诊断字段；缺失时为 `null`，不会由本地猜测或翻译
+- `error` 使用网关安全消息或 Provider 已解析的结构化上游 message；`providerErrorCode` 和 `providerErrorType` 只来自已解析的上游结构化错误
+- `upstreamStatus` 来自已确认的 HTTP 状态，即使响应正文未交付仍可存在；`upstreamContentType` 和 `upstreamBody` 只在实际取得完整上游响应时提供，缺失为 `null`
 
 ### 后台导入任务
 

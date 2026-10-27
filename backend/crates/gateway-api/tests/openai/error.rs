@@ -893,3 +893,53 @@ fn final_connection_failures_and_local_capacity_have_distinct_http_statuses() {
         );
     }
 }
+
+#[tokio::test]
+async fn upstream_status_without_a_complete_response_uses_safe_body_and_real_http_status() {
+    use gateway_core::error::ProviderDiagnostic;
+    use serde_json::json;
+
+    for (kind, upstream_status, expected_status, expected_code) in [
+        (
+            ProviderErrorKind::PermissionDenied,
+            Some(403),
+            StatusCode::FORBIDDEN,
+            "upstream_permission_denied",
+        ),
+        (
+            ProviderErrorKind::RateLimited,
+            Some(429),
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_exceeded",
+        ),
+        (
+            ProviderErrorKind::Unavailable,
+            Some(503),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "upstream_unavailable",
+        ),
+        (
+            ProviderErrorKind::Unavailable,
+            None,
+            StatusCode::BAD_GATEWAY,
+            "upstream_unavailable",
+        ),
+    ] {
+        let mut provider = ProviderError::new(kind, UpstreamSendState::Sent).with_diagnostic(
+            ProviderDiagnostic::new("classified without the upstream body")
+                .with_classification("harness_http", "upstream_http_rejected"),
+        );
+        if let Some(status) = upstream_status {
+            provider = provider.with_status(status);
+        }
+        let response = engine_error_response(&EngineError::Provider(provider));
+        assert_eq!(response.status(), expected_status);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["code"], expected_code);
+        assert_ne!(
+            body["error"]["message"],
+            json!("classified without the upstream body")
+        );
+    }
+}

@@ -1495,6 +1495,36 @@ async fn connection_test_rate_limited_probe_returns_provider_failure() {
 }
 
 #[tokio::test]
+async fn connection_test_exposes_status_only_provider_failure_without_upstream_body() {
+    let provider = FakeProviderAdmin::new("openai", events());
+    let store = FakeAccountStore::new("openai", events());
+    let services =
+        accounts_service_with_probe(provider, store, Arc::new(StatusOnlyAccountProbe)).await;
+    let events = services
+        .accounts()
+        .test_connection(
+            ProviderAccountId::new("acct_test").unwrap(),
+            gateway_core::routing::UpstreamModelId::new("gpt-6.1-sol").unwrap(),
+        )
+        .await
+        .expect("connection test stream")
+        .collect::<Vec<_>>()
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AccountConnectionTestEvent::Failed {
+            source: AccountProbeErrorSource::Upstream,
+            gateway_error_code: GatewayErrorKind::UpstreamPermissionDenied,
+            provider_error_kind: Some(gateway_core::error::ProviderErrorKind::PermissionDenied),
+            diagnostic_code: Some("subscription_sharing_ineligible"),
+            upstream_status: Some(403),
+            upstream_body: None,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
 async fn connection_test_should_preserve_disabled_account_status() {
     let provider = FakeProviderAdmin::new("xai", events());
     let mut account = account_record("xai");
@@ -3622,6 +3652,35 @@ impl AccountProbe for FailingAccountProbe {
                 Some(UpstreamSendState::NotSent),
                 None,
             ))
+        })
+    }
+}
+
+struct StatusOnlyAccountProbe;
+
+impl AccountProbe for StatusOnlyAccountProbe {
+    fn probe(
+        &self,
+        _: AccountProbeRequest,
+        _: Option<Arc<gateway_core::routing::RuntimeSnapshot>>,
+    ) -> BoxFuture<'_, Result<AccountProbeResult, AccountProbeError>> {
+        Box::pin(async {
+            let provider = gateway_core::error::ProviderError::new(
+                gateway_core::error::ProviderErrorKind::PermissionDenied,
+                UpstreamSendState::Sent,
+            )
+            .with_status(403)
+            .with_diagnostic(
+                gateway_core::error::ProviderDiagnostic::new("safe classification")
+                    .with_classification("harness_http", "subscription_sharing_ineligible"),
+            );
+            Err(AccountProbeError::new(
+                GatewayError::from_provider(&provider),
+                AccountProbeErrorSource::Upstream,
+                Some(UpstreamSendState::Sent),
+                None,
+            )
+            .with_provider_failure(&provider))
         })
     }
 }

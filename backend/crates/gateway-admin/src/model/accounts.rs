@@ -300,6 +300,8 @@ pub enum AccountConnectionTestEvent {
     Failed {
         source: AccountProbeErrorSource,
         gateway_error_code: GatewayErrorKind,
+        provider_error_kind: Option<gateway_core::error::ProviderErrorKind>,
+        diagnostic_code: Option<&'static str>,
         send_state: Option<UpstreamSendState>,
         message: String,
         provider_error_code: Option<String>,

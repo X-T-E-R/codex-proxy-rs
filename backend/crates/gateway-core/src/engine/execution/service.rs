@@ -1569,12 +1569,18 @@ impl DefaultExecutionService {
                 );
             }
         }
-        AccountProbeError::new(
+        let probe_error = AccountProbeError::new(
             gateway_error_from_engine(error),
             source,
             send_state,
             upstream_response,
-        )
+        );
+        match error {
+            EngineError::Provider(provider_error) => {
+                probe_error.with_provider_failure(provider_error)
+            }
+            _ => probe_error,
+        }
     }
 }
 

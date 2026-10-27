@@ -750,6 +750,7 @@ async fn selected_harness_completes_fixed_source_mock_and_protects_account_histo
         .await
         .expect("rate response deadline");
         assert_eq!(rate_error.kind(), ProviderErrorKind::RateLimited);
+        assert_eq!(rate_error.upstream_status(), Some(429));
         assert_eq!(rate_error.send_state(), UpstreamSendState::Sent);
         assert_eq!(rate_error.retry_after(), Some(Duration::from_secs(17)));
         let next = provider
@@ -803,6 +804,7 @@ async fn selected_harness_completes_fixed_source_mock_and_protects_account_histo
         .await
         .expect("unauthorized deadline");
         assert_eq!(unauthorized.kind(), ProviderErrorKind::Unauthorized);
+        assert_eq!(unauthorized.upstream_status(), Some(401));
         assert_eq!(unauthorized.send_state(), UpstreamSendState::Sent);
         let next = provider
             .clone()
@@ -815,6 +817,82 @@ async fn selected_harness_completes_fixed_source_mock_and_protects_account_histo
         assert_eq!(
             origin.received_requests().await.unwrap().len(),
             6 + cases.len()
+        );
+
+        seed_harness_as(
+            &store,
+            "acct_provider_contract",
+            kind,
+            "token-permission-test",
+        )
+        .await;
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .and(header("authorization", "Bearer token-permission-test"))
+            .respond_with({
+                let attempts = Arc::clone(&attempts);
+                move |_: &wiremock::Request| {
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        ResponseTemplate::new(403).set_body_json(json!({"error": {
+                            "message": "The ChatGPT user is not eligible for subscription sharing",
+                            "debug_token": "secret-upstream-body"
+                        }}))
+                    } else {
+                        ResponseTemplate::new(503)
+                            .set_body_raw("<html>private diagnostic content</html>", "text/html")
+                    }
+                }
+            })
+            .expect(2)
+            .mount(&origin)
+            .await;
+        let excluded = BTreeSet::from([
+            ProviderAccountId::new("acct_affinity_switch_a").unwrap(),
+            ProviderAccountId::new("acct_affinity_switch_b").unwrap(),
+            ProviderAccountId::new("acct_scope_new").unwrap(),
+        ]);
+        for (index, expected_kind, expected_status) in [
+            (0, ProviderErrorKind::PermissionDenied, 403),
+            (1, ProviderErrorKind::Unavailable, 503),
+        ] {
+            let mut stream = provider
+                .clone()
+                .execute(
+                    harness_request(&format!("permission_probe_{index}"), false),
+                    harness_attempt(
+                        &format!("req_harness_permission_{kind}_{index}"),
+                        excluded.clone(),
+                    ),
+                )
+                .await
+                .expect("selected account after upstream permission denial");
+            let error = timeout(Duration::from_secs(30), async {
+                while let Some(result) = stream.next().await {
+                    if let Err(error) = result {
+                        return error;
+                    }
+                }
+                panic!("upstream rejection must end as a stream error")
+            })
+            .await
+            .expect("upstream rejection deadline");
+            assert_eq!(error.kind(), expected_kind);
+            assert_eq!(error.upstream_status(), Some(expected_status));
+            assert_eq!(error.send_state(), UpstreamSendState::Sent);
+            assert!(error.client_visible_upstream_response().is_none());
+            assert!(!format!("{error:?}").contains("secret-upstream-body"));
+            if index == 0 {
+                assert_eq!(
+                    error.diagnostic().and_then(|diagnostic| diagnostic.code()),
+                    Some("subscription_sharing_ineligible")
+                );
+            }
+        }
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "403 must not mark the account credential expired"
         );
     }
 }

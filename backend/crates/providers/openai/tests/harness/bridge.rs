@@ -179,7 +179,7 @@ async fn pinned_sources_complete_opencode_and_pi_responses() {
     session.shutdown().await.expect("shutdown");
     assert!(!process_alive(pid));
     let origin_headers = origin.headers_for_last();
-    assert_eq!(header(&origin_headers, "x-cpr-harness-managed"), Some("1"));
+    assert!(header(&origin_headers, "x-cpr-harness-managed").is_none());
 }
 
 #[tokio::test]
@@ -202,10 +202,7 @@ async fn configured_proxy_reaches_origin() {
         proxy.saw_absolute_http(),
         "proxy did not observe an absolute-form request"
     );
-    assert_eq!(
-        header(&origin.headers_for_last(), "x-cpr-harness-managed"),
-        Some("1")
-    );
+    assert!(header(&origin.headers_for_last(), "x-cpr-harness-managed").is_none());
     assert_clean(&session, TOKEN);
     session.shutdown().await.expect("shutdown");
 }
@@ -640,7 +637,7 @@ async fn downstream_identity_headers_do_not_override_either_source() {
         assert_account_token(&wire, token);
         assert_source_session(&wire, pi_path);
         assert_no_downstream_identity(&wire);
-        assert_eq!(header(&wire, "x-cpr-harness-managed"), Some("1"));
+        assert!(header(&wire, "x-cpr-harness-managed").is_none());
         assert_clean(&session, token);
     }
     let stderr = session.stderr_snapshot();
@@ -1372,7 +1369,7 @@ async fn account_scoped_session_stays_stable_until_the_account_changes() {
     );
     for record in &records {
         assert_raw_scope_absent(&record.headers, &record.body);
-        assert_eq!(header(&record.headers, "x-cpr-harness-managed"), Some("1"));
+        assert!(header(&record.headers, "x-cpr-harness-managed").is_none());
     }
     assert_clean(&session, TOKEN);
     assert_clean(&session, TOKEN_PI);
@@ -1689,7 +1686,7 @@ async fn upstream_permit_rejects_other_hosts_and_conflicting_auth() {
     assert_account_token(&wire, TOKEN);
     assert!(header(&wire, "x-api-key").is_none());
     assert!(header(&wire, "api-key").is_none());
-    assert_eq!(header(&wire, "x-cpr-harness-managed"), Some("1"));
+    assert!(header(&wire, "x-cpr-harness-managed").is_none());
     assert_eq!(origin.recorded.lock().expect("records").len(), 1);
     let stderr = session.stderr_snapshot();
     assert!(!stderr.contains("sk-conflict-header"));

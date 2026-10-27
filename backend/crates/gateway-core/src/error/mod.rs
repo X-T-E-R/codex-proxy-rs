@@ -1090,6 +1090,8 @@ pub enum GatewayErrorKind {
     ProviderInfrastructureUnavailable,
     /// 上游限流
     RateLimited,
+    /// 上游拒绝当前账号的请求权限
+    UpstreamPermissionDenied,
     /// 上游暂不可用
     UpstreamUnavailable,
     /// 上游拒收当前请求：消息过大（如 WebSocket close 1009）
@@ -1120,6 +1122,7 @@ impl GatewayErrorKind {
             Self::ConcurrencyQueueTimeout => "concurrency_queue_timeout",
             Self::ProviderInfrastructureUnavailable => "provider_infrastructure_unavailable",
             Self::RateLimited => "rate_limited",
+            Self::UpstreamPermissionDenied => "upstream_permission_denied",
             Self::UpstreamUnavailable => "upstream_unavailable",
             Self::MessageTooBig => "message_too_big",
             Self::Timeout => "timeout",
@@ -1214,9 +1217,13 @@ impl GatewayError {
                 GatewayErrorKind::Unsupported,
                 "requested capability is unsupported",
             ),
-            ProviderErrorKind::Unauthorized | ProviderErrorKind::PermissionDenied => Self::new(
+            ProviderErrorKind::Unauthorized => Self::new(
                 GatewayErrorKind::UpstreamUnavailable,
                 "upstream authentication resource is unavailable",
+            ),
+            ProviderErrorKind::PermissionDenied => Self::new(
+                GatewayErrorKind::UpstreamPermissionDenied,
+                "upstream denied access for this account",
             ),
             ProviderErrorKind::RequestPolicyDenied => Self::new(
                 GatewayErrorKind::PolicyDenied,

@@ -5,7 +5,9 @@ use std::fmt;
 use bytes::Bytes;
 use futures::future::BoxFuture;
 
-use crate::error::{ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind};
+use crate::error::{
+    ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind, ProviderError, ProviderErrorKind,
+};
 use crate::identity::ProviderKind;
 use crate::routing::UpstreamModelId;
 use crate::{account::ProviderAccountId, operation::Operation, upstream::UpstreamSendState};
@@ -94,12 +96,15 @@ impl AccountProbeErrorSource {
 
 /// 管理端连接测试的终态错误
 ///
-/// `gateway` 保留稳定分类，`upstream_response` 只面向本次认证管理请求展示源响应
+/// `gateway` 保留稳定分类，状态与 Provider 分类独立于是否取得完整上游响应
+/// `upstream_response` 只面向本次认证管理请求展示源响应
 #[derive(Debug)]
 pub struct AccountProbeError {
     gateway: GatewayError,
     source: AccountProbeErrorSource,
     send_state: Option<UpstreamSendState>,
+    provider_error_kind: Option<ProviderErrorKind>,
+    upstream_status: Option<u16>,
     upstream_response: Option<Box<AccountProbeUpstreamResponse>>,
 }
 
@@ -115,8 +120,20 @@ impl AccountProbeError {
             gateway,
             source,
             send_state,
+            provider_error_kind: None,
+            upstream_status: upstream_response
+                .as_ref()
+                .map(AccountProbeUpstreamResponse::status),
             upstream_response: upstream_response.map(Box::new),
         }
+    }
+
+    /// 在完整响应不可用时也保留已确认的上游状态与 Provider 分类
+    #[must_use]
+    pub fn with_provider_failure(mut self, error: &ProviderError) -> Self {
+        self.provider_error_kind = Some(error.kind());
+        self.upstream_status = error.upstream_status().or(self.upstream_status);
+        self
     }
 
     #[must_use]
@@ -132,6 +149,23 @@ impl AccountProbeError {
     #[must_use]
     pub const fn send_state(&self) -> Option<UpstreamSendState> {
         self.send_state
+    }
+
+    #[must_use]
+    pub const fn provider_error_kind(&self) -> Option<ProviderErrorKind> {
+        self.provider_error_kind
+    }
+
+    #[must_use]
+    pub const fn upstream_status(&self) -> Option<u16> {
+        self.upstream_status
+    }
+
+    #[must_use]
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        self.gateway
+            .diagnostic()
+            .and_then(|diagnostic| diagnostic.code())
     }
 
     #[must_use]

@@ -965,6 +965,8 @@ mod actions {
             DomainConnectionTestEvent::Failed {
                 source: AccountProbeErrorSource::Upstream,
                 gateway_error_code: GatewayErrorKind::RateLimited,
+                provider_error_kind: None,
+                diagnostic_code: None,
                 send_state: Some(UpstreamSendState::Sent),
                 message: "upstream unavailable".to_owned(),
                 provider_error_code: Some("usage_exhausted".to_owned()),
@@ -1026,6 +1028,8 @@ mod actions {
                     "type": "error",
                     "source": "upstream",
                     "gatewayErrorCode": "rate_limited",
+                    "providerErrorKind": null,
+                    "diagnosticCode": null,
                     "sendState": "sent",
                     "error": "upstream unavailable",
                     "providerErrorCode": "usage_exhausted",
@@ -1036,6 +1040,33 @@ mod actions {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn connection_test_status_only_permission_denial_has_safe_diagnostic_fields() {
+        let event = AccountConnectionTestEvent::from((
+            DomainConnectionTestEvent::Failed {
+                source: AccountProbeErrorSource::Upstream,
+                gateway_error_code: GatewayErrorKind::UpstreamPermissionDenied,
+                provider_error_kind: Some(gateway_core::error::ProviderErrorKind::PermissionDenied),
+                diagnostic_code: Some("subscription_sharing_ineligible"),
+                send_state: Some(UpstreamSendState::Sent),
+                message: "upstream denied access for this account".to_owned(),
+                provider_error_code: None,
+                provider_error_type: None,
+                upstream_status: Some(403),
+                upstream_content_type: None,
+                upstream_body: None,
+            },
+            gateway_api::TimePresenter::new(Default::default()),
+        ))
+        .data;
+        assert_eq!(event["gatewayErrorCode"], "upstream_permission_denied");
+        assert_eq!(event["providerErrorKind"], "permission_denied");
+        assert_eq!(event["diagnosticCode"], "subscription_sharing_ineligible");
+        assert_eq!(event["upstreamStatus"], 403);
+        assert!(event["upstreamBody"].is_null());
+        assert!(event["providerErrorCode"].is_null());
     }
 
     #[test]

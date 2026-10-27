@@ -1361,9 +1361,7 @@ impl AccountsService for DefaultAccountsService {
                     .chain(std::iter::once(AccountConnectionTestEvent::Completed))
                     .collect(),
                 Err(error) => {
-                    let upstream_status = error
-                        .upstream_response()
-                        .map(gateway_core::engine::probe::AccountProbeUpstreamResponse::status);
+                    let upstream_status = error.upstream_status();
                     let upstream_content_type = error
                         .upstream_response()
                         .and_then(|response| response.content_type())
@@ -1376,6 +1374,8 @@ impl AccountsService for DefaultAccountsService {
                     vec![AccountConnectionTestEvent::Failed {
                         source: error.source(),
                         gateway_error_code: error.kind(),
+                        provider_error_kind: error.provider_error_kind(),
+                        diagnostic_code: error.diagnostic_code(),
                         send_state: error.send_state(),
                         message,
                         provider_error_code: error.client_error_code().map(ToOwned::to_owned),

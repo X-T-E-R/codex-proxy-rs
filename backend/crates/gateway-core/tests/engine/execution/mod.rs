@@ -3200,6 +3200,62 @@ fn probe_failures_should_be_observable_without_a_model_request_row() {
 }
 
 #[test]
+fn probe_preserves_upstream_status_and_provider_classification_without_response_body() {
+    for (status, kind, gateway_kind) in [
+        (
+            Some(403),
+            ProviderErrorKind::PermissionDenied,
+            GatewayErrorKind::UpstreamPermissionDenied,
+        ),
+        (
+            Some(429),
+            ProviderErrorKind::RateLimited,
+            GatewayErrorKind::RateLimited,
+        ),
+        (
+            Some(503),
+            ProviderErrorKind::Unavailable,
+            GatewayErrorKind::UpstreamUnavailable,
+        ),
+        (
+            None,
+            ProviderErrorKind::Unavailable,
+            GatewayErrorKind::UpstreamUnavailable,
+        ),
+    ] {
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(probe_snapshot()),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::new([
+                Arc::new(StatusOnlyProvider { status, kind }) as Arc<dyn Provider>
+            ])
+            .expect("provider registry"),
+            Arc::new(UnusedAdmissions),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+            Arc::new(crate::RecordingDiagnostics::default()),
+        );
+        let error = block_on(service.probe(
+            AccountProbeRequest {
+                account_id: ProviderAccountId::new("acct_probe").unwrap(),
+                provider_kind: ProviderKind::new("openai").unwrap(),
+                upstream_model: UpstreamModelId::new("gpt-probe").unwrap(),
+                operation: probe_operation(),
+            },
+            None,
+        ))
+        .expect_err("provider should reject this probe");
+        assert_eq!(error.kind(), gateway_kind);
+        assert_eq!(error.source(), AccountProbeErrorSource::Upstream);
+        assert_eq!(error.send_state(), Some(UpstreamSendState::Sent));
+        assert_eq!(error.upstream_status(), status);
+        assert_eq!(error.provider_error_kind(), Some(kind));
+        assert_eq!(error.diagnostic_code(), Some("upstream_http_rejected"));
+        assert!(error.upstream_response().is_none());
+    }
+}
+
+#[test]
 fn provider_local_probe_failure_should_remain_distinct_from_upstream() {
     let store = Arc::new(TrackingExecutionStore::default());
     let providers = ProviderRegistry::new([Arc::new(LocalFailingProvider) as Arc<dyn Provider>])
@@ -3441,6 +3497,43 @@ fn client_catalog_forwards_scope_maps_whole_objects_and_omits_unroutable_models(
             pairs[0].1, pairs[2].1,
             "插件别名使用相同原生对象，不伪造字段"
         );
+    }
+}
+
+struct StatusOnlyProvider {
+    status: Option<u16>,
+    kind: ProviderErrorKind,
+}
+
+#[async_trait]
+impl Provider for StatusOnlyProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+
+    async fn execute(
+        self: Arc<Self>,
+        _: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        let mut error = ProviderError::new(self.kind, UpstreamSendState::Sent).with_diagnostic(
+            gateway_core::error::ProviderDiagnostic::new("safe classification")
+                .with_classification("harness_http", "upstream_http_rejected"),
+        );
+        if let Some(status) = self.status {
+            error = error.with_status(status);
+        }
+        Err(error)
     }
 }
 

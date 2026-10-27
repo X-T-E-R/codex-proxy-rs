@@ -24,8 +24,6 @@ use tokio::process::ChildStdin;
 use super::{HarnessError, ObservedUpstreamRequest};
 use crate::harness::protocol::{self, BodyWindow, HttpRequest};
 
-const MANAGED_HEADER: &str = "x-cpr-harness-managed";
-
 #[derive(Clone)]
 pub(crate) struct DialPlan {
     pub(crate) allow_remote: bool,
@@ -113,7 +111,6 @@ pub(crate) async fn forward(
             HeaderValue::from_bytes(value.as_bytes()).map_err(|_| HarnessError::Upstream)?;
         headers.append(name, value);
     }
-    headers.insert(MANAGED_HEADER, HeaderValue::from_static("1"));
     let response = io
         .client
         .request(method, target)
