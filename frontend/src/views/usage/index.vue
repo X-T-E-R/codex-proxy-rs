@@ -97,9 +97,20 @@ watch(filterField, (field) => {
     recordView.value = 'all'
 })
 
-// 错误探索包含重试后成功的请求，用户显式选择的状态仍优先
-watch([filterField, filterValue, errorTypes], ([field, value, types]) => {
-  if (!statusExplicit.value && (types.length > 0 || field === 'error' || (field === 'search' && value.trim() !== '')))
+// 新错误条件从全部状态开始，显式状态选择只约束当前错误条件
+watch([
+  () => [...errorTypes.value].sort().join(','),
+  () => {
+    const value = filterValue.value.trim()
+    return value && (filterField.value === 'error' || filterField.value === 'search')
+      ? `${filterField.value}:${value}`
+      : ''
+  },
+  filterField,
+], ([types, keyword, field], [previousTypes, previousKeyword]) => {
+  if ((types && types !== previousTypes) || (keyword && keyword !== previousKeyword))
+    statusExplicit.value = false
+  if (!statusExplicit.value && (types || keyword || field === 'error'))
     recordView.value = 'all'
 })
 </script>
