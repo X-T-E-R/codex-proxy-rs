@@ -3,6 +3,8 @@
 use super::super::*;
 use super::literal_contains_pattern;
 
+const OVERLOADED_MESSAGE_PATTERN: &str = "server[ _]+(is[ _]+)?overloaded|server_overloaded";
+
 pub(super) fn push_error_keyword(query: &mut QueryBuilder<Postgres>, value: &str, alias: &str) {
     query.push("(");
     push_error_keyword_source(query, value, alias, false);
@@ -171,17 +173,15 @@ fn error_type_source_predicate(error_type: UsageErrorType, alias: &str, event: b
     match error_type {
         UsageErrorType::Overloaded => {
             let message = if event { "message" } else { "error_message" };
-            structured_error_predicate(
+            let raw = structured_error_predicate(
                 alias,
-                &overloaded_predicate(
-                    &code,
-                    "raw_code",
-                    "raw_type",
-                    &format!(
-                        "coalesce({alias}.{message},'') ~* 'server[ _]+(is[ _]+)?overloaded|server_overloaded'"
-                    ),
-                ),
-            )
+                &overloaded_predicate(&["raw_code", "raw_type"], "false"),
+            );
+            let stored = overloaded_predicate(
+                &[&code],
+                &format!("coalesce({alias}.{message},'') ~* '{OVERLOADED_MESSAGE_PATTERN}'"),
+            );
+            format!("{stored} or {raw}")
         }
         UsageErrorType::Status503 => {
             let raw = structured_error_predicate(alias, "raw_code = '503' or raw_status = '503'");
@@ -234,21 +234,19 @@ fn error_type_source_predicate(error_type: UsageErrorType, alias: &str, event: b
     }
 }
 
-pub(super) fn overloaded_predicate(
-    stored: &str,
-    raw_code: &str,
-    raw_type: &str,
-    message: &str,
-) -> String {
-    format!(
-        "{stored} like '%overload%' or {raw_code} like '%overload%' or {raw_type} like '%overload%' or {message}"
-    )
+pub(super) fn overloaded_predicate(codes: &[&str], message: &str) -> String {
+    let mut predicates = codes
+        .iter()
+        .map(|code| format!("{code} like '%overload%'"))
+        .collect::<Vec<_>>();
+    predicates.push(message.to_owned());
+    predicates.join(" or ")
 }
 
 fn structured_error_predicate(alias: &str, predicate: &str) -> String {
     // 与服务端错误摘要使用相同的受控详情解码路径，非法 JSON 不参与分类
     format!(
-        "exists(select 1 from (
+        "case when {alias}.error_details is null then false else exists(select 1 from (
            select lower(coalesce(raw_error#>>'{{error,code}}',raw_error#>>'{{response,error,code}}',raw_error->>'code','')) raw_code,
                   lower(coalesce(raw_error#>>'{{error,type}}',raw_error#>>'{{response,error,type}}',raw_error->>'type','')) raw_type,
                   coalesce(raw_error#>>'{{error,status}}',raw_error#>>'{{response,error,status}}',raw_error->>'status','') raw_status
@@ -257,7 +255,7 @@ fn structured_error_predicate(alias: &str, predicate: &str) -> String {
              else document end raw_error
              from (select case when pg_input_is_valid({alias}.error_details,'jsonb') then {alias}.error_details::jsonb end document) documents
            ) upstream
-         ) codes where {predicate})"
+         ) codes where {predicate}) end"
     )
 }
 

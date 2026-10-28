@@ -2147,7 +2147,9 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 聚合或本地计价模型选择。没有保存上游模型报告的记录保持未知
 
 请求明细的 `clientApiKeyName`、`accountName` 按字面量包含匹配请求保存的历史名称快照，区分大小写，
-不解析为 ID，也不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
+不解析为 ID，也不依赖当前配置是否存在。请求行的账号来自末次尝试，`accountName` 不匹配中间失败尝试的其他账号；
+按实际触发账号排查时，使用运维错误列表的 `accountId`，终态和尝试事件分别按各自保存的账号筛选。
+`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
 
 请求列表与运维错误列表的 `search` 按字面量包含匹配模型、Key/账号引用和已存账号名称/邮箱快照，Key 名称匹配不区分大小写，`%`、`_` 和 `\` 按普通字符处理，
 同时匹配错误码、分类、消息、受控详情及上述中英文错误词。运维错误列表的错误匹配以该行来源为准，不替换为请求的其他尝试。
@@ -2169,7 +2171,9 @@ OpenAI 优先采用服务端 `openai-model` / `x-openai-model` 报告（流内�
 不扫描请求正文。子项可能重叠，不相加；本地基础设施或无可用账号的 503 不标成上游过载。
 核对 `overloaded` 明细时，沿用摘要的时间范围与 `provider`，请求列表使用 `status=all&errorTypes=overloaded`，不附加局部筛选
 
-`attempts` 返回 `observed/serverRelated/overloaded/status503`，按请求和 attempt 去重，不重复累计相同的末次事件，
+`attempts` 返回 `observed/serverRelated/overloaded/status503`，按请求和 attempt 去重，不重复累计相同的末次事件。
+同一请求两次过载后成功时，`totals.overloaded` 和明细总数各计 1，`attempts.overloaded` 计 2。
+运维错误列表按事件返回，重复观测和无请求关联的独立诊断各保留一行，时间范围使用各行的发生时间；摘要只纳入窗内请求及其关联尝试。
 `coverage:"observed_only"` 表示并非完整尝试账本。`source:"retained_records"` 及窗内
 `earliestRetainedAt/latestRetainedAt` 说明实际保留范围，不保证历史流量完整，不能据此计算历史错误率
 

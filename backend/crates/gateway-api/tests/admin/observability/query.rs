@@ -114,6 +114,12 @@ async fn usage_query_should_parse_error_filters_and_status_precedence() {
             vec![],
         ),
         (
+            "?error=server%20is%20overloaded",
+            UsageRecordStatus::All,
+            Some("server is overloaded"),
+            vec![],
+        ),
+        (
             "?errorTypes=timeout",
             UsageRecordStatus::All,
             None,
