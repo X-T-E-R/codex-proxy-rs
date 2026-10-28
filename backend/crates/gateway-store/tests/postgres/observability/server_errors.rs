@@ -214,15 +214,27 @@ async fn summary_and_drilldown_share_requests_across_retries_accounts_and_date_b
             .execute(&db.pool).await.unwrap();
     }
     for (id, request, attempt, provider, account) in [
-        ("retry_1", Some("retry"), 1, "openai", "A"),
-        ("retry_1_duplicate", Some("retry"), 1, "openai", "A"),
-        ("retry_2", Some("retry"), 2, "openai", "B"),
-        ("failed_1", Some("failed"), 1, "openai", "A"),
-        ("failed_final_duplicate", Some("failed"), 2, "openai", "A"),
-        ("cancelled_1", Some("cancelled"), 1, "openai", "A"),
-        ("incomplete_1", Some("incomplete"), 1, "openai", "C"),
-        ("other_provider_1", Some("other_provider"), 1, "xai", "A"),
-        ("diagnostic", None, 1, "openai", "A"),
+        ("retry_1", Some("retry"), Some(1), "openai", "A"),
+        ("retry_1_duplicate", Some("retry"), Some(1), "openai", "A"),
+        ("retry_2", Some("retry"), Some(2), "openai", "B"),
+        ("failed_1", Some("failed"), Some(1), "openai", "A"),
+        (
+            "failed_final_duplicate",
+            Some("failed"),
+            Some(2),
+            "openai",
+            "A",
+        ),
+        ("cancelled_1", Some("cancelled"), Some(1), "openai", "A"),
+        ("incomplete_1", Some("incomplete"), Some(1), "openai", "C"),
+        (
+            "other_provider_1",
+            Some("other_provider"),
+            Some(1),
+            "xai",
+            "A",
+        ),
+        ("diagnostic", None, None, "openai", "A"),
     ] {
         // 事件时间与请求日桶刻意不同，独立诊断只进入运维事件列表
         sqlx::query("insert into ops_events(id,model_request_id,attempt_index,level,component,operation,provider_kind,provider_account_ref,failure_kind,status_code,provider_error_code,message,created_at) values($1,$2,$3,'error','openai','responses',$4,$5,'upstream_error',503,'server_is_overloaded','Server is overloaded',$6)")
@@ -347,6 +359,13 @@ async fn summary_and_drilldown_share_requests_across_retries_accounts_and_date_b
         .await
         .unwrap();
     assert_eq!(events.total, 9);
+    let diagnostic = events
+        .items
+        .iter()
+        .find(|event| event.event_id == "diagnostic")
+        .unwrap();
+    assert!(diagnostic.request_id.is_none());
+    assert!(diagnostic.attempt_index.is_none());
     let events_a = repo
         .list_ops_errors(OpsErrorQuery {
             range: store_range,
