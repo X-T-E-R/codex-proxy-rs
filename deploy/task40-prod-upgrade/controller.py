@@ -35,14 +35,14 @@ def ssh(code, payload=None, timeout=90):
     return json.loads(p.stdout)
 
 
-def baseline():
+def baseline(mode='healthy'):
     # 部署前独立只读观测；无需 manifest 或 GO，不创建远端目录
     code = """import json
 namespace={'__name__':'task40_observer'}
-exec(compile(payload,'remote-observer.py','exec'),namespace)
-print(json.dumps(namespace['baseline']()))
+exec(compile(payload['code'],'remote-observer.py','exec'),namespace)
+print(json.dumps(namespace['baseline'](payload['mode'])))
 """
-    return ssh(code, (HERE / 'remote.py').read_text(encoding='utf-8'), timeout=90)
+    return ssh(code, {'code': (HERE / 'remote.py').read_text(encoding='utf-8'), 'mode': mode}, timeout=90)
 
 
 def provision(m, root):
@@ -114,9 +114,20 @@ def observe(root, seconds=4500, clock=time.monotonic, sleep=time.sleep):
 def pull_exact(root):
     code = """import json,subprocess
 from pathlib import Path
-m=json.loads((Path(payload)/'accepted.json').read_text())
-p=subprocess.run(['docker','pull',m['image']],capture_output=True,timeout=420)
-print(json.dumps({'phase':'pulled' if p.returncode==0 else 'pull_blocked'}))
+r=Path(payload)
+namespace={'__name__':'task40_image_admission'}
+exec(compile((r/'remote.py').read_text(),'remote.py','exec'),namespace)
+m=namespace['manifest'](json.loads((r/'accepted.json').read_text()))
+local=subprocess.run(['docker','image','inspect','--format','{{json .Id}}',m['image']],capture_output=True,timeout=20)
+if local.returncode==0:
+ namespace['image'](m['image'],m['source'])
+ value={'phase':'pulled','origin':'verified_local_digest'}
+elif local.returncode==1 and (b'No such image:' in local.stderr or b'No such object:' in local.stderr):
+ p=subprocess.run(['docker','pull',m['image']],capture_output=True,timeout=420)
+ value={'phase':'pulled' if p.returncode==0 else 'pull_blocked','origin':'registry'}
+else:
+ value={'phase':'pull_blocked','origin':'inspect_unknown'}
+print(json.dumps(value))
 """
     value = ssh(code, root, timeout=450)
     remote.require(value['phase'] == 'pulled', 'exact_pull_blocked')
@@ -308,9 +319,10 @@ def main():
     p.add_argument('--accepted', type=Path)
     p.add_argument('--run-dir', type=Path)
     p.add_argument('--GO', action='store_true')
+    p.add_argument('--mode', choices=['healthy', 'disk_logging_recovery'], default='healthy')
     a = p.parse_args()
     if a.action == 'baseline':
-        print(json.dumps(baseline(), indent=2))
+        print(json.dumps(baseline(a.mode), indent=2))
         return
     if a.action == 'launch':
         remote.require(os.name == 'nt' and a.GO and a.accepted, 'Windows_new_GO_and_manifest_required')

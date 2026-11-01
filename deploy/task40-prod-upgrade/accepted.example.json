@@ -3,8 +3,25 @@
   "schema": 52,
   "noMigrationChanges": true,
   "hardCutAuthorized": false,
-  "source": "PARENT_EXACT_40_HEX_PRODUCT_SOURCE",
-  "image": "ghcr.io/x-t-e-r/codex-proxy-rs@sha256:PARENT_EXACT_64_HEX_REGISTRY_DIGEST",
-  "migrationEvidence": "PARENT: exact source migration freeze, plugin contract, isolated schema52 startup evidence",
-  "acceptanceEvidence": "PARENT: source/image binding, CI, authenticated Admin/recovery, feature and rollback evidence"
+  "source": "ca4a0e2895fc78cab8838003c69bd1187989eea6",
+  "image": "ghcr.io/x-t-e-r/codex-proxy-rs@sha256:1d41e3a625f13e8b6ffa40abc370cb7761f03266f0ea009c010ef25d1b4dd236",
+  "baseline": {
+    "source": "42794577b0205797b4a6d66803deb11f944f2599",
+    "image": "ghcr.io/x-t-e-r/codex-proxy-rs@sha256:35c02f6a36d5dd2b202186e6b1c424f7b6b0d31ff47a21fd2b5b26df575bf8cb",
+    "containerId": "55c0a01038589e7612b0b63646eb18a13af1d5325591755480414fc15fbf7b58",
+    "startedAt": "2026-10-27T14:38:45.88687926Z"
+  },
+  "admissionMode": "disk_logging_recovery",
+  "degradedEvidence": {
+    "healthFailures": [],
+    "recoveredComponents": {},
+    "logWindow": {},
+    "postgresSelect": false,
+    "redisScan": false,
+    "noCurrentComponentSnapshot": true,
+    "boundedObservationRiskAccepted": false,
+    "evidenceRef": "PARENT: replace degradedEvidence with the fresh baseline projection, then explicitly accept the bounded observation gap"
+  },
+  "migrationEvidence": "PARENT: exact source frozen schema52 migrations, unchanged plugin contract, same-image isolated startup/recovery acceptance",
+  "acceptanceEvidence": "PARENT: source/image binding and CI 40673835041, authenticated Admin/recovery, feature acceptance, exact incident evidence and hard-cut approval"
 }

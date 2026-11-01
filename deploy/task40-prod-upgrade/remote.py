@@ -2,6 +2,7 @@
 """Task40 一次性同 schema52 切换；只由 controller 传入父签 manifest 后运行。"""
 import argparse
 import datetime as dt
+import gzip
 import hashlib
 import json
 import os
@@ -19,13 +20,23 @@ except ImportError:
 
 BASE = Path('/opt/codex-proxy-rs')
 SERVICE = 'codex-proxy-rs'
-OLD_SOURCE = 'a6461769337f83a2a7e41f69be232897c91b9041'
-OLD_IMAGE = 'ghcr.io/x-t-e-r/codex-proxy-rs@sha256:96c2584487318f721d3ca2ba6b67299c9a17747071578cd3d768b8d1e1a9b5b4'
+# 故障恢复例外只属于已核实的这一个退出代际；普通健康升级从 manifest 绑定基线
+DISK_INCIDENT = {
+    'source': '42794577b0205797b4a6d66803deb11f944f2599',
+    'image': 'ghcr.io/x-t-e-r/codex-proxy-rs@sha256:35c02f6a36d5dd2b202186e6b1c424f7b6b0d31ff47a21fd2b5b26df575bf8cb',
+    'containerId': '55c0a01038589e7612b0b63646eb18a13af1d5325591755480414fc15fbf7b58',
+    'startedAt': '2026-10-27T14:38:45.88687926Z',
+}
 IMAGE_RE = r'ghcr\.io/x-t-e-r/codex-proxy-rs@sha256:[0-9a-f]{64}'
 PG = '1Panel-postgresql-5AJX'
 HELPER_SOURCE = '476d24c16764a0a535fabd975a3df18d2192df0a'
 HELPER_IMAGE = 'ghcr.io/x-t-e-r/codex-proxy-rs@sha256:f8c705a4da6687ea39902bb09e020772a4083d2dae12c1d0cd507952bf88944e'
 RECOVERY_TIMEOUT = 1800
+INCIDENT_WORKERS = (
+    'worker:stale_model_request_recovery:postgres', 'worker:request_analytics:postgres',
+    'worker:retention:postgres', 'worker:account_freeze_recovery:account-freeze-recovery',
+    'worker:reset_credit_automation:admin',
+)
 
 
 def require(ok, code):
@@ -55,16 +66,43 @@ def command(args, timeout=120, data=None):
     return p.stdout
 
 
+def baseline_identity(value):
+    require(type(value) is dict and
+            re.fullmatch('[0-9a-f]{40}', value.get('source', '')) is not None and
+            re.fullmatch(IMAGE_RE, value.get('image', '')) is not None and
+            re.fullmatch('[0-9a-f]{64}', value.get('containerId', '')) is not None and
+            isinstance(value.get('startedAt'), str), 'exact_baseline_identity_required')
+    try:
+        stamp = dt.datetime.fromisoformat(value['startedAt'].replace('Z', '+00:00'))
+        require(stamp.tzinfo is not None, 'baseline_timestamp_required')
+    except ValueError:
+        raise RuntimeError('baseline_timestamp_required') from None
+    return value
+
+
 def manifest(m):
     require(type(m) is dict and m.get('accepted') is True and m.get('schema') == 52 and
             m.get('noMigrationChanges') is True and m.get('hardCutAuthorized') is True,
             'parent_accepted_same52_hardcut_required')
+    b = baseline_identity(m.get('baseline'))
     require(re.fullmatch('[0-9a-f]{40}', m.get('source', '')) is not None and
             re.fullmatch(IMAGE_RE, m.get('image', '')) is not None and
-            m['source'] != OLD_SOURCE and m['image'] != OLD_IMAGE, 'new_exact_source_image_required')
+            m['source'] != b['source'] and m['image'] != b['image'], 'new_exact_source_image_required')
     require(isinstance(m.get('migrationEvidence'), str) and m['migrationEvidence'].strip() and
             isinstance(m.get('acceptanceEvidence'), str) and m['acceptanceEvidence'].strip(),
             'parent_evidence_required')
+    mode = m.get('admissionMode')
+    require(mode in ('healthy', 'disk_logging_recovery'), 'explicit_admission_mode_required')
+    if mode == 'disk_logging_recovery':
+        evidence = m.get('degradedEvidence', {})
+        require(b == DISK_INCIDENT and evidence.get('noCurrentComponentSnapshot') is True and
+                evidence.get('boundedObservationRiskAccepted') is True and
+                evidence.get('postgresSelect') is True and evidence.get('redisScan') is True and
+                set(evidence.get('recoveredComponents', {})) == set(INCIDENT_WORKERS) | {'probe:postgres'} and
+                isinstance(evidence.get('logWindow'), dict) and
+                isinstance(evidence.get('evidenceRef'), str) and evidence['evidenceRef'].strip() and
+                isinstance(evidence.get('healthFailures'), list) and evidence['healthFailures'],
+                'exact_disk_incident_and_parent_evidence_required')
     return m
 
 
@@ -196,12 +234,151 @@ def image(value, source):
     return result
 
 
-def health():
+def health_status():
     try:
         with urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3) as response:
-            return response.status == 204
+            return response.status
+    except urllib.error.HTTPError as error:
+        error.close()
+        return error.code
     except OSError:
-        return False
+        return None
+
+
+def health():
+    return health_status() == 204
+
+
+def timestamp(value):
+    return dt.datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+
+def bound_runtime(old, b):
+    require(old['project'] == SERVICE and old['service'] == SERVICE and old['running'] and
+            old['id'] == b['containerId'] and old['startedAt'] == b['startedAt'] and
+            old['revision'] == b['source'], 'baseline_runtime_drift')
+
+
+HEALTH_FAILURES_SQL = """select coalesce(jsonb_agg(x order by at,component),'[]') from (
+ select created_at as at,message::jsonb->>'correlationId' as component,
+        error_details::jsonb#>>'{causes,messages,0}' as reason
+ from public.ops_events where model_request_id is null and component='health'
+ and created_at>='2026-10-27T14:38:45.88687926Z' limit 65) x;"""
+
+
+def incident_failures():
+    rows = json.loads(sql(HEALTH_FAILURES_SQL))
+    require(isinstance(rows, list) and len(rows) == 10 and
+            max(timestamp(row['at']) for row in rows) == timestamp('2026-10-31T19:34:31.095157+00:00'),
+            'incident_health_history_new_or_missing')
+    for row in rows:
+        component, reason = row.get('component', ''), row.get('reason', '')
+        allowed = ((component == 'probe:file_logging' and re.fullmatch(
+            r'probe:file_logging is unhealthy: log completeness compromised: [1-9][0-9]* write/flush failures, 0 rejected records \(0 warnings/errors\) since startup', reason)) or
+            (component == 'probe:postgres' and reason == 'probe:postgres is unhealthy: PostgreSQL connection acquisition timed out') or
+            (component == 'probe:redis' and reason == 'probe:redis is unhealthy: Redis is unavailable') or
+            (component in INCIDENT_WORKERS and re.fullmatch(
+                re.escape(component) + r' is unhealthy: state=(BackingOff|Running); last_error=worker lease acquisition failed', reason)))
+        require(allowed, 'unexplained_health_failure')
+    require({row['component'] for row in rows} == set(INCIDENT_WORKERS) |
+            {'probe:file_logging', 'probe:postgres', 'probe:redis'}, 'incident_component_history_incomplete')
+    return rows
+
+
+def incident_log_window(since, sampled):
+    # 只投影健康转移，正文与其它日志字段不进入收据；缺文件、坏行、超预算均停止
+    root = BASE / '.runtime/logs'
+    files = []
+    for path in root.glob('codex-proxy-rs-application.*.log*'):
+        match = re.fullmatch(r'codex-proxy-rs-application\.(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.log(?:\.gz)?', path.name)
+        if match:
+            files.append(((match[1], int(match[2] or 0)), path))
+    events, spans, consumed = [], [], 0
+    for _, path in sorted(files, reverse=True):
+        first = last = None
+        opener = gzip.open if path.suffix == '.gz' else open
+        with opener(path, 'rb') as stream:
+            for line in iter(lambda: stream.readline(2 * 1024**2 + 1), b''):
+                consumed += len(line)
+                require(consumed <= 128 * 1024**2 and len(line) <= 2 * 1024**2, 'incident_logs_over_bound')
+                try:
+                    row = json.loads(line)
+                    at = timestamp(row['timestamp'])
+                except (ValueError, KeyError):
+                    raise RuntimeError('incident_log_gap_or_invalid') from None
+                first = at if first is None else min(first, at)
+                last = at if last is None else max(last, at)
+                if row.get('target') != 'gateway_api::health':
+                    continue
+                fields = row.get('fields', {})
+                event = fields.get('message')
+                require(at < since or event != 'health diagnostic could not be recorded',
+                        'incident_diagnostic_queue_gap')
+                if at >= since and event in ('health check failed', 'health component recovered'):
+                    require(isinstance(fields.get('component'), str), 'incident_log_component_missing')
+                    events.append({'at': row['timestamp'], 'component': fields['component'], 'event': event})
+        require(first is not None, 'incident_log_empty')
+        spans.append({'file': path.name, 'first': first.isoformat(), 'last': last.isoformat()})
+        if first <= since:
+            break
+    require(spans and timestamp(spans[-1]['first']) <= since and
+            timestamp(spans[0]['last']) >= sampled - dt.timedelta(seconds=15), 'incident_log_window_incomplete')
+    for newer, older in zip(spans, spans[1:]):
+        names = [re.fullmatch(r'codex-proxy-rs-application\.(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.log(?:\.gz)?',
+                              row['file']) for row in (newer, older)]
+        require(names[0][1] == names[1][1] and int(names[0][2] or 0) == int(names[1][2] or 0) + 1 and
+                timestamp(newer['first']) - timestamp(older['last']) <= dt.timedelta(seconds=60),
+                'incident_log_rotation_gap')
+    return {'files': list(reversed(spans)), 'events': sorted(events, key=lambda row: timestamp(row['at'])),
+            'readBytes': consumed, 'sampledAt': sampled.isoformat()}
+
+
+def disk_recovery_evidence(old, expected=None):
+    bound_runtime(old, DISK_INCIDENT)
+    require(old['health'] == 'unhealthy' and health_status() == 503, 'incident_current_503_required')
+    require(shutil.disk_usage(BASE).free >= 2 * 1024**3, 'disk_space_low')
+    sampled = dt.datetime.now(dt.timezone.utc)
+    rows = incident_failures()
+    if expected is not None:
+        require(rows == expected['healthFailures'], 'incident_health_history_changed')
+    # 从最后一批故障前一分钟开始，必须完整覆盖该批故障和之后的全部健康转移
+    since = max(timestamp(row['at']) for row in rows) - dt.timedelta(minutes=1)
+    window = incident_log_window(since, sampled)
+    for row in rows:
+        if timestamp(row['at']) >= since:
+            require(any(event['event'] == 'health check failed' and event['component'] == row['component'] and
+                        abs((timestamp(event['at']) - timestamp(row['at'])).total_seconds()) < .01
+                        for event in window['events']), 'incident_failure_log_missing')
+    last = {row['component']: row for row in rows}
+    for event in window['events']:
+        if event['event'] == 'health check failed':
+            require(any(event['component'] == row['component'] and
+                        abs((timestamp(event['at']) - timestamp(row['at'])).total_seconds()) < .01
+                        for row in rows), 'incident_new_or_unrecorded_failure')
+        last[event['component']] = event
+    for component, event in last.items():
+        if component in ('probe:file_logging', 'probe:redis'):
+            # Redis 由下方同配置的即时只读操作验证；其旧失败早于保留窗口
+            continue
+        require(event.get('event') == 'health component recovered' and
+                timestamp(event['at']) > max(timestamp(row['at']) for row in rows if row['component'] == component),
+                'incident_component_not_recovered_' + component)
+    if expected is not None:
+        require({component: last[component]['at'] for component in (*INCIDENT_WORKERS, 'probe:postgres')} ==
+                expected['recoveredComponents'], 'incident_recovery_evidence_changed')
+    require(sql('select 1;') == '1', 'incident_postgres_unavailable')
+    # 现役二进制正常认证配置的 typed SCAN，无服务启动、PG初始化或 Redis 写入
+    scan = json.loads(command(['docker', 'exec', '-i', old['id'], '/app/bin/codex-proxy-rs',
+                              'site-recovery-redis'], timeout=15,
+                             data=b'{"kind":"scan","cursor":0,"reserved":false}'))
+    require(isinstance(scan, list) and len(scan) == 2 and isinstance(scan[1], list), 'incident_redis_unavailable')
+    current = container()
+    bound_runtime(current, DISK_INCIDENT)
+    require(current['imageId'] == old['imageId'], 'incident_runtime_changed')
+    return {'healthFailures': rows, 'logWindow': window, 'postgresSelect': True, 'redisScan': True,
+            'recoveredComponents': {component: last[component]['at'] for component in
+                                    (*INCIDENT_WORKERS, 'probe:postgres')},
+            'noCurrentComponentSnapshot': True, 'capturedAt': now(), 'healthz': 503}
 
 
 def configured_service_image(raw):
@@ -213,7 +390,7 @@ def configured_service_image(raw):
     return services[SERVICE]['image']
 
 
-def gate_enter(root):
+def gate_enter(root, baseline):
     gate = BASE / '.runtime/restart-recovery'
     require((gate / 'binding.json').is_file(), 'restart_gate_required')
     lock = (gate / 'lifecycle.lock').open('a')
@@ -221,7 +398,8 @@ def gate_enter(root):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         require(not (gate / 'maintenance').exists(), 'restart_gate_maintenance_occupied')
         binding = json.loads((gate / 'binding.json').read_text())
-        require(binding.get('runtime', {}).get('revision') == OLD_SOURCE, 'restart_gate_source_drift')
+        require(binding.get('runtime', {}).get('revision') == baseline['source'] and
+                binding['runtime'].get('id') == baseline['containerId'], 'restart_gate_source_drift')
         return gate, lock, binding
     except BaseException:
         lock.close()
@@ -234,6 +412,7 @@ class Deployment:
         require(re.fullmatch(r'task40-[0-9a-f]{32}', self.root.name) and
                 self.root.parent == BASE / '.runtime/deployments', 'run_path_invalid')
         self.m = manifest(json.loads((self.root / 'accepted.json').read_text()))
+        self.b = self.m['baseline']
         self.result = dict(runId=self.root.name, phase='admitting', success=False, rollback=False,
                            startedAt=now(), providerProbes=0, channelMutations=0, schemaWrites=0)
         self.stopped = False
@@ -271,10 +450,16 @@ class Deployment:
         require(pin(BASE / '.env')[2] == expected_pin and self.stamps() == self.file_stamps, 'configuration_drift')
         return current
 
+    def admit_baseline_health(self, old):
+        if self.m['admissionMode'] == 'healthy':
+            require(old['health'] == 'healthy' and health(), 'baseline_runtime_drift')
+            return {'healthz': 204, 'mode': 'healthy'}
+        evidence = disk_recovery_evidence(old, self.m['degradedEvidence'])
+        return dict(evidence, mode='disk_logging_recovery')
+
     def preflight(self, binding):
         old = container()
-        require(old['project'] == SERVICE and old['service'] == SERVICE and old['revision'] == OLD_SOURCE and
-                old['running'] and old['health'] == 'healthy' and health(), 'baseline_runtime_drift')
+        bound_runtime(old, self.b)
         require(binding['runtime'] == {k: old[k] for k in ('id', 'project', 'service', 'revision')}, 'restart_binding_runtime_drift')
         require(binding.get('singleDeployment') is True and binding.get('helperSource') == HELPER_SOURCE and
                 binding.get('helperImage') == HELPER_IMAGE and
@@ -285,7 +470,7 @@ class Deployment:
                 command(['systemctl', 'is-active', 'cpr-restart-recovery.timer']).decode().strip() == 'active',
                 'recovery_watchdog_not_active')
         require(command(['docker', 'inspect', '--format', '{{json .HostConfig.RestartPolicy.Name}}', SERVICE]).decode().strip().strip('"') == 'no', 'restart_policy_not_no')
-        require(old['imageId'] == image(OLD_IMAGE, OLD_SOURCE)['id'], 'baseline_image_drift')
+        require(old['imageId'] == image(self.b['image'], self.b['source'])['id'], 'baseline_image_drift')
         target = image(self.m['image'], self.m['source'])
         self.old, self.target = old, target
         self.files = old['composeFiles'].split(',')
@@ -293,9 +478,10 @@ class Deployment:
         require(self.workdir and Path(self.workdir).resolve().is_relative_to(BASE) and self.files and
                 all(Path(path).resolve().is_relative_to(BASE) for path in self.files) and
                 not any('override' in Path(path).name for path in self.files), 'compose_scope_drift')
-        require(pin(BASE / '.env')[2] == OLD_IMAGE and self.effective_image() == OLD_IMAGE,
+        require(pin(BASE / '.env')[2] == self.b['image'] and self.effective_image() == self.b['image'],
                 'target_service_image_or_pin_drift')
         require(shutil.disk_usage(BASE).free >= 2 * 1024**3, 'disk_space_low')
+        self.result['baselineHealthAdmission'] = self.admit_baseline_health(old)
         self.before = facts()
         self.file_stamps = self.stamps()
         self.result.update(beforeRuntime=old, beforeFacts=self.before, targetImage=target,
@@ -446,7 +632,7 @@ class Deployment:
         require(not self.recovery_pending and self.old_recovered and
                 self.result.get('stopCommand', {}).get('outcome') in ('completed', 'observed_stopped'),
                 'unsettled_stop_or_recovery_no_reissue')
-        previous_pin = self.m['image'] if self.pin_changed else OLD_IMAGE
+        previous_pin = self.m['image'] if self.pin_changed else self.b['image']
         if current is not None:
             current = self.owned(current, self.m['image'])
             if current['running']:
@@ -455,7 +641,7 @@ class Deployment:
         else:
             self.owned(self.old, previous_pin, False)
         previous = current or self.old
-        old = self.start(previous, previous_pin, OLD_IMAGE, self.old['imageId'], OLD_SOURCE, 'rollback')
+        old = self.start(previous, previous_pin, self.b['image'], self.old['imageId'], self.b['source'], 'rollback')
         preserve(self.before, facts())
         self.result.update(rollbackRuntime=old, rollbackHealthz=204, afterFacts=facts())
         self.save('rollback_verified_pending_gate')
@@ -469,8 +655,13 @@ class Deployment:
                     self.result.get('rollbackRuntime') if phase == 'rollback_verified_pending_gate' else self.old)
         require(expected is not None, 'gate_expected_runtime_missing')
         require(all(current[k] == expected[k] for k in ('id', 'imageId', 'startedAt')) and
-                current['running'] and current['health'] == 'healthy' and health(), 'gate_runtime_drift')
-        target_pin = self.m['image'] if phase == 'candidate_verified_pending_gate' else OLD_IMAGE
+                current['running'], 'gate_runtime_drift')
+        if phase == 'blocked_unchanged' and not self.stopped:
+            # 未停止的旧代际按原准入复核后释放本 run 闸，不发布部署或回滚成功
+            self.admit_baseline_health(current)
+        else:
+            require(current['health'] == 'healthy' and health(), 'gate_runtime_drift')
+        target_pin = self.m['image'] if phase == 'candidate_verified_pending_gate' else self.b['image']
         require(pin(BASE / '.env')[2] == target_pin, 'gate_pin_drift')
         require(self.stamps() == self.file_stamps and
                 opaque_env_digest(BASE / '.env') == self.result['envOpaqueDigest'] and
@@ -500,21 +691,22 @@ class Deployment:
     def execute(self):
         gate_lock = None
         try:
-            self.gate, gate_lock, self.binding = gate_enter(self.root)
+            self.gate, gate_lock, self.binding = gate_enter(self.root, self.b)
             self.preflight(self.binding)
-            self.owned(self.old, OLD_IMAGE, True)
+            self.owned(self.old, self.b['image'], True)
             # 硬切有在飞请求时，退出代际恢复负责 PG 终结和 Redis 槽位 CAS；不探针、不重放
             self.result['beforeCutActivity'] = self.activity()
             self.before = facts()
             preserve(self.result['beforeFacts'], self.before)
-            self.owned(self.old, OLD_IMAGE, True)
+            self.result['beforeCutHealthAdmission'] = self.admit_baseline_health(
+                self.owned(self.old, self.b['image'], True))
             with (self.gate / 'maintenance').open('x') as file:
                 file.write(self.root.name)
             self.save('cut_admitted')
-            self.stop(self.old, OLD_IMAGE)
-            self.recover(self.old, OLD_IMAGE, self.binding)
+            self.stop(self.old, self.b['image'])
+            self.recover(self.old, self.b['image'], self.binding)
             self.old_recovered = True
-            candidate = self.start(self.old, OLD_IMAGE, self.m['image'], self.target['id'], self.m['source'], 'candidate')
+            candidate = self.start(self.old, self.b['image'], self.m['image'], self.target['id'], self.m['source'], 'candidate')
             self.result['candidateRuntime'] = candidate
             after = facts()
             preserve(self.before, after)
@@ -580,7 +772,7 @@ class Deployment:
         require(phase in ('candidate_verified_pending_gate', 'rollback_verified_pending_gate'),
                 'takeover_unowned_released_gate')
         expected = self.result.get('afterRuntime' if phase == 'candidate_verified_pending_gate' else 'rollbackRuntime')
-        target_pin = self.m['image'] if phase == 'candidate_verified_pending_gate' else OLD_IMAGE
+        target_pin = self.m['image'] if phase == 'candidate_verified_pending_gate' else self.b['image']
         require(expected and actual_pin == target_pin and
                 all(current[k] == expected[k] for k in ('id', 'imageId', 'revision', 'startedAt', 'project', 'service')) and
                 current['running'] and current['health'] == 'healthy' and health(), 'takeover_settled_runtime_drift')
@@ -630,8 +822,9 @@ class Deployment:
             self.old = self.result['beforeRuntime']
             self.before = self.result['beforeFacts']
             self.target = self.result['targetImage']
-            require(self.old['revision'] == OLD_SOURCE and
-                    self.old['imageId'] == image(OLD_IMAGE, OLD_SOURCE)['id'] and
+            require(self.old['revision'] == self.b['source'] and self.old['id'] == self.b['containerId'] and
+                    self.old['startedAt'] == self.b['startedAt'] and
+                    self.old['imageId'] == image(self.b['image'], self.b['source'])['id'] and
                     self.target['id'] == image(self.m['image'], self.m['source'])['id'], 'takeover_image_drift')
             self.files = self.old['composeFiles'].split(',')
             self.workdir = self.old['workingDir']
@@ -653,8 +846,8 @@ class Deployment:
                     'takeover_restart_policy_drift')
             require(opaque_env_digest(BASE / '.env') == self.result['envOpaqueDigest'], 'takeover_env_opaque_drift')
             actual_pin = pin(BASE / '.env')[2]
-            require(actual_pin in (OLD_IMAGE, self.m['image']), 'takeover_pin_unknown')
-            if actual_pin != OLD_IMAGE:
+            require(actual_pin in (self.b['image'], self.m['image']), 'takeover_pin_unknown')
+            if actual_pin != self.b['image']:
                 require(self.result.get('pinCommands', {}).get('candidate', {}).get('to') == actual_pin,
                         'takeover_pin_not_claimed')
             current_stamps = self.stamps()
@@ -663,7 +856,7 @@ class Deployment:
             require(self.effective_image() == actual_pin, 'takeover_service_image_drift')
             # .env 可为本 run 已记录 pin，或原始字节完整恢复后仅 mtime 变化
             if current_stamps[str(BASE / '.env')] != self.file_stamps[str(BASE / '.env')]:
-                restored = (actual_pin == OLD_IMAGE and self.result.get('envOriginalDigest') ==
+                restored = (actual_pin == self.b['image'] and self.result.get('envOriginalDigest') ==
                             hashlib.sha256((BASE / '.env').read_bytes()).hexdigest())
                 require(self.result.get('pinCommands') or restored, 'takeover_env_change_not_claimed')
                 self.file_stamps[str(BASE / '.env')] = current_stamps[str(BASE / '.env')]
@@ -687,8 +880,9 @@ class Deployment:
             self.save('takeover_action_intent')
             if old_identity and current['running']:
                 rollback_cmd = self.result.get('composeCommands', {}).get('rollback')
-                require(not old_claim and not rollback_cmd and actual_pin == OLD_IMAGE and
-                        current['health'] == 'healthy' and health(), 'old_running_after_stop_unknown')
+                require(not old_claim and not rollback_cmd and actual_pin == self.b['image'],
+                        'old_running_after_stop_unknown')
+                self.admit_baseline_health(current)
                 self.save('blocked_unchanged')
             else:
                 _, old_receipt = self.recovery_receipt(self.old)
@@ -706,7 +900,7 @@ class Deployment:
                     # rollback up 曾发送时，仅观察其确切运行容器，不再执行第二次 up
                     rollback_cmd = self.result.get('composeCommands', {}).get('rollback')
                     candidate_cmd = self.result.get('composeCommands', {}).get('candidate')
-                    if rollback_cmd and actual_pin == OLD_IMAGE and current['imageId'] == self.old['imageId']:
+                    if rollback_cmd and actual_pin == self.b['image'] and current['imageId'] == self.old['imageId']:
                         require(old_receipt is not None and old_receipt['phase'] == 'complete',
                                 'takeover_old_receipt_unproven')
                         candidate_owner = self.result.get('candidateRuntime')
@@ -714,8 +908,8 @@ class Deployment:
                             _, candidate_receipt = self.recovery_receipt(candidate_owner)
                             require(candidate_receipt is not None and candidate_receipt['phase'] == 'complete',
                                     'takeover_candidate_receipt_unproven')
-                        current = self.observed_replacement(self.old, self.old['imageId'], OLD_SOURCE,
-                                                            OLD_IMAGE, 'rollback', limit=3)
+                        current = self.observed_replacement(self.old, self.old['imageId'], self.b['source'],
+                                                            self.b['image'], 'rollback', limit=3)
                         require(current['running'] and current['health'] == 'healthy' and health(),
                                 'takeover_rollback_health_drift')
                         preserve(self.before, facts())
@@ -809,38 +1003,46 @@ def retry_evidence(root, active_held=False):
             active.close()
 
 
-def baseline():
+def baseline(mode='healthy'):
+    require(mode in ('healthy', 'disk_logging_recovery'), 'explicit_admission_mode_required')
     old = container()
-    require(old['project'] == SERVICE and old['service'] == SERVICE and old['revision'] == OLD_SOURCE and
-            old['running'] and old['health'] == 'healthy' and health(), 'baseline_runtime_drift')
-    require(old['imageId'] == image(OLD_IMAGE, OLD_SOURCE)['id'], 'baseline_image_drift')
-    require(pin(BASE / '.env')[2] == OLD_IMAGE, 'baseline_pin_drift')
+    b = baseline_identity({'source': old['revision'], 'image': pin(BASE / '.env')[2],
+                           'containerId': old['id'], 'startedAt': old['startedAt']})
+    bound_runtime(old, b)
+    require(old['imageId'] == image(b['image'], b['source'])['id'], 'baseline_image_drift')
     gate = BASE / '.runtime/restart-recovery'
     require(not (gate / 'maintenance').exists(), 'restart_maintenance_occupied')
     binding = json.loads((gate / 'binding.json').read_text())
     require(binding['runtime'] == {k: old[k] for k in ('id', 'project', 'service', 'revision')} and
-            binding.get('helperSource') == HELPER_SOURCE and binding.get('helperImage') == HELPER_IMAGE,
-            'restart_binding_drift')
-    require(command(['systemctl', 'is-active', 'cpr-restart-recovery.timer']).decode().strip() == 'active',
+            binding.get('helperSource') == HELPER_SOURCE and binding.get('helperImage') == HELPER_IMAGE and
+            binding.get('singleDeployment') is True and binding.get('recoveryCommand', [])[:2] ==
+            ['python3', str(gate / 'site-recovery.py')], 'restart_binding_drift')
+    require(command(['systemctl', 'is-active', 'cpr-restart-recovery.timer']).decode().strip() == 'active' and
+            command(['systemctl', 'is-enabled', 'cpr-restart-recovery.timer']).decode().strip() == 'enabled',
             'watchdog_inactive')
     require(command(['docker', 'inspect', '--format', '{{json .HostConfig.RestartPolicy.Name}}', SERVICE]).decode().strip().strip('"') == 'no', 'restart_policy_not_no')
-    cmd = ['docker', 'compose', '--project-directory', old['workingDir'], '--env-file', str(BASE / '.env'),
-           '-p', SERVICE]
-    for file in old['composeFiles'].split(','):
-        cmd += ['-f', file]
-    require(configured_service_image(command(cmd + ['config', '--format', 'json'])) == OLD_IMAGE,
-            'baseline_compose_pin_drift')
-    with (gate / 'lifecycle.lock').open('r') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(lock, fcntl.LOCK_UN)
     app = Deployment.__new__(Deployment)
     app.root = BASE / '.runtime/deployments'
-    return {'capturedAt': now(), 'runtime': old, 'envPin': OLD_IMAGE, 'healthz': 204,
+    app.workdir, app.files = old['workingDir'], old['composeFiles'].split(',')
+    require(app.workdir and Path(app.workdir).resolve().is_relative_to(BASE) and app.files and
+            all(Path(path).resolve().is_relative_to(BASE) for path in app.files) and
+            not any('override' in Path(path).name for path in app.files), 'compose_scope_drift')
+    require(app.effective_image() == b['image'], 'baseline_compose_pin_drift')
+    with (gate / 'lifecycle.lock').open('r') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if mode == 'healthy':
+            require(old['health'] == 'healthy' and health(), 'baseline_runtime_drift')
+            evidence = {'healthz': 204}
+        else:
+            evidence = disk_recovery_evidence(old)
+        bound_runtime(container(), b)
+    return {'capturedAt': now(), 'baseline': b, 'admissionMode': mode, 'runtime': old,
+            'envPin': b['image'], 'healthz': evidence['healthz'], 'degradedEvidence': evidence,
             'schemaAndPreservationFacts': facts(), 'activity': app.activity(),
             'freeBytes': shutil.disk_usage(BASE).free,
             'recoveryBindingRuntime': binding['runtime'], 'helperSource': binding['helperSource'],
             'helperImage': binding['helperImage'], 'maintenanceExists': False,
-            'serviceImage': OLD_IMAGE, 'recoveryLock': 'unheld'}
+            'serviceImage': b['image'], 'recoveryLock': 'unheld'}
 
 
 def verify(root):
@@ -856,7 +1058,7 @@ def verify(root):
     current = container()
     expected = result['afterRuntime'] if result['phase'] == 'deployed' else result['rollbackRuntime']
     target = manifest(json.loads((root / 'accepted.json').read_text()))
-    expected_image = target['image'] if result['phase'] == 'deployed' else OLD_IMAGE
+    expected_image = target['image'] if result['phase'] == 'deployed' else target['baseline']['image']
     require(all(current[k] == expected[k] for k in ('id', 'imageId', 'startedAt', 'revision')) and
             current['running'] and current['health'] == 'healthy' and health(), 'fresh_health_drift')
     require(pin(BASE / '.env')[2] == expected_image, 'fresh_pin_drift')

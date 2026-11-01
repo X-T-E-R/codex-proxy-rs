@@ -22,11 +22,15 @@ with patch.dict('sys.modules', {'remote': remote}):
 
 SOURCE = 'b' * 40
 IMAGE = 'ghcr.io/x-t-e-r/codex-proxy-rs@sha256:' + 'c' * 64
+BASELINE_SOURCE = remote.DISK_INCIDENT['source']
+BASELINE_IMAGE = remote.DISK_INCIDENT['image']
+OLD_ID = remote.DISK_INCIDENT['containerId']
 
 
 def manifest():
     return {'accepted': True, 'schema': 52, 'noMigrationChanges': True,
             'hardCutAuthorized': True, 'source': SOURCE, 'image': IMAGE,
+            'baseline': dict(remote.DISK_INCIDENT), 'admissionMode': 'healthy',
             'migrationEvidence': '52 frozen migrations from exact source',
             'acceptanceEvidence': 'same-image isolated API and recovery acceptance'}
 
@@ -34,7 +38,7 @@ def manifest():
 def runtime(id, revision, image_id, running=True, health='healthy'):
     return {'id': id, 'revision': revision, 'imageId': image_id, 'running': running,
             'health': health, 'pid': 2 if running else 0,
-            'startedAt': '2026-10-25T12:00:00Z' if id == 'old' else remote.now(),
+            'startedAt': remote.DISK_INCIDENT['startedAt'] if id == OLD_ID else remote.now(),
             'project': remote.SERVICE, 'service': remote.SERVICE,
             'workingDir': '/opt/codex-proxy-rs', 'composeFiles': '/opt/codex-proxy-rs/docker-compose.yml'}
 
@@ -56,19 +60,19 @@ class MockSite:
         self.run = self.base / '.runtime/deployments' / ('task40-' + '1' * 32)
         self.run.mkdir(parents=True)
         (self.run / 'accepted.json').write_text(json.dumps(manifest()))
-        (self.base / '.env').write_bytes(b'A=secret_not_read\nCPR_IMAGE=' + remote.OLD_IMAGE.encode() + b'\nZ=opaque\r\n')
+        (self.base / '.env').write_bytes(b'A=secret_not_read\nCPR_IMAGE=' + BASELINE_IMAGE.encode() + b'\nZ=opaque\r\n')
         (self.base / 'deploy').mkdir()
         (self.base / 'deploy/config.yaml').write_text('opaque')
         (self.base / 'docker-compose.yml').write_text('opaque')
         self.gate = self.base / '.runtime/restart-recovery'
         self.gate.mkdir()
-        self.old = runtime('old', remote.OLD_SOURCE, 'sha256:' + 'a' * 64)
+        self.old = runtime(OLD_ID, BASELINE_SOURCE, 'sha256:' + 'a' * 64)
         self.candidate = runtime('new', SOURCE, 'sha256:' + 'c' * 64)
         for app in (self.old, self.candidate):
             app['workingDir'] = str(self.base)
             app['composeFiles'] = str(self.base / 'docker-compose.yml')
         self.current = self.old
-        self.pin = remote.OLD_IMAGE
+        self.pin = BASELINE_IMAGE
         self.compose_target_override = None
         self.events = []
         self.inspect_failed = False
@@ -104,7 +108,7 @@ class MockSite:
             p.stop()
 
     def container(self):
-        if self.fail == 'inspect_then_unhealthy' and self.pin == IMAGE and self.current['id'] != 'old' and not self.inspect_failed:
+        if self.fail == 'inspect_then_unhealthy' and self.pin == IMAGE and self.current['id'] != OLD_ID and not self.inspect_failed:
             self.inspect_failed = True
             raise RuntimeError('command_result_unknown')
         return self.current
@@ -122,7 +126,7 @@ class MockSite:
         if self.fail == 'candidate_exit' and self.pin == IMAGE:
             self.current = dict(self.current, running=False, health='unhealthy')
             return False
-        return self.fail not in ('candidate_unhealthy', 'inspect_then_unhealthy', 'rollback_up_unknown') or self.pin == remote.OLD_IMAGE
+        return self.fail not in ('candidate_unhealthy', 'inspect_then_unhealthy', 'rollback_up_unknown') or self.pin == BASELINE_IMAGE
 
     def command(self, args, **kwargs):
         self.events.append(args)
@@ -154,15 +158,16 @@ class MockSite:
                 assert args[-3:] == ['config', '--format', 'json']
                 wrong_after_pin = self.fail == 'compose_service_wrong_after_pin' and self.pin == IMAGE
                 return json.dumps({'services': {remote.SERVICE: {
-                    'image': self.compose_target_override or (remote.OLD_IMAGE if wrong_after_pin else self.pin)},
+                    'image': self.compose_target_override or (BASELINE_IMAGE if wrong_after_pin else self.pin)},
                     'postgres': {'image': self.pin if wrong_after_pin or self.compose_target_override else
-                                 remote.OLD_IMAGE}}}).encode()
-            if self.fail == 'up_unknown' or (self.fail == 'rollback_up_unknown' and self.pin == remote.OLD_IMAGE):
+                                 BASELINE_IMAGE}}}).encode()
+            if self.fail == 'up_unknown' or (self.fail == 'rollback_up_unknown' and self.pin == BASELINE_IMAGE):
                 if self.fail == 'rollback_up_unknown':
                     self.current = dict(self.old, id='old-recreated', startedAt=remote.now())
                 raise RuntimeError('command_result_unknown')
             self.current = self.candidate if self.pin == IMAGE else self.old
-            self.current = dict(self.current, id=self.current['id'] + '-recreated', startedAt=remote.now())
+            self.current = dict(self.current, id=self.current['id'] + '-recreated', startedAt=remote.now(),
+                                health='healthy')
             return b''
         raise AssertionError(args)
 
@@ -183,7 +188,7 @@ class MockSite:
 class ContractTest(unittest.TestCase):
     def test_manifest_rejects_prior_and_unaccepted(self):
         m = manifest()
-        for field, value in [('source', remote.OLD_SOURCE), ('image', remote.OLD_IMAGE),
+        for field, value in [('source', BASELINE_SOURCE), ('image', BASELINE_IMAGE),
                              ('schema', 53), ('accepted', False), ('hardCutAuthorized', False),
                              ('migrationEvidence', '')]:
             bad = dict(m, **{field: value})
@@ -195,9 +200,9 @@ class ContractTest(unittest.TestCase):
             with patch.object(remote, 'set_pin', side_effect=AssertionError('write forbidden')):
                 (site.gate / 'lifecycle.lock').touch()
                 observed = remote.baseline()
-            self.assertEqual(observed['runtime']['id'], 'old')
+            self.assertEqual(observed['runtime']['id'], OLD_ID)
             self.assertEqual(observed['schemaAndPreservationFacts']['schemaMax'], 52)
-            self.assertEqual(observed['serviceImage'], remote.OLD_IMAGE)
+            self.assertEqual(observed['serviceImage'], BASELINE_IMAGE)
             self.assertFalse((site.gate / 'maintenance').exists())
             self.assertFalse(any(e[:2] == ['docker', 'stop'] for e in site.events))
 
@@ -218,7 +223,7 @@ class ContractTest(unittest.TestCase):
             self.assertEqual(result['phase'], 'rolled_back_same52')
             self.assertEqual(result['errorCode'], 'compose_pin_drift')
             self.assertEqual(len([e for e in site.events if e[:2] == ['docker', 'compose'] and 'up' in e]), 1)
-            self.assertEqual(result['rollbackRuntime']['revision'], remote.OLD_SOURCE)
+            self.assertEqual(result['rollbackRuntime']['revision'], BASELINE_SOURCE)
 
     def test_image_requires_digest_in_registry_binding(self):
         metadata = json.dumps({'id': 'sha256:' + 'c' * 64, 'os': 'linux', 'arch': 'amd64', 'revision': SOURCE}).encode()
@@ -231,9 +236,9 @@ class ContractTest(unittest.TestCase):
     def test_pin_byte_preservation_and_unique_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / '.env'
-            path.write_bytes(b'A=secret\r\nCPR_IMAGE=' + remote.OLD_IMAGE.encode() + b'\r\nB=opaque')
+            path.write_bytes(b'A=secret\r\nCPR_IMAGE=' + BASELINE_IMAGE.encode() + b'\r\nB=opaque')
             with patch.object(remote.os, 'chown', create=True):
-                remote.set_pin(path, remote.OLD_IMAGE, IMAGE)
+                remote.set_pin(path, BASELINE_IMAGE, IMAGE)
             self.assertEqual(path.read_bytes(), b'A=secret\r\nCPR_IMAGE=' + IMAGE.encode() + b'\r\nB=opaque')
             path.write_bytes(path.read_bytes() + b'\nCPR_IMAGE=' + IMAGE.encode())
             with self.assertRaisesRegex(RuntimeError, 'unique_CPR_IMAGE'):
@@ -243,7 +248,7 @@ class ContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp) as site:
             result = site.deploy()
             self.assertEqual(result['phase'], 'deployed')
-            self.assertEqual(result['stoppedRecovery'][0]['containerId'], 'old')
+            self.assertEqual(result['stoppedRecovery'][0]['containerId'], OLD_ID)
             self.assertEqual(result['stoppedRecovery'][0]['requests'], 2)
             self.assertEqual(result['restartRecoveryGate']['phase'], 'rebound')
             self.assertFalse((site.gate / 'maintenance').exists())
@@ -262,7 +267,7 @@ class ContractTest(unittest.TestCase):
             for path in (site.run / 'launch.guard', site.base / '.runtime/deployments/task40-active.lock',
                          site.gate / 'lifecycle.lock'):
                 path.touch(exist_ok=True)
-            site.compose_target_override = remote.OLD_IMAGE
+            site.compose_target_override = BASELINE_IMAGE
             with self.assertRaisesRegex(RuntimeError, 'fresh_compose_drift'):
                 remote.verify(site.run)
 
@@ -291,7 +296,7 @@ class ContractTest(unittest.TestCase):
                         if drift == 'file':
                             (site.base / 'docker-compose.yml').write_text('changed')
                         else:
-                            site.compose_target_override = remote.OLD_IMAGE
+                            site.compose_target_override = BASELINE_IMAGE
                 with patch.object(remote.Deployment, 'save', new=change_after_candidate):
                     result = site.deploy()
                 self.assertEqual(result['phase'], 'recovery_requires_operator')
@@ -307,7 +312,7 @@ class ContractTest(unittest.TestCase):
             def change_after_binding(path, value):
                 original(path, value)
                 if path == site.gate / 'binding.json' and value['runtime']['revision'] == SOURCE:
-                    site.compose_target_override = remote.OLD_IMAGE
+                    site.compose_target_override = BASELINE_IMAGE
             with patch.object(remote, 'atomic', side_effect=change_after_binding):
                 result = site.deploy()
             self.assertEqual(result['phase'], 'recovery_requires_operator')
@@ -349,7 +354,7 @@ class ContractTest(unittest.TestCase):
             (site.run / 'launch.guard').touch()
             (site.base / '.runtime/deployments/task40-active.lock').touch()
             (site.gate / 'lifecycle.lock').touch(exist_ok=True)
-            self.assertEqual(remote.verify(site.run)['runtime']['revision'], remote.OLD_SOURCE)
+            self.assertEqual(remote.verify(site.run)['runtime']['revision'], BASELINE_SOURCE)
 
     def test_takeover_after_runner_exits_without_result_uses_progress(self):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp) as site:
@@ -589,7 +594,7 @@ class ContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'recovery_unknown') as site:
             site.deploy()
             (site.run / 'attempt-claimed.json').touch()
-            (site.run / 'stopped-recovery-old.json').write_text(json.dumps({'phase': 'prepared',
+            (site.run / ('stopped-recovery-' + OLD_ID[:12] + '.json')).write_text(json.dumps({'phase': 'prepared',
                 'owner': {'Id': site.old['id'], 'StartedAt': site.old['startedAt']}}))
             result = remote.Deployment(site.run).resume()
             self.assertEqual(result['takeoverErrorCode'], 'recovery_claimed_wait_exact_receipt_no_reissue')
@@ -599,7 +604,7 @@ class ContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'recovery_unknown') as site:
             site.deploy()
             (site.run / 'attempt-claimed.json').touch()
-            path = site.run / 'stopped-recovery-old.json'
+            path = site.run / ('stopped-recovery-' + OLD_ID[:12] + '.json')
             path.write_text(json.dumps({'phase': 'complete', 'owner': {'Id': site.old['id'],
                 'StartedAt': site.old['startedAt']}, 'completed': ['req1'], 'released': {'accounts': 1}}))
             with patch.object(remote, 'set_pin', side_effect=site.set_pin):
@@ -650,9 +655,9 @@ class ContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'candidate_unhealthy') as site:
             result = site.deploy()
             self.assertEqual(result['phase'], 'rolled_back_same52')
-            self.assertEqual([x['containerId'] for x in result['stoppedRecovery']], ['old', 'new-recreated'])
-            self.assertEqual(result['rollbackRuntime']['revision'], remote.OLD_SOURCE)
-            self.assertEqual(site.pin, remote.OLD_IMAGE)
+            self.assertEqual([x['containerId'] for x in result['stoppedRecovery']], [OLD_ID, 'new-recreated'])
+            self.assertEqual(result['rollbackRuntime']['revision'], BASELINE_SOURCE)
+            self.assertEqual(site.pin, BASELINE_IMAGE)
             self.assertEqual(result['restartRecoveryGate']['phase'], 'rebound')
 
     def test_compose_ack_first_inspect_unknown_then_owned_candidate_rolls_back(self):
@@ -667,15 +672,15 @@ class ContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'candidate_exit') as site:
             result = site.deploy()
             self.assertEqual(result['phase'], 'rolled_back_same52')
-            self.assertEqual([x['containerId'] for x in result['stoppedRecovery']], ['old', 'new-recreated'])
+            self.assertEqual([x['containerId'] for x in result['stoppedRecovery']], [OLD_ID, 'new-recreated'])
             self.assertEqual(len([e for e in site.events if e[:2] == ['docker', 'stop']]), 1)
 
     def test_pin_failure_after_old_recovery_restarts_same52_old(self):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp, 'pin_failure') as site:
             result = site.deploy()
             self.assertEqual(result['phase'], 'rolled_back_same52')
-            self.assertEqual([x['containerId'] for x in result['stoppedRecovery']], ['old'])
-            self.assertEqual(result['rollbackRuntime']['revision'], remote.OLD_SOURCE)
+            self.assertEqual([x['containerId'] for x in result['stoppedRecovery']], [OLD_ID])
+            self.assertEqual(result['rollbackRuntime']['revision'], BASELINE_SOURCE)
             self.assertEqual(result['restartRecoveryGate']['phase'], 'rebound')
 
     def test_preservation_drift_rolls_back_to_old_pin(self):
@@ -683,7 +688,7 @@ class ContractTest(unittest.TestCase):
             result = site.deploy()
             self.assertEqual(result['phase'], 'rolled_back_same52')
             self.assertIn('preservation_drift_settings', result['errorCode'])
-            self.assertEqual(site.pin, remote.OLD_IMAGE)
+            self.assertEqual(site.pin, BASELINE_IMAGE)
 
     def test_recovery_helper_drift_blocks_before_stop(self):
         with tempfile.TemporaryDirectory() as tmp, MockSite(tmp) as site:
