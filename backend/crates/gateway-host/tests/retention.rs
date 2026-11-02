@@ -23,7 +23,9 @@ use std::{
 #[derive(Default)]
 struct Store {
     calls: Mutex<Vec<RetentionTarget>>,
+    limits: Mutex<Vec<u32>>,
     fail: bool,
+    fail_load: bool,
     full: bool,
     full_target: Option<RetentionTarget>,
     block_load: bool,
@@ -36,6 +38,13 @@ impl RetentionStore for Store {
         if self.block_load {
             std::future::pending::<()>().await;
         }
+        if self.fail_load {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::Unavailable,
+                "retention settings",
+                "fixture settings failure",
+            ));
+        }
         Ok(RetentionPolicy::try_new(31, 7, 90).unwrap())
     }
     async fn purge_batch(
@@ -46,6 +55,7 @@ impl RetentionStore for Store {
         limit: NonZeroU32,
     ) -> AdminStoreResult<u64> {
         self.calls.lock().unwrap().push(target);
+        self.limits.lock().unwrap().push(limit.get());
         if self.block_target == Some(target) {
             std::future::pending::<()>().await;
         }
@@ -105,26 +115,59 @@ async fn full_tables_rotate_until_batch_budget_is_exhausted() {
 }
 
 #[tokio::test]
-async fn successful_trace_backlog_uses_remaining_batches_without_revisiting_empty_tables() {
-    let store = Arc::new(Store {
-        full_target: Some(RetentionTarget::SuccessfulDiagnosticTraces),
-        ..Store::default()
-    });
-    RetentionTask::new(store.clone(), budget())
-        .run_cycle(context(CancellationToken::new()))
-        .await
-        .unwrap();
-    assert_eq!(
-        *store.calls.lock().unwrap(),
-        [
+async fn successful_trace_backlog_uses_target_limit_and_remaining_cycle_budget() {
+    for (budget, expected_limits) in [
+        (budget(), vec![2; 6]),
+        (
+            RetentionCycleBudget::default(),
+            [vec![5_000; 3], vec![100; 9]].concat(),
+        ),
+    ] {
+        let store = Arc::new(Store {
+            full_target: Some(RetentionTarget::SuccessfulDiagnosticTraces),
+            ..Store::default()
+        });
+        RetentionTask::new(store.clone(), budget)
+            .run_cycle(context(CancellationToken::new()))
+            .await
+            .unwrap();
+        let mut expected_targets = vec![
             RetentionTarget::ModelRequests,
             RetentionTarget::OpsEvents,
             RetentionTarget::AdminAuditEvents,
+        ];
+        expected_targets.resize(
+            expected_limits.len(),
             RetentionTarget::SuccessfulDiagnosticTraces,
-            RetentionTarget::SuccessfulDiagnosticTraces,
-            RetentionTarget::SuccessfulDiagnosticTraces,
-        ]
-    );
+        );
+        assert_eq!(*store.calls.lock().unwrap(), expected_targets);
+        assert_eq!(*store.limits.lock().unwrap(), expected_limits);
+    }
+}
+
+#[tokio::test]
+async fn store_failures_keep_safe_message_and_internal_error_details() {
+    for (fail, fail_load, message, detail) in [
+        (true, false, "retention cleanup failed", "fixture"),
+        (
+            false,
+            true,
+            "retention settings read failed",
+            "fixture settings failure",
+        ),
+    ] {
+        let store = Arc::new(Store {
+            fail,
+            fail_load,
+            ..Store::default()
+        });
+        let error = RetentionTask::new(store, budget())
+            .run_cycle(context(CancellationToken::new()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.as_safe_str(), message);
+        assert!(error.error_details().unwrap().as_str().contains(detail));
+    }
 }
 
 #[tokio::test]

@@ -887,3 +887,160 @@ async fn locked_successful_traces_are_skipped_and_revisited_without_deleting_row
     assert_eq!(counts, (2, 0));
     database.close().await;
 }
+
+#[tokio::test]
+async fn large_toasted_successful_traces_advance_through_backlog_and_sparse_tail_within_budget() {
+    let Some(database) = TestDatabase::create("successful_trace_toast_budget").await else {
+        return;
+    };
+    let now = Utc::now();
+    // 20 万条已清诊断在索引前部，覆盖接近生产积压规模的稀疏尾部扫描
+    // 同一合成随机状字符串在各行独立 TOAST，不使用可被压成小值的重复填充
+    let trace: serde_json::Value = sqlx::query_scalar(
+        "select jsonb_build_object('schemaVersion',3,'events',jsonb_build_array(
+            jsonb_build_object('stage','request.finished','data',jsonb_build_object(
+                'synthetic',string_agg(md5(value::text),'' order by value)))))
+         from generate_series(1,2000) value",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(
+        serde_json::to_vec(&trace).unwrap().len()
+            <= gateway_core::diagnostics::MAX_DIAGNOSTIC_TRACE_BYTES
+    );
+    sqlx::query(
+        "insert into model_requests(id,client_api_key_ref,operation,client_transport,
+             requested_model_id,outcome,client_status_code,downstream_committed_at,
+             input_tokens,output_tokens,total_tokens,started_at,recovery_lease_expires_at,
+             completed_at,diagnostic_trace_json,request_observation_json)
+         select 'toast_'||value::text,'key_toast','responses','http_sse','model_a',
+             'succeeded',200,$1-interval '8 days',100,20,120,$1-interval '9 days',
+             $1-interval '4 days',
+             case when value<=200000 then $1-interval '8 days' else $1-interval '4 days' end,
+             case when value<=200000 then null else $2::jsonb end,
+             jsonb_build_object('request',jsonb_build_object('configRevision',1,'protocol','openai',
+                 'endpoint','/v1/responses','compact',false),'routing',jsonb_build_object('scope','all',
+                 'groupRefs','[]'::jsonb,'groupNamesSnapshot','[]'::jsonb),'timings',
+                 jsonb_build_object('local',jsonb_build_object('latencyMs',100,'firstTokenMs',50)))
+         from generate_series(1,201003) value",
+    )
+    .bind(now)
+    .bind(&trace)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let stored_bytes: i32 = sqlx::query_scalar(
+        "select pg_column_size(diagnostic_trace_json) from model_requests where id='toast_201001'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(
+        stored_bytes > 60_000,
+        "fixture must retain a large TOAST value"
+    );
+    sqlx::query(
+        "insert into upgrade_retention_protected_requests(request_id) values('toast_201002')",
+    )
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query("analyze model_requests")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let mut writing = database.pool.begin().await.unwrap();
+    sqlx::query("select id from model_requests where id='toast_201003' for update")
+        .execute(&mut *writing)
+        .await
+        .unwrap();
+    let repository = PgRetentionRepository::new(database.pool.clone());
+    let policy = RetentionPolicy::try_new(31, 30, 90).unwrap();
+    let mut batches = Vec::new();
+    let mut cycle_totals = Vec::new();
+    // 默认 12 批中，三个空历史 target 各占一批，剩余九批供成功 trace 前进
+    for _ in 0..2 {
+        let cycle_started = std::time::Instant::now();
+        for target in [
+            RetentionTarget::ModelRequests,
+            RetentionTarget::OpsEvents,
+            RetentionTarget::AdminAuditEvents,
+        ] {
+            assert_eq!(
+                repository
+                    .purge_batch(target, now, policy, NonZeroU32::new(5_000).unwrap())
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        let mut cleared = 0;
+        for batch in 0..9 {
+            let started = std::time::Instant::now();
+            let count = repository
+                .purge_batch(
+                    RetentionTarget::SuccessfulDiagnosticTraces,
+                    now,
+                    policy,
+                    NonZeroU32::new(100).unwrap(),
+                )
+                .await
+                .expect("large TOAST batch must commit under the original statement timeout");
+            let elapsed = started.elapsed();
+            eprintln!("successful trace batch: rows={count}, elapsed={elapsed:?}");
+            assert!(elapsed < Duration::from_secs(5));
+            cleared += count;
+            batches.push(count);
+            if count < 100 {
+                break;
+            }
+            if batch < 8 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+        let elapsed = cycle_started.elapsed();
+        eprintln!("successful trace cycle: rows={cleared}, elapsed={elapsed:?}");
+        assert!(elapsed < Duration::from_secs(30));
+        cycle_totals.push(cleared);
+    }
+    assert_eq!(cycle_totals, [900, 101]);
+    assert_eq!(batches, [vec![100; 10], vec![1]].concat());
+    assert_eq!(
+        repository
+            .purge_batch(
+                RetentionTarget::SuccessfulDiagnosticTraces,
+                now,
+                policy,
+                NonZeroU32::new(100).unwrap(),
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    writing.rollback().await.unwrap();
+    assert_eq!(
+        repository
+            .purge_batch(
+                RetentionTarget::SuccessfulDiagnosticTraces,
+                now,
+                policy,
+                NonZeroU32::new(100).unwrap(),
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let retained: (i64, i64, i64) = sqlx::query_as(
+        "select count(*),count(diagnostic_trace_json),sum(total_tokens)::bigint from model_requests",
+    ).fetch_one(&database.pool).await.unwrap();
+    assert_eq!(retained, (201003, 1, 201003 * 120));
+    let protected: bool = sqlx::query_scalar(
+        "select diagnostic_trace_json is not null from model_requests where id='toast_201002'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    assert!(protected);
+    database.close().await;
+}

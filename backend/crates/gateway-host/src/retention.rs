@@ -18,6 +18,19 @@ pub struct RetentionCycleBudget {
     pub batch_pause: Duration,
 }
 
+impl RetentionCycleBudget {
+    fn batch_rows_for(self, target: RetentionTarget) -> NonZeroU32 {
+        match target {
+            // 每条诊断最多 64 KiB，限制单事务约 6.25 MiB 的 TOAST 清除工作
+            // 不能沿用摘要删除的 5000 行，以免持续撞到 Store 的 5 秒语句截止
+            RetentionTarget::SuccessfulDiagnosticTraces => self
+                .batch_rows
+                .min(NonZeroU32::new(100).unwrap_or(NonZeroU32::MIN)),
+            _ => self.batch_rows,
+        }
+    }
+}
+
 impl Default for RetentionCycleBudget {
     fn default() -> Self {
         Self {
@@ -65,11 +78,9 @@ impl RetentionTask {
     }
 
     async fn cleanup(&self, context: &WorkerCycleContext) -> Result<(), WorkerTaskError> {
-        let policy = self
-            .store
-            .load_policy()
-            .await
-            .map_err(|_| WorkerTaskError::safe("retention settings read failed"))?;
+        let policy = self.store.load_policy().await.map_err(|source| {
+            WorkerTaskError::safe("retention settings read failed").with_source(source)
+        })?;
         let now = Utc::now();
         let started_at = tokio::time::Instant::now();
         let mut targets = [
@@ -90,14 +101,17 @@ impl RetentionTask {
                 {
                     break 'cycles;
                 }
+                let limit = self.budget.batch_rows_for(*target);
                 let count = self
                     .store
-                    .purge_batch(*target, now, policy, self.budget.batch_rows)
+                    .purge_batch(*target, now, policy, limit)
                     .await
-                    .map_err(|_| WorkerTaskError::safe("retention cleanup failed"))?;
+                    .map_err(|source| {
+                        WorkerTaskError::safe("retention cleanup failed").with_source(source)
+                    })?;
                 batches += 1;
                 *affected = affected.saturating_add(count);
-                *complete = count < u64::from(self.budget.batch_rows.get());
+                *complete = count < u64::from(limit.get());
                 if !*complete
                     && batches < self.budget.max_batches.get()
                     && !self.budget.batch_pause.is_zero()
