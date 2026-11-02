@@ -22,7 +22,20 @@ async fn dump_process_lifecycle() {
         let script = directory.path().join("pg_dump");
         std::fs::write(
             &script,
-            "#!/bin/sh\nprintf '%s' $$ > \"$CPR_TEST_PG_DUMP_PROBE_DIR/pid\"\ncase \"$5\" in\n  wait) exec 1>&-; exec sleep 30 ;;\n  stream) printf archive; exec sleep 30 ;;\n  fail) printf partial; exit 1 ;;\n  *) printf archive ;;\nesac\n",
+            r#"#!/bin/sh
+printf '%s' $$ > "$CPR_TEST_PG_DUMP_PROBE_DIR/pid"
+ready() {
+  marker="$CPR_TEST_PG_DUMP_PROBE_DIR/ready-$1"
+  printf '%s' $$ > "$marker.tmp"
+  mv "$marker.tmp" "$marker"
+}
+case "$5" in
+  wait) exec 1>&-; ready wait; exec sleep 30 ;;
+  stream) printf archive; ready stream; exec sleep 30 ;;
+  fail) printf partial; exit 1 ;;
+  *) printf archive ;;
+esac
+"#,
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -112,31 +125,65 @@ async fn dump_process_lifecycle() {
         let adapter = dump(mode);
         let request = request(mode);
         let cancellation = request.cancellation.clone();
-        let task = tokio::spawn(async move { adapter.dump(request).await });
-        wait_until(|| {
-            std::fs::read_to_string(directory.join("pid")).is_ok_and(|pid| !pid.is_empty())
-        })
-        .await;
-        let pid = std::fs::read_to_string(directory.join("pid")).unwrap();
-        if mode == "wait" {
-            // stdout 已关闭，但子进程仍存活：取消必须覆盖 wait 阶段
-            wait_until(|| std::fs::read_link(format!("/proc/{pid}/fd/1")).is_err()).await;
+        // 占满独享的两条连接，确定性覆盖超过三秒的快照准备，再检验独立的取消时限
+        let setup_delay = if mode == "wait" {
+            let connections = [
+                database.pool.acquire().await.unwrap(),
+                database.pool.acquire().await.unwrap(),
+            ];
+            Some(tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(3_500)).await;
+                drop(connections);
+            }))
+        } else {
+            None
+        };
+        eprintln!("pg_dump lifecycle {mode}: starting snapshot/process setup");
+        let mut task = tokio::spawn(async move { adapter.dump(request).await });
+        // 一致性快照与进程启动属于 setup，不消耗取消后的三秒退出合同
+        let ready = wait_for_ready(directory, mode);
+        let pid = tokio::select! {
+            result = &mut task => panic!("{mode}: dump ended before child readiness: {result:?}"),
+            pid = ready => pid,
+        };
+        if let Some(setup_delay) = setup_delay {
+            setup_delay.await.unwrap();
         }
+        assert!(
+            Path::new(&format!("/proc/{pid}")).exists(),
+            "{mode}: ready child must be alive"
+        );
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{pid}/fd/1")).is_err(),
+            mode == "wait",
+            "{mode}: ready signal must describe the intended stdout phase",
+        );
+        eprintln!("pg_dump lifecycle {mode}: child {pid} ready; requesting cancellation");
+        // 返回、真实进程退出和回收共用截止时间，不能各自再获得三秒
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         if abort {
             task.abort();
-            assert!(task.await.unwrap_err().is_cancelled());
         } else {
             cancellation.cancel();
-            let error = tokio::time::timeout(Duration::from_secs(3), task)
-                .await
-                .expect("cancel must not wait for natural process exit")
-                .unwrap()
-                .unwrap_err();
-            assert_eq!(error.code(), code::CANCELLED);
         }
-        wait_until(|| !Path::new(&format!("/proc/{pid}")).exists()).await;
-        assert!(!staging.partial_path(mode).exists());
-        assert!(!staging.final_path(mode).exists());
+        let result = tokio::time::timeout_at(deadline, task)
+            .await
+            .unwrap_or_else(|_| panic!("{mode}: cancellation task return exceeded 3s"));
+        if abort {
+            assert!(result.unwrap_err().is_cancelled());
+        } else {
+            assert_eq!(result.unwrap().unwrap_err().code(), code::CANCELLED);
+        }
+        eprintln!("pg_dump lifecycle {mode}: cancellation returned; waiting for child reap");
+        wait_for_exit(&pid, mode, deadline).await;
+        assert!(
+            !staging.partial_path(mode).exists(),
+            "{mode}: partial archive survived cancellation"
+        );
+        assert!(
+            !staging.final_path(mode).exists(),
+            "{mode}: cancelled dump published an archive"
+        );
         std::fs::remove_file(directory.join("pid")).unwrap();
     }
     assert!(
@@ -173,12 +220,34 @@ fn request(backup_id: &str) -> DumpRequest {
     }
 }
 
-async fn wait_until(condition: impl Fn() -> bool) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !condition() {
+async fn wait_for_ready(directory: &Path, mode: &str) -> String {
+    // setup 包含数据库快照查询，沿用该查询的 30 秒期限，不能套用取消时限
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let path = directory.join(format!("ready-{mode}"));
+        loop {
+            match std::fs::read_to_string(&path) {
+                Ok(pid) => {
+                    pid.parse::<u32>().expect("ready marker must contain a PID");
+                    return pid;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("{mode}: cannot read child readiness: {error}"),
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("process lifecycle condition");
+    .unwrap_or_else(|_| {
+        panic!("{mode}: snapshot/process setup did not reach child readiness in 30s")
+    })
+}
+
+async fn wait_for_exit(pid: &str, mode: &str, deadline: tokio::time::Instant) {
+    tokio::time::timeout_at(deadline, async {
+        while Path::new(&format!("/proc/{pid}")).exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{mode}: cancelled child {pid} was not reaped within 3s"));
 }
