@@ -705,7 +705,8 @@ Continuation 受原请求的 Client Key、账号范围、Provider 和发送/交�
   显式原生续接保持原合同，Provider session state 只携带元数据，Core、Redis 和 schema 不保存请求正文
 - OAuth 大包门禁在自动裁剪后按实际编码帧执行，达到 15 MiB 的新链改走完整 HTTP；大 connection-local
   续接和 HTTP `store=false` 后不可原生续写的 WS 增量返回 `ClientReplayRequired`，由客户端重发完整历史。
-  已认领的自动续接在明确未发送的连接退出，或无语义输出的历史不存在拒绝后，只恢复一次原生 full；
+  已认领的自动续接在明确未发送的连接退出，或无语义输出的历史不存在拒绝后，沿同一身份和既有可重放资格恢复一次完整原生 full；
+  恢复体达到 WS 门禁时沿普通新链的 HTTP/SSE 路径，显式 connection-local 续接仍返回原恢复错误。
   suffix 不发新连接，送达不明或部分输出后不扩大重放
 - OpenAI 在有效输出交付前收到可安全重放的明确额度拒绝时，先隔离账号，再投影 `ClientReplayRequired`；
   丢弃未交付的原错误帧，由客户端提交完整历史开启新链，不把原增量输入交给其他账号。

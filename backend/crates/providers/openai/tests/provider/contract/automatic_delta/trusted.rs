@@ -262,14 +262,14 @@ async fn trusted_projection_edits_and_unsupported_native_shapes_stay_full() {
 
 #[tokio::test]
 async fn large_canonical_full_uses_small_delta_and_oversized_tail_restores_native_http() {
-    for large_tail in [false, true] {
+    for (large_tail, reject_delta) in [(false, false), (true, false), (false, true)] {
         let text = if large_tail {
             "small".to_owned()
         } else {
             "o".repeat(9 * 1024 * 1024)
         };
         let raw = raw_text(&text);
-        let mut upstream = Upstream::start(vec![vec![raw.clone()], vec![]], false).await;
+        let mut upstream = Upstream::start(vec![vec![raw.clone()], vec![]], reject_delta).await;
         let store = Arc::new(MemoryAccountStore::default());
         create_account(&store, "acct_provider_contract").await;
         let provider = provider_with_base_url(&store, upstream.base.clone());
@@ -287,26 +287,75 @@ async fn large_canonical_full_uses_small_delta_and_oversized_tail_restores_nativ
         let tail = user(&"n".repeat(if large_tail { 16 * 1024 * 1024 } else { 4 }));
         let input = vec![seed, canonical(&text), tail.clone()];
         assert!(serde_json::to_vec(&input).unwrap().len() > 15 * 1024 * 1024);
-        let transport = run(
-            &provider,
-            input,
-            "trusted-large",
-            Map::new(),
-            "key_trusted",
-            "req_trusted_large_1",
-        )
-        .await;
+        let transport = if reject_delta {
+            let mut stream = Arc::clone(&provider)
+                .execute(
+                    planned_request("openai", operation(input, "trusted-large", Map::new())),
+                    keyed_context("req_trusted_large_1", "key_trusted"),
+                )
+                .await
+                .unwrap();
+            let mut timings = None;
+            let mut usage = Vec::new();
+            let mut completed = false;
+            while let Some(event) = stream.next().await {
+                let event = event.expect("native full HTTP recovery");
+                if let Some(observation) = event.response_observation() {
+                    assert_eq!(observation.transport().as_str(), "http_sse");
+                    timings = Some(observation.timings());
+                }
+                for fact in event.canonical_facts() {
+                    if let GatewayEvent::Usage(value) = fact {
+                        usage.push((value.input_tokens, value.output_tokens, value.total_tokens));
+                    }
+                }
+                if let Some(wire) = event.wire_event() {
+                    assert!(wire.raw_sse_frame().is_some());
+                    assert_eq!(wire.data()["response"]["id"], "resp_http_fallback");
+                    completed |= wire.event_type() == Some("response.completed");
+                }
+            }
+            assert!(completed);
+            assert_eq!(usage, vec![(Some(3), Some(1), Some(4))]);
+            let timings = timings.expect("successful HTTP timing");
+            assert!(timings.headers_ms.is_some());
+            assert!(timings.first_event_ms.is_some());
+            assert_eq!(timings.first_token_ms, timings.first_event_ms);
+            "http_sse".to_owned()
+        } else {
+            run(
+                &provider,
+                input,
+                "trusted-large",
+                Map::new(),
+                "key_trusted",
+                "req_trusted_large_1",
+            )
+            .await
+        };
         let (connection, sent) = upstream.frame().await;
         if large_tail {
             assert_eq!(transport, "http_sse");
             assert_eq!(sent["input"], json!([first["input"][0].clone(), raw, tail]));
             assert!(sent.get("previous_response_id").is_none());
         } else {
-            assert_eq!(transport, "websocket");
             assert_eq!(connection, 1);
             assert_eq!(sent["previous_response_id"], "resp_auto_0");
-            assert_eq!(sent["input"], json!([tail]));
+            assert_eq!(sent["input"], json!([tail.clone()]));
             assert!(serde_json::to_vec(&sent).unwrap().len() < 4096);
+            if reject_delta {
+                // 小delta被拒绝后，恢复体超出WS门禁，沿既有HTTP路径发送原生full
+                assert_eq!(transport, "http_sse");
+                let (_, recovered) = upstream.frame().await;
+                assert!(recovered.get("previous_response_id").is_none());
+                assert_eq!(
+                    recovered["input"],
+                    json!([first["input"][0].clone(), raw, tail])
+                );
+                assert!(serde_json::to_vec(&recovered).unwrap().len() > 15 * 1024 * 1024);
+            } else {
+                assert_eq!(transport, "websocket");
+            }
         }
         upstream.stop().await;
     }

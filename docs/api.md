@@ -383,8 +383,9 @@ OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选
 未知 item、非空 annotations/logprobs、多 reasoning 等未支持重建继续 full
 
 已知模板与有效新增尾项表示续接意图；客户端要替换最近输出时，应使旧 input 或投影失配，或使用新会话／分叉身份建立新基线。
-参数、历史、归属不匹配或超出内存预算时发送当前 full。已认领的续接在既有安全恢复路径中使用原生 full，
-不会将裁剪后的 suffix 发到新连接；显式 `previous_response_id` 继续沿用原生合同
+参数、历史、归属不匹配或超出内存预算时发送当前 full。已认领的续接在同一身份和既有可重放资格下使用完整原生 full，
+恢复体达到 WS 大小门禁时沿普通新链的 HTTP/SSE 路径，不会将 suffix 发到新连接；
+显式 `previous_response_id` 的 connection-local 续接仍沿用原恢复错误合同
 
 Codex OAuth backend 的候选上游为 WS 时，按最终规范化及自动裁剪后的实际 `response.create` 大小执行门禁：
 达到 15 MiB 的普通新链在发送前恢复完整请求并选择 HTTP/SSE；HTTP 和 WS 入站均适用，下游交付协议不变。
