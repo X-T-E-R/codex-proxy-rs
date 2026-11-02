@@ -24,13 +24,14 @@ async fn dump_process_lifecycle() {
             &script,
             r#"#!/bin/sh
 printf '%s' $$ > "$CPR_TEST_PG_DUMP_PROBE_DIR/pid"
+stdout_pipe=$(readlink "/proc/$$/fd/1")
 ready() {
   marker="$CPR_TEST_PG_DUMP_PROBE_DIR/ready-$1"
-  printf '%s' $$ > "$marker.tmp"
+  printf '%s\n%s\n' "$$" "$stdout_pipe" > "$marker.tmp"
   mv "$marker.tmp" "$marker"
 }
 case "$5" in
-  wait) exec 1>&-; ready wait; exec sleep 30 ;;
+  wait) exec 1>/dev/null; ready wait; exec sleep 30 ;;
   stream) printf archive; ready stream; exec sleep 30 ;;
   fail) printf partial; exit 1 ;;
   *) printf archive ;;
@@ -142,9 +143,9 @@ esac
         let mut task = tokio::spawn(async move { adapter.dump(request).await });
         // 一致性快照与进程启动属于 setup，不消耗取消后的三秒退出合同
         let ready = wait_for_ready(directory, mode);
-        let pid = tokio::select! {
+        let (pid, stdout_pipe) = tokio::select! {
             result = &mut task => panic!("{mode}: dump ended before child readiness: {result:?}"),
-            pid = ready => pid,
+            ready = ready => ready,
         };
         if let Some(setup_delay) = setup_delay {
             setup_delay.await.unwrap();
@@ -153,10 +154,18 @@ esac
             Path::new(&format!("/proc/{pid}")).exists(),
             "{mode}: ready child must be alive"
         );
+        // sleep 可以把 fd1 重新打开到 /dev/null，需检查原管道而不是 fd 编号
+        let holds_stdout_pipe =
+            std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .any(|entry| {
+                    std::fs::read_link(entry.unwrap().path())
+                        .is_ok_and(|target| target == Path::new(&stdout_pipe))
+                });
         assert_eq!(
-            std::fs::read_link(format!("/proc/{pid}/fd/1")).is_err(),
-            mode == "wait",
-            "{mode}: ready signal must describe the intended stdout phase",
+            holds_stdout_pipe,
+            mode == "stream",
+            "{mode}: ready child must close the original stdout pipe only in wait mode",
         );
         eprintln!("pg_dump lifecycle {mode}: child {pid} ready; requesting cancellation");
         // 返回、真实进程退出和回收共用截止时间，不能各自再获得三秒
@@ -220,15 +229,25 @@ fn request(backup_id: &str) -> DumpRequest {
     }
 }
 
-async fn wait_for_ready(directory: &Path, mode: &str) -> String {
+async fn wait_for_ready(directory: &Path, mode: &str) -> (String, String) {
     // setup 包含数据库快照查询，沿用该查询的 30 秒期限，不能套用取消时限
     tokio::time::timeout(Duration::from_secs(30), async {
         let path = directory.join(format!("ready-{mode}"));
         loop {
             match std::fs::read_to_string(&path) {
-                Ok(pid) => {
-                    pid.parse::<u32>().expect("ready marker must contain a PID");
-                    return pid;
+                Ok(ready) => {
+                    let mut lines = ready.lines();
+                    let pid = lines.next().expect("ready marker must contain a PID");
+                    pid.parse::<u32>()
+                        .expect("ready marker PID must be numeric");
+                    let pipe = lines
+                        .next()
+                        .expect("ready marker must identify stdout pipe");
+                    assert!(
+                        pipe.starts_with("pipe:["),
+                        "{mode}: original stdout must be a pipe"
+                    );
+                    return (pid.to_owned(), pipe.to_owned());
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => panic!("{mode}: cannot read child readiness: {error}"),
