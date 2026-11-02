@@ -4,22 +4,45 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     fmt,
-    sync::atomic::{AtomicUsize, Ordering},
+    ops::Range,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use serde_json::{Map, Value};
 
-// 常驻快照保留编码后的原生 JSON，避免解析树的节点开销放大内存预算
+mod projection;
+
+// 编码后的 client full 与原生替换段共享；恢复令牌也计入同一连接预算
 const MAX_BASELINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 const MAX_OUTPUT_ITEMS: usize = 4096;
 static RETAINED_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-struct Budget(usize);
+struct Budget {
+    bytes: usize,
+    connection: Arc<AtomicUsize>,
+}
 
 impl Budget {
+    fn new(connection: Arc<AtomicUsize>) -> Self {
+        Self {
+            bytes: 0,
+            connection,
+        }
+    }
+
     fn reserve(&mut self, bytes: usize) -> bool {
-        if self.0.saturating_add(bytes) > MAX_BASELINE_BYTES {
+        if self
+            .connection
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(bytes)
+                    .filter(|next| *next <= MAX_BASELINE_BYTES)
+            })
+            .is_err()
+        {
             return false;
         }
         if RETAINED_BYTES
@@ -29,35 +52,104 @@ impl Budget {
             })
             .is_err()
         {
+            self.connection.fetch_sub(bytes, Ordering::Relaxed);
             return false;
         }
-        self.0 += bytes;
+        self.bytes += bytes;
         true
     }
 
     fn release(&mut self, bytes: usize) {
-        self.0 -= bytes;
+        self.bytes -= bytes;
+        self.connection.fetch_sub(bytes, Ordering::Relaxed);
         RETAINED_BYTES.fetch_sub(bytes, Ordering::Relaxed);
     }
 }
 
 impl Drop for Budget {
     fn drop(&mut self) {
-        RETAINED_BYTES.fetch_sub(self.0, Ordering::Relaxed);
+        self.release(self.bytes);
+    }
+}
+
+struct NativePatch {
+    client_range: Range<usize>,
+    output: Vec<Box<str>>,
+    _budget: Budget,
+}
+
+/// 请求私有的恢复视图，只持有 client full 和发生重建的原生段
+/// 相同前缀不另存第二份 full，多个恢复消费者共享同一已计费快照
+pub(crate) struct NativeHistory {
+    request: Box<str>,
+    scope: Box<str>,
+    patches: Vec<Arc<NativePatch>>,
+    _budget: Budget,
+}
+
+impl NativeHistory {
+    fn client(&self) -> Map<String, Value> {
+        serde_json::from_str(&self.request).expect("validated client history")
+    }
+
+    fn apply(&self, input: &mut Vec<Value>) {
+        for patch in self.patches.iter().rev() {
+            input.splice(
+                patch.client_range.clone(),
+                patch
+                    .output
+                    .iter()
+                    .map(|item| serde_json::from_str(item).expect("validated native output")),
+            );
+        }
+    }
+
+    fn matches_recovery(&self, body: &Map<String, Value>, scope: &str) -> bool {
+        if scope != self.scope.as_ref() {
+            return false;
+        }
+        let mut full = self.client();
+        if properties(body) != properties(&full) {
+            return false;
+        }
+        let input = full
+            .get_mut("input")
+            .and_then(Value::as_array_mut)
+            .expect("array client history");
+        self.apply(input);
+        body.get("input").and_then(Value::as_array) == Some(input)
+    }
+
+    pub(crate) fn restore(&self, body: &mut Value, scope: Option<&str>) {
+        if scope != Some(self.scope.as_ref()) {
+            return;
+        }
+        let mut full = self.client();
+        let Some(current) = body.as_object() else {
+            return;
+        };
+        // 请求私有令牌也须绑定原请求，克隆后编辑历史或参数不能复用它
+        if current.get("input") != full.get("input") || properties(current) != properties(&full) {
+            return;
+        }
+        let input = full
+            .get_mut("input")
+            .and_then(Value::as_array_mut)
+            .expect("array client history");
+        self.apply(input);
+        body["input"] = Value::Array(std::mem::take(input));
     }
 }
 
 struct Baseline {
-    request: Box<str>,
-    scope: Box<str>,
+    history: Arc<NativeHistory>,
     output: Vec<Box<str>>,
     response_id: Box<str>,
-    _budget: Budget,
+    budget: Budget,
 }
 
 struct Pending {
-    request: Box<str>,
-    scope: Box<str>,
+    history: Arc<NativeHistory>,
     items: BTreeMap<u64, Box<str>>,
     response_id: Option<Box<str>>,
     output_seen: bool,
@@ -69,6 +161,7 @@ struct Pending {
 pub(crate) struct AutomaticDeltaState {
     baseline: Option<Baseline>,
     pending: Option<Pending>,
+    retained: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for AutomaticDeltaState {
@@ -103,6 +196,8 @@ pub(crate) struct AutomaticDeltaPreparation {
     pub(crate) delta: Option<(String, Vec<Value>)>,
     pub(crate) reason: &'static str,
     pub(crate) prefix_failure: Option<PrefixFailure>,
+    pub(crate) template: Option<&'static str>,
+    pub(crate) history: Option<Arc<NativeHistory>>,
 }
 
 impl AutomaticDeltaPreparation {
@@ -111,6 +206,8 @@ impl AutomaticDeltaPreparation {
             delta: None,
             reason,
             prefix_failure: None,
+            template: None,
+            history: None,
         }
     }
 
@@ -119,6 +216,8 @@ impl AutomaticDeltaPreparation {
             delta: None,
             reason: "prefix_changed",
             prefix_failure: Some(failure),
+            template: None,
+            history: None,
         }
     }
 }
@@ -127,13 +226,15 @@ impl AutomaticDeltaState {
     /// 消费上一轮基线并为本轮保留逻辑 full，不把已发送的 suffix 当成下轮历史
     pub(crate) fn prepare(
         &mut self,
-        body: &Map<String, Value>,
+        request: &crate::transport::protocol::responses::CodexResponsesRequest,
         full_payload: &str,
         latest_response_id: Option<&str>,
         codex: bool,
         enabled: bool,
-        scope: &str,
     ) -> AutomaticDeltaPreparation {
+        let body = request.body();
+        let scope = request.automatic_delta_scope.as_deref().unwrap_or_default();
+        let recovery = request.automatic_delta_recovery.get().cloned();
         self.pending = None;
         let previous = self.baseline.take();
         if !enabled
@@ -147,8 +248,22 @@ impl AutomaticDeltaState {
         let Some(input) = body.get("input").and_then(Value::as_array) else {
             return AutomaticDeltaPreparation::full("input_not_array");
         };
+        if let Some(history) = recovery.filter(|history| history.matches_recovery(body, scope)) {
+            self.retained = Arc::clone(&history._budget.connection);
+            self.pending = Some(Pending {
+                history: Arc::clone(&history),
+                items: BTreeMap::new(),
+                response_id: None,
+                output_seen: false,
+                max_output_index: None,
+                budget: Budget::new(Arc::clone(&self.retained)),
+            });
+            let mut prepared = AutomaticDeltaPreparation::full("native_full_recovery");
+            prepared.history = Some(history);
+            return prepared;
+        }
         let mut prepared = match previous.as_ref() {
-            Some(previous) if previous.scope.as_ref() != scope => {
+            Some(previous) if previous.history.scope.as_ref() != scope => {
                 AutomaticDeltaPreparation::full("credential_revision_changed")
             }
             Some(previous) if Some(previous.response_id.as_ref()) != latest_response_id => {
@@ -157,22 +272,64 @@ impl AutomaticDeltaState {
             Some(previous) => compare(previous, body, input, codex),
             None => AutomaticDeltaPreparation::full("no_baseline"),
         };
-        drop(previous);
-        let mut budget = Budget(0);
-        if budget.reserve(full_payload.len().saturating_add(scope.len())) {
-            self.pending = Some(Pending {
+        let mut patches = Vec::new();
+        if let (Some(mut previous), Some((_, tail))) = (previous, prepared.delta.as_ref()) {
+            patches = previous.history.patches.clone();
+            let old_body: Value =
+                serde_json::from_str(&previous.history.request).expect("validated prior request");
+            let start = old_body["input"].as_array().expect("prior input").len();
+            let end = input.len() - tail.len();
+            // 已经完全相同的 raw 段无需再保存；已有映射仍继续共享
+            let same = previous.output.len() == end - start
+                && previous
+                    .output
+                    .iter()
+                    .zip(&input[start..end])
+                    .all(|(old, new)| {
+                        serde_json::from_str::<Value>(old).ok().as_ref() == Some(new)
+                    });
+            if !same {
+                previous.budget.release(previous.response_id.len());
+                if !previous.budget.reserve(
+                    std::mem::size_of::<NativePatch>().saturating_add(
+                        previous.output.capacity() * std::mem::size_of::<Box<str>>(),
+                    ),
+                ) {
+                    return AutomaticDeltaPreparation::full("budget_exhausted");
+                }
+                patches.push(Arc::new(NativePatch {
+                    client_range: start..end,
+                    output: previous.output,
+                    _budget: previous.budget,
+                }));
+            }
+        }
+        let mut budget = Budget::new(Arc::clone(&self.retained));
+        let bytes = full_payload
+            .len()
+            .saturating_add(scope.len())
+            .saturating_add(std::mem::size_of::<NativeHistory>())
+            .saturating_add(patches.len() * std::mem::size_of::<Arc<NativePatch>>());
+        if budget.reserve(bytes) {
+            let history = Arc::new(NativeHistory {
                 request: full_payload.into(),
                 scope: scope.into(),
+                patches,
+                _budget: budget,
+            });
+            if !history.patches.is_empty() {
+                prepared.history = Some(Arc::clone(&history));
+            }
+            self.pending = Some(Pending {
+                history,
                 items: BTreeMap::new(),
                 response_id: None,
                 output_seen: false,
                 max_output_index: None,
-                budget,
+                budget: Budget::new(Arc::clone(&self.retained)),
             });
-        }
-        if self.pending.is_none() && prepared.delta.is_none() {
-            prepared.reason = "budget_exhausted";
-            prepared.prefix_failure = None;
+        } else {
+            prepared = AutomaticDeltaPreparation::full("budget_exhausted");
         }
         prepared
     }
@@ -289,11 +446,10 @@ impl AutomaticDeltaState {
                     return;
                 };
                 self.baseline = Some(Baseline {
-                    request: pending.request,
-                    scope: pending.scope,
+                    history: pending.history,
                     output,
                     response_id,
-                    _budget: pending.budget,
+                    budget: pending.budget,
                 });
             }
             Some("response.incomplete" | "response.failed" | "error") => self.pending = None,
@@ -318,7 +474,8 @@ fn compare(
     input: &[Value],
     codex: bool,
 ) -> AutomaticDeltaPreparation {
-    let Ok(previous_body) = serde_json::from_str::<Map<String, Value>>(&previous.request) else {
+    let Ok(previous_body) = serde_json::from_str::<Map<String, Value>>(&previous.history.request)
+    else {
         return AutomaticDeltaPreparation::full("invalid_baseline");
     };
     if properties(&previous_body) != properties(body) {
@@ -327,8 +484,7 @@ fn compare(
     let Some(previous_input) = previous_body.get("input").and_then(Value::as_array) else {
         return AutomaticDeltaPreparation::full("invalid_baseline");
     };
-    let count = previous_input.len().saturating_add(previous.output.len());
-    if input.len() < count {
+    if input.len() < previous_input.len() {
         return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::InputShorter);
     }
     if !previous_input
@@ -336,38 +492,62 @@ fn compare(
         .zip(input)
         .all(|(old, new)| items_match(old, new, codex))
     {
-        return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::PriorInputChanged);
+        return AutomaticDeltaPreparation::prefix_failure(
+            if input.len() < previous_input.len().saturating_add(previous.output.len()) {
+                PrefixFailure::InputShorter
+            } else {
+                PrefixFailure::PriorInputChanged
+            },
+        );
     }
-    let mut metadata_only = false;
-    for (old, new) in previous
+    let Ok(output) = previous
         .output
         .iter()
-        .zip(&input[previous_input.len()..count])
-    {
-        let Ok(old) = serde_json::from_str::<Value>(old) else {
-            return AutomaticDeltaPreparation::full("invalid_baseline");
-        };
-        if old == *new {
-            continue;
+        .map(|item| serde_json::from_str::<Value>(item))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return AutomaticDeltaPreparation::full("invalid_baseline");
+    };
+    let current = &input[previous_input.len()..];
+    let strict_failure = if current.len() < output.len() {
+        Some(PrefixFailure::InputShorter)
+    } else {
+        let mut failure = None;
+        for (old, new) in output.iter().zip(current) {
+            if items_match(old, new, codex) {
+                continue;
+            }
+            if !output_metadata_matches(&project_item(old, codex), &project_item(new, codex)) {
+                failure = Some(PrefixFailure::PriorOutputOther);
+                break;
+            }
+            failure = Some(PrefixFailure::PriorOutputMetadataOnly);
         }
-        let old = project_item(&old, codex);
-        let new = project_item(new, codex);
-        if old == new {
-            continue;
+        failure
+    };
+    let (count, template) = if let Some(failure) = strict_failure {
+        match projection::boundary(&output, current, previous_input) {
+            Ok((count, template)) => (count, Some(template)),
+            Err(reason) => {
+                let mut prepared = AutomaticDeltaPreparation::prefix_failure(failure);
+                // 原四类诊断保持；受信拒绝单独记录原因
+                prepared.template = Some(reason);
+                return prepared;
+            }
         }
-        if !output_metadata_matches(&old, &new) {
-            return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::PriorOutputOther);
-        }
-        // 继续核对其余完成项，不能让首项的元数据差异掩盖后续业务字段变化
-        metadata_only = true;
-    }
-    if metadata_only {
-        return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::PriorOutputMetadataOnly);
-    }
+    } else {
+        (output.len(), None)
+    };
     AutomaticDeltaPreparation {
-        delta: Some((previous.response_id.to_string(), input[count..].to_vec())),
-        reason: "delta",
+        delta: Some((previous.response_id.to_string(), current[count..].to_vec())),
+        reason: if template.is_some() {
+            "trusted_delta"
+        } else {
+            "delta"
+        },
         prefix_failure: None,
+        template,
+        history: None,
     }
 }
 

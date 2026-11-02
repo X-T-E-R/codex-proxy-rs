@@ -696,14 +696,17 @@ Continuation 受原请求的 Client Key、账号范围、Provider 和发送/交�
 
 - native continuation 固定创建它的 Provider 与账号
 - OpenAI Provider 对没有显式 `previous_response_id` 的完整请求，在最终正文规范化、关联标识映射和隐私规则后，
-  比较上一轮完整 input 加真实 completed 原生 output；前缀及其余业务参数一致时，只向同一存活 WS 发送新增 input。
-  基线按 Client Key、会话、已选账号及 credential revision、出口和 opening identity 隔离，不要求客户端先支持原生增量
-- 自动基线由原连接租约独占，原生 `output_item.done` 或完整终态 output 是唯一输出来源；失败、中断、取消、断线或逐出不能迁移基线。
-  保留 JSON 的预算为每连接 32 MiB、进程合计 256 MiB，输出最多 4096 项；超预算只停止优化，正常 full 请求继续。
+  先核旧客户端 input 和业务参数，再严格比较真实 completed 原生 output。严格失败后只允许唯一确定投影认领上轮：
+  已知 canonical 表示确定尾项边界，原生完成项仍拥有历史内容和顺序，工具字段及结果关联严格校验。
+  基线按 Client Key、会话、已选账号及 credential revision、出口、opening identity、live lease 和最新完成归属隔离
+- 自动基线由原连接租约独占，原生 `output_item.done` 或完整终态 output 是唯一输出来源；失败、中断、取消或逐出不发布基线。
+  客户端 full 与原生替换段共享编码快照：下一轮前缀核客户端视图，已认领请求的安全恢复使用原生视图。
+  共享快照及恢复令牌按实际生命周期计入每连接 32 MiB、进程 256 MiB 预算，输出最多 4096 项；超预算只停止优化，正常 full 请求继续。
   显式原生续接保持原合同，Provider session state 只携带元数据，Core、Redis 和 schema 不保存请求正文
 - OAuth 大包门禁在自动裁剪后按实际编码帧执行，达到 15 MiB 的新链改走完整 HTTP；大 connection-local
   续接和 HTTP `store=false` 后不可原生续写的 WS 增量返回 `ClientReplayRequired`，由客户端重发完整历史。
-  自动生成的 previous 仅在尚无语义输出、明确收到历史不存在拒绝时恢复一次 full；送达不明或部分输出后不扩大重放
+  已认领的自动续接在明确未发送的连接退出，或无语义输出的历史不存在拒绝后，只恢复一次原生 full；
+  suffix 不发新连接，送达不明或部分输出后不扩大重放
 - OpenAI 在有效输出交付前收到可安全重放的明确额度拒绝时，先隔离账号，再投影 `ClientReplayRequired`；
   丢弃未交付的原错误帧，由客户端提交完整历史开启新链，不把原增量输入交给其他账号。
   真实错误分类、状态码、发送状态和上游诊断保持不变，客户端合同见 [Responses API](api.md#3-openai-数据面与模型目录)

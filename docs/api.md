@@ -376,9 +376,15 @@ OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选
 客户端可跳过预热继续正式请求，外部插件 adapter 按各自的协议能力处理
 
 没有显式 `previous_response_id` 时，客户端可继续提交完整历史。Provider 在同一 Client Key、会话、
-已选账号及凭据版本和同一存活上游 WS 上，能确认前缀等于上一轮 input 加真实 completed output 时，
-自动只发送新增 input；参数、历史或连接不匹配时仍发送 full，不要求客户端实现原生增量。
-此优化不改变显式 `previous_response_id` 的原生续接合同，连接失效后不向新连接发送裁剪后的输入
+已选账号及凭据版本、出口、opening identity 和存活上游 WS 上，先比较上一轮客户端 input 与真实 completed output，
+匹配后只发送新增 input。严格比较失败时，可由原生输出生成有限的确定回填模板：已知文本分块、单个 reasoning summary
+及 function call 的 canonical 表示仅用于认领上轮并确定唯一尾项边界，历史仍以上轮保存的原生 output 为准。
+工具 `call_id/name/arguments` 和结果关联必须匹配；原生 ID、状态、未知字段、密文及顺序保留。
+未知 item、非空 annotations/logprobs、多 reasoning 等未支持重建继续 full
+
+已知模板与有效新增尾项表示续接意图；客户端要替换最近输出时，应使旧 input 或投影失配，或使用新会话／分叉身份建立新基线。
+参数、历史、归属不匹配或超出内存预算时发送当前 full。已认领的续接在既有安全恢复路径中使用原生 full，
+不会将裁剪后的 suffix 发到新连接；显式 `previous_response_id` 继续沿用原生合同
 
 Codex OAuth backend 的候选上游为 WS 时，按最终规范化及自动裁剪后的实际 `response.create` 大小执行门禁：
 达到 15 MiB 的普通新链在发送前恢复完整请求并选择 HTTP/SSE；HTTP 和 WS 入站均适用，下游交付协议不变。
@@ -2289,7 +2295,10 @@ OpenAI 上游 WS 的 `transport.payload.prepared` 保留 `fullPayloadBytes`、`a
 | `prior_output_other` | 旧 output 区域存在其他差异，包括任意未知字段变化 |
 
 分型复用两侧既有兼容规范化；`prior_output_metadata_only` 要求其余字段严格相同。
-各分类均沿用 `deltaReason: prefix_changed` 并发送 full，不改变续接资格、隔离与恢复规则。
+只有严格比较和受信投影都未认领时，才以 `deltaReason: prefix_changed` 与上述分类发送 full。
+受信命中使用 `deltaReason: trusted_delta`；`trustedTemplate` 为确定模板类别，未命中时可记录
+`projection_mismatch/ambiguous_projection/tool_tail_invalid` 等原因，`actualInputItems` 表示实际准备帧的输入项数。
+普通日志的模板或拒绝原因使用 `trusted_template`，不包含文本、密文或签名。
 其他原因省略 `prefixFailure`；字节字段表示准备帧的序列化长度，按现有 trace 预算保留
 
 `provider.response.usage` 从已解析的上游终态单独提取已知数值字段，区分缺失、无效和明确的零，

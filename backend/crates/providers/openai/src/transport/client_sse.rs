@@ -155,6 +155,12 @@ impl CodexBackendClient {
             context.installation_id,
         );
         self.apply_privacy(&mut upstream_body, &mut headers)?;
+        if let Some(history) = upstream_request.automatic_delta_recovery.get() {
+            history.restore(
+                &mut upstream_body,
+                upstream_request.automatic_delta_scope.as_deref(),
+            );
+        }
         let body =
             serde_json::to_vec(&upstream_body).map_err(CodexClientError::RequestBodyEncode)?;
         let endpoint = endpoint_url(&self.base_url, self.protocol.responses_path());
@@ -291,9 +297,33 @@ impl CodexBackendClient {
             .prepare_response_transport_with_pool_account(request, context, pool_account_id, true)
             .await?;
         let automatic_delta = matches!(&prepared.route, PreparedResponseRoute::WebSocket(route) if route.automatic_delta);
-        let mut response = self
+        let mut response = match self
             .create_response_stream_with_prepared(request, context, prepared)
-            .await?;
+            .await
+        {
+            Err(CodexClientError::WebSocket(error))
+                if automatic_delta
+                    && request.automatic_delta_recovery.get().is_some()
+                    && matches!(
+                        error.classified(),
+                        CodexWebSocketExchangeError::SendNotStarted
+                    ) =>
+            {
+                // 已证明未发送的原连接退出：只恢复一次原生full，不让外层重新解码canonical历史
+                let prepared = self
+                    .prepare_response_transport_with_pool_account(
+                        request,
+                        context,
+                        pool_account_id,
+                        false,
+                    )
+                    .await?;
+                return self
+                    .create_response_stream_with_prepared(request, context, prepared)
+                    .await;
+            }
+            response => response?,
+        };
         if !automatic_delta {
             return Ok(response);
         }
@@ -393,6 +423,9 @@ impl CodexBackendClient {
         super::correlation::scope_request(&mut body, &mut headers, context.installation_id);
         let original_headers = self.privacy.as_ref().map(|_| headers.clone());
         self.apply_privacy(&mut body, &mut headers)?;
+        if let Some(history) = request.automatic_delta_recovery.get() {
+            history.restore(&mut body, request.automatic_delta_scope.as_deref());
+        }
         if let Some(body) = body.as_object() {
             super::diagnostics::evidence::record_request(
                 &context.trace.cloned().unwrap_or_default(),
@@ -553,12 +586,13 @@ impl CodexBackendClient {
             Err(error) => return Err(websocket_exchange_error_to_client_error(error)),
         };
         let mut prepared = prepared;
-        let (automatic_delta, delta_reason, prefix_failure) = prepared.prepare_automatic_delta(
-            &mut websocket_request,
-            websocket_create.payload_text(),
-            self.protocol == OpenAiUpstreamProtocol::Codex,
-            allow_automatic_delta,
-        );
+        let (automatic_delta, delta_reason, prefix_failure, template) = prepared
+            .prepare_automatic_delta(
+                &mut websocket_request,
+                websocket_create.payload_text(),
+                self.protocol == OpenAiUpstreamProtocol::Codex,
+                allow_automatic_delta,
+            );
         if automatic_delta {
             websocket_create.replace_payload_text(
                 crate::transport::protocol::websocket::websocket_response_create_payload_text(
@@ -574,6 +608,8 @@ impl CodexBackendClient {
             "actualPayloadBytes": actual_bytes,
             "automaticDelta": automatic_delta,
             "deltaReason": delta_reason,
+            "trustedTemplate": template,
+            "actualInputItems": websocket_request.body().get("input").and_then(serde_json::Value::as_array).map(Vec::len),
         });
         if let Some(failure) = prefix_failure {
             payload_metadata["prefixFailure"] = serde_json::json!(failure);
@@ -590,6 +626,7 @@ impl CodexBackendClient {
             automatic_delta,
             delta_reason,
             prefix_failure,
+            trusted_template = template,
             "OpenAI upstream payload prepared"
         );
         if size_limited && actual_bytes >= MAX_FRAME_BYTES {

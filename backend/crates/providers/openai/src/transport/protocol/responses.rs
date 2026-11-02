@@ -64,6 +64,10 @@ pub struct CodexResponsesRequest {
     pub client_api_key_id: Option<String>,
     /// 已选账号后绑定的调用方与凭据版本，只用于本地连接和自动增量隔离
     pub(crate) automatic_delta_scope: Option<String>,
+    /// 当前请求选定的原生恢复视图，克隆和既有安全重试共用一次认领结果
+    pub(crate) automatic_delta_recovery: std::sync::Arc<
+        std::sync::OnceLock<std::sync::Arc<crate::transport::websocket::NativeHistory>>,
+    >,
     /// 是否偏好 WebSocket 传输
     pub use_websocket: bool,
     /// 是否强制 HTTP SSE
@@ -606,6 +610,7 @@ impl CodexResponsesRequest {
             client_user_agent: None,
             client_api_key_id: None,
             automatic_delta_scope: None,
+            automatic_delta_recovery: std::sync::Arc::default(),
             use_websocket: false,
             force_http_sse: false,
             turn_state: None,

@@ -3,7 +3,7 @@
 use super::*;
 use gateway_core::diagnostics::TraceContext;
 
-fn traced_context(id: &str) -> (AttemptContext, TraceContext) {
+pub(super) fn traced_context(id: &str) -> (AttemptContext, TraceContext) {
     let trace = TraceContext::new(id);
     let context = AttemptContext::new(
         RequestAttemptContext::new(
@@ -23,7 +23,7 @@ fn traced_context(id: &str) -> (AttemptContext, TraceContext) {
     (context, trace)
 }
 
-fn prepared(trace: &TraceContext) -> Vec<Value> {
+pub(super) fn prepared(trace: &TraceContext) -> Vec<Value> {
     trace.snapshot().unwrap()["events"]
         .as_array()
         .unwrap()
@@ -237,6 +237,8 @@ async fn prefix_failures_are_classified_without_changing_full_or_delta_frames() 
             "fullPayloadBytes": metadata[0]["fullPayloadBytes"],
             "actualPayloadBytes": serde_json::to_vec(&sent).unwrap().len(),
             "automaticDelta": automatic, "deltaReason": reason,
+            "actualInputItems": sent["input"].as_array().unwrap().len(),
+            "trustedTemplate": if matches!(category, Some("prior_output_metadata_only" | "prior_output_other")) { json!("projection_mismatch") } else { Value::Null },
         });
         if let Some(category) = category {
             expected["prefixFailure"] = json!(category);
@@ -260,6 +262,12 @@ async fn prefix_failures_are_classified_without_changing_full_or_delta_frames() 
         });
         if let Some(category) = category {
             expected_log["prefix_failure"] = json!(category);
+        }
+        if matches!(
+            category,
+            Some("prior_output_metadata_only" | "prior_output_other")
+        ) {
+            expected_log["trusted_template"] = json!("projection_mismatch");
         }
         assert_eq!(fields, expected_log.as_object().unwrap(), "{name}");
         if !automatic {

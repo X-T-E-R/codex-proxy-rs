@@ -4,6 +4,7 @@ use super::*;
 use tokio::{sync::mpsc, task::JoinSet};
 
 mod diagnostics;
+mod trusted;
 
 struct Upstream {
     base: String,
@@ -15,6 +16,11 @@ struct Upstream {
 #[derive(Clone)]
 enum Reply {
     Output(Vec<Value>),
+    CloseAfterOutput(
+        Vec<Value>,
+        Arc<tokio::sync::Notify>,
+        std::sync::mpsc::Sender<()>,
+    ),
     Events(Vec<Value>),
     Close,
     Hold,
@@ -82,6 +88,10 @@ impl Upstream {
                             break;
                         }
                         let reply = outputs.get(call).cloned().unwrap_or_else(|| Reply::Output(vec![]));
+                        let (reply, close_after) = match reply {
+                            Reply::CloseAfterOutput(output, close, closed) => (Reply::Output(output), Some((close, closed))),
+                            reply => (reply, None),
+                        };
                         let id = format!("resp_auto_{call}");
                         websocket.send(Message::Text(json!({"type":"response.created","response":{"id":id,"status":"in_progress","output":[]}}).to_string().into())).await.unwrap();
                         match reply {
@@ -98,6 +108,15 @@ impl Upstream {
                                 websocket.send(Message::Text(json!({"type":"response.output_text.delta","response_id":id,"output_index":0,"content_index":0,"delta":"partial"}).to_string().into())).await.unwrap();
                                 std::future::pending::<()>().await;
                             }
+                            Reply::CloseAfterOutput(..) => unreachable!("normalized reply"),
+                        }
+                        if let Some((close, closed)) = close_after {
+                            close.notified().await;
+                            websocket.close(None).await.unwrap();
+                            let reply = websocket.next().await;
+                            assert!(matches!(reply, Some(Ok(Message::Close(_))) | Some(Err(_)) | None));
+                            closed.send(()).unwrap();
+                            break;
                         }
                     }
                 });

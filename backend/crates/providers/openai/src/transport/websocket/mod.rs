@@ -39,6 +39,7 @@ pub use self::{
     pump::WebSocketConnectionObservation,
 };
 pub(crate) use self::{
+    automatic_delta::NativeHistory,
     coordinator::{
         PreparedWebSocket, WEBSOCKET_FAST_PATH_BUDGET, WebSocketFastPath,
         execute_prepared_response_create_request_stream, post_send_ambiguous,
