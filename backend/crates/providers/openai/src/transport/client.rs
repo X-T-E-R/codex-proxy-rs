@@ -617,6 +617,8 @@ pub type CodexResponseMetadataUpdates = CodexWebSocketResponseMetadataUpdates;
 pub struct CodexBackendStreamingResponse {
     /// HTTP 为 SSE 字节块，WebSocket 为完整 UTF-8 文本消息
     pub body: CodexBackendSseStream,
+    /// 单次 WS exchange 的首个非空响应帧接收时刻，前导缓冲不改变该事实
+    pub(crate) first_response_received_at: Option<Arc<OnceLock<std::time::Instant>>>,
     /// 实际使用的上游传输
     pub transport: CodexBackendTransport,
     /// WebSocket 响应所绑定的连接；HTTP transport 为 `None`

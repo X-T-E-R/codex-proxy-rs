@@ -1,6 +1,9 @@
 //! 流式 WebSocket exchange 与连接回收
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use gateway_core::diagnostics::{TraceContext, diagnostic_json};
@@ -79,6 +82,8 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
     }));
     let response_metadata_updates_for_task = Arc::clone(&response_metadata_updates);
     let (tx, rx) = mpsc::channel(WEBSOCKET_STREAM_BUFFER);
+    let first_response_received_at = Arc::new(OnceLock::new());
+    let first_response_received_at_for_task = Arc::clone(&first_response_received_at);
     let (task_tracker, shutdown) = pool_return
         .as_ref()
         .map(|pool_return| pool_return.lease.stream_task_context())
@@ -97,6 +102,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
             shutdown,
             rate_limit_updates: rate_limit_updates_for_task,
             response_metadata_updates: response_metadata_updates_for_task,
+            first_response_received_at: first_response_received_at_for_task,
             tx,
         })
         .await;
@@ -114,6 +120,7 @@ pub(in crate::transport::websocket) fn stream_websocket_response(
     CodexWebSocketStreamingExchange {
         websocket_connection_id,
         body: Box::pin(body),
+        first_response_received_at,
         turn_state: response_metadata.turn_state,
         set_cookie_headers: response_metadata.set_cookie_headers,
         rate_limit_headers: response_metadata.rate_limit_headers,
@@ -136,6 +143,7 @@ struct WebSocketStreamForwardState {
     shutdown: CancellationToken,
     rate_limit_updates: CodexWebSocketRateLimitUpdates,
     response_metadata_updates: CodexWebSocketResponseMetadataUpdates,
+    first_response_received_at: Arc<OnceLock<Instant>>,
     tx: mpsc::Sender<Result<Bytes, CodexWebSocketExchangeError>>,
 }
 
@@ -150,6 +158,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         shutdown,
         rate_limit_updates,
         response_metadata_updates,
+        first_response_received_at,
         tx,
     } = state;
     let mut pool_return = pool_return;
@@ -224,6 +233,7 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
         let Some(message) = message else {
             break;
         };
+        let received_at = Instant::now();
         let raw = match message {
             tungstenite::Message::Text(text) => text.to_string(),
             tungstenite::Message::Binary(bytes) => {
@@ -317,6 +327,10 @@ async fn forward_websocket_response_stream(state: WebSocketStreamForwardState) {
             ExchangeAction::Forward { terminal } => terminal,
             ExchangeAction::Ignore => continue,
         };
+        // 接收时记录，不把通道背压或自动 delta 的前导缓冲等待算入首响应
+        if !raw.is_empty() {
+            let _ = first_response_received_at.set(received_at);
+        }
         if tx.send(Ok(Bytes::from(raw))).await.is_err() {
             trace.record(
                 "upstream.forward.failed",

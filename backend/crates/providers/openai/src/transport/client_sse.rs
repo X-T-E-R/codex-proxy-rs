@@ -261,6 +261,7 @@ impl CodexBackendClient {
         let rate_limit_updates = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         Ok(CodexBackendStreamingResponse {
             body: http_sse_stream(response, Arc::clone(&rate_limit_updates), trace),
+            first_response_received_at: None,
             transport: CodexBackendTransport::HttpSse,
             websocket_connection_id: None,
             turn_state,
@@ -705,6 +706,7 @@ impl CodexBackendClient {
                             })
                             .map_err(websocket_exchange_error_to_client_error),
                     ),
+                    first_response_received_at: Some(exchange.first_response_received_at),
                     transport: CodexBackendTransport::WebSocket,
                     websocket_connection_id: Some(exchange.websocket_connection_id),
                     turn_state: exchange.turn_state,

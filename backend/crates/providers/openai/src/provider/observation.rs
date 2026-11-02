@@ -36,6 +36,7 @@ pub(super) struct OpenAiResponseObservationState {
     upstream_response_model: Option<String>,
     rate_limit_headers: Vec<(String, String)>,
     timings: ProviderResponseTimings,
+    first_response_received_at: Option<Arc<std::sync::OnceLock<Instant>>>,
     terminal: Option<OpenAiResponseTerminal>,
 }
 
@@ -86,6 +87,7 @@ impl OpenAiResponseObservationState {
                 &response.transport_metrics,
                 &response.response_metadata,
             ),
+            first_response_received_at: response.first_response_received_at.clone(),
             terminal: None,
         }
     }
@@ -144,7 +146,8 @@ impl OpenAiResponseObservationState {
         if chunk.is_empty() {
             return false;
         }
-        insert_first_timing(&mut self.timings.first_event_ms, started_at)
+        let received_at = self.first_response_received_at();
+        insert_first_timing_at(&mut self.timings.first_event_ms, started_at, received_at)
     }
 
     pub(super) fn observe_timing_signals(
@@ -155,7 +158,9 @@ impl OpenAiResponseObservationState {
         let mut changed = false;
         // 首字采用首响应载荷边界，真实推理与正文仍分别计时
         if signals.response_data {
-            changed |= insert_first_timing(&mut self.timings.first_token_ms, started_at);
+            let received_at = self.first_response_received_at();
+            changed |=
+                insert_first_timing_at(&mut self.timings.first_token_ms, started_at, received_at);
         }
         if signals.reasoning_output {
             changed |= insert_first_timing(&mut self.timings.first_reasoning_ms, started_at);
@@ -164,6 +169,13 @@ impl OpenAiResponseObservationState {
             changed |= insert_first_timing(&mut self.timings.first_text_ms, started_at);
         }
         changed
+    }
+
+    fn first_response_received_at(&self) -> Instant {
+        self.first_response_received_at
+            .as_ref()
+            .and_then(|received_at| received_at.get().copied())
+            .unwrap_or_else(Instant::now)
     }
 
     pub(super) fn observe_upstream_service_tier(&mut self, service_tier: Option<&str>) -> bool {
@@ -508,12 +520,24 @@ pub(super) fn selected_observation_header(name: &str, value: &str) -> Option<(St
 }
 
 pub(super) fn insert_first_timing(target: &mut Option<u64>, started_at: Instant) -> bool {
+    insert_first_timing_at(target, started_at, Instant::now())
+}
+
+fn insert_first_timing_at(
+    target: &mut Option<u64>,
+    started_at: Instant,
+    received_at: Instant,
+) -> bool {
     if target.is_some() {
         return false;
     }
-    let elapsed = u64::try_from(started_at.elapsed().as_millis())
-        .unwrap_or(u64::MAX)
-        .max(1);
+    let elapsed = u64::try_from(
+        received_at
+            .saturating_duration_since(started_at)
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+    .max(1);
     *target = Some(elapsed);
     true
 }

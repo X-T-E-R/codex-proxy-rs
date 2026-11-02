@@ -468,3 +468,220 @@ async fn created_response_starts_ttft_before_output_on_http_and_websocket() {
         }
     }
 }
+
+fn automatic_timing_operation(next_turn: bool) -> Operation {
+    let mut input = vec![json!({"role":"user","content":"seed"})];
+    if next_turn {
+        input.push(json!({"role":"user","content":"next"}));
+    }
+    Operation::Generate(
+        GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object(
+                "openai",
+                json!({"model":"gpt-5.4","session_id":"auto-timing","input":input,"store":false,"stream":true})
+                    .as_object().unwrap().clone(),
+            ).unwrap(),
+        ).with_provider_session_state(
+            ProviderSessionState::new(
+                "openai",
+                json!({"account_id":"acct_provider_contract","conversation_id":"auto-timing","continuation_scope":"connection_local"})
+                    .as_object().unwrap().clone(),
+            ).unwrap(),
+        ),
+    )
+}
+
+#[tokio::test]
+async fn automatic_delta_keeps_received_ttft_and_discards_rejected_attempt_timing_and_identity() {
+    for reject_history in [false, true] {
+        for reasoning in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let (prelude_sent, prelude_received) = oneshot::channel();
+            let (release_prelude, prelude_released) = oneshot::channel();
+            let (recovery_sent, recovery_received) = oneshot::channel();
+            let (release_output, output_released) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut ws = accept_codex_test_websocket(socket).await;
+                let seed: Value = serde_json::from_str(
+                    ws.next()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .into_text()
+                        .unwrap()
+                        .as_str(),
+                )
+                .unwrap();
+                assert!(seed.get("previous_response_id").is_none());
+                ws.send(Message::Text(json!({"type":"response.completed","response":{"id":"resp_timing_seed","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}).to_string().into())).await.unwrap();
+                let delta: Value = serde_json::from_str(
+                    ws.next()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .into_text()
+                        .unwrap()
+                        .as_str(),
+                )
+                .unwrap();
+                assert_eq!(delta["previous_response_id"], "resp_timing_seed");
+                assert_eq!(delta["input"], json!([{"role":"user","content":"next"}]));
+                let id = if reject_history {
+                    "resp_timing_rejected"
+                } else {
+                    "resp_timing_success"
+                };
+                ws.send(Message::Text(json!({"type":"response.created","response":{"id":id,"status":"in_progress","output":[]}}).to_string().into())).await.unwrap();
+                prelude_sent.send(()).unwrap();
+                prelude_released.await.unwrap();
+                if reject_history {
+                    ws.send(Message::Text(json!({"type":"error","status":400,"error":{"code":"previous_response_not_found","message":"history expired"}}).to_string().into())).await.unwrap();
+                    drop(ws);
+                    let (socket, _) = listener.accept().await.unwrap();
+                    ws = accept_codex_test_websocket(socket).await;
+                    let full: Value = serde_json::from_str(
+                        ws.next()
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .into_text()
+                            .unwrap()
+                            .as_str(),
+                    )
+                    .unwrap();
+                    assert!(full.get("previous_response_id").is_none());
+                    assert_eq!(
+                        full["input"],
+                        json!([{"role":"user","content":"seed"},{"role":"user","content":"next"}])
+                    );
+                    let received_after = Instant::now();
+                    ws.send(Message::Text(json!({"type":"response.created","response":{"id":"resp_timing_success","status":"in_progress","output":[]}}).to_string().into())).await.unwrap();
+                    recovery_sent.send(received_after).unwrap();
+                    output_released.await.unwrap();
+                }
+                let output = if reasoning {
+                    json!({"type":"response.reasoning_summary_text.delta","response_id":"resp_timing_success","output_index":0,"summary_index":0,"delta":"thinking"})
+                } else {
+                    json!({"type":"response.output_text.delta","response_id":"resp_timing_success","output_index":0,"content_index":0,"delta":"answer"})
+                };
+                for event in [
+                    output,
+                    json!({"type":"response.completed","response":{"id":"resp_timing_success","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}),
+                ] {
+                    ws.send(Message::Text(event.to_string().into()))
+                        .await
+                        .unwrap();
+                }
+            });
+            let store = Arc::new(MemoryAccountStore::default());
+            create_account(&store, "acct_provider_contract").await;
+            let provider = provider_with_base_url(&store, base_url);
+            let mut seed = Arc::clone(&provider)
+                .execute(
+                    planned_request("openai", automatic_timing_operation(false)),
+                    timed_context(Instant::now(), 1),
+                )
+                .await
+                .unwrap();
+            finish_timings(&mut seed, ProviderResponseTimings::default()).await;
+            drop(seed);
+            let started_at = Instant::now() - Duration::from_secs(3);
+            let mut stream = provider
+                .execute(
+                    planned_request("openai", automatic_timing_operation(true)),
+                    timed_context(started_at, 2),
+                )
+                .await
+                .unwrap();
+            let (first_sent, first_received) = oneshot::channel();
+            let collector = tokio::spawn(async move {
+                let mut first_sent = Some(first_sent);
+                let mut timings = ProviderResponseTimings::default();
+                let mut wire = Vec::new();
+                while let Some(event) = stream.next().await {
+                    let event = event.expect("automatic delta or full recovery succeeds");
+                    if let Some(observation) = event.response_observation() {
+                        timings = observation.timings();
+                        if timings.first_token_ms.is_some()
+                            && let Some(first_sent) = first_sent.take()
+                        {
+                            first_sent.send(timings).unwrap();
+                        }
+                    }
+                    if let Some(raw) = event
+                        .wire_event()
+                        .and_then(|wire| wire.raw_websocket_message())
+                    {
+                        wire.push(serde_json::from_str::<Value>(raw).unwrap());
+                    }
+                }
+                (timings, wire)
+            });
+            timeout(Duration::from_secs(5), prelude_received)
+                .await
+                .unwrap()
+                .unwrap();
+            // 显式暂停非前导，制造可辨识的模型等待；不允许用放行时刻替代 created 接收时刻
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let prelude_release_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap();
+            release_prelude.send(()).unwrap();
+            let recovered_after = if reject_history {
+                Some(
+                    timeout(Duration::from_secs(5), recovery_received)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let first = timeout(Duration::from_secs(5), first_received)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(first.first_token_ms.is_some_and(|value| value >= 3_000));
+            assert_eq!(first.first_event_ms, first.first_token_ms);
+            assert_eq!(first.first_reasoning_ms, None);
+            assert_eq!(first.first_text_ms, None);
+            let output_release_ms = if let Some(recovered_after) = recovered_after {
+                let recovered_after_ms =
+                    u64::try_from(recovered_after.duration_since(started_at).as_millis()).unwrap();
+                assert!(first.first_token_ms.unwrap() >= recovered_after_ms);
+                assert!(first.first_token_ms.unwrap() >= prelude_release_ms);
+                let released_at = u64::try_from(started_at.elapsed().as_millis()).unwrap();
+                release_output.send(()).unwrap();
+                released_at
+            } else {
+                assert!(first.first_token_ms.unwrap() < prelude_release_ms);
+                prelude_release_ms
+            };
+            let (final_timings, wire) = timeout(Duration::from_secs(5), collector)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(final_timings.first_event_ms, first.first_event_ms);
+            assert_eq!(final_timings.first_token_ms, first.first_token_ms);
+            let content_ms = if reasoning {
+                assert_eq!(final_timings.first_text_ms, None);
+                final_timings.first_reasoning_ms.unwrap()
+            } else {
+                assert_eq!(final_timings.first_reasoning_ms, None);
+                final_timings.first_text_ms.unwrap()
+            };
+            assert!(content_ms >= output_release_ms);
+            assert_eq!(wire.first().unwrap()["type"], "response.created");
+            assert_eq!(
+                wire.first().unwrap()["response"]["id"],
+                "resp_timing_success"
+            );
+            assert_eq!(wire.last().unwrap()["type"], "response.completed");
+            assert!(
+                wire.iter()
+                    .all(|event| !event.to_string().contains("resp_timing_rejected"))
+            );
+            server.await.unwrap();
+        }
+    }
+}

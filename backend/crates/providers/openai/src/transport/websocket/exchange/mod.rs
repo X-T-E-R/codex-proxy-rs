@@ -29,6 +29,8 @@ pub struct CodexWebSocketStreamingExchange {
     pub(crate) websocket_connection_id: Uuid,
     /// 上游完整 WebSocket 文本消息流
     pub body: CodexWebSocketTextStream,
+    /// 只记录本次 exchange 实际交付的首个非空响应帧，不随连接复用
+    pub(crate) first_response_received_at: Arc<std::sync::OnceLock<std::time::Instant>>,
     /// 上游为本次响应返回的首个 turn state
     pub turn_state: Option<String>,
     /// 上游握手响应里的 `set-cookie` 列表
