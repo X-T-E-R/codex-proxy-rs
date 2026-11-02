@@ -62,6 +62,8 @@ pub struct CodexResponsesRequest {
     pub client_user_agent: Option<String>,
     /// 已鉴权客户端 API key 的稳定 ID，仅用于事实归因
     pub client_api_key_id: Option<String>,
+    /// 已选账号后绑定的调用方与凭据版本，只用于本地连接和自动增量隔离
+    pub(crate) automatic_delta_scope: Option<String>,
     /// 是否偏好 WebSocket 传输
     pub use_websocket: bool,
     /// 是否强制 HTTP SSE
@@ -603,6 +605,7 @@ impl CodexResponsesRequest {
             client_ip: None,
             client_user_agent: None,
             client_api_key_id: None,
+            automatic_delta_scope: None,
             use_websocket: false,
             force_http_sse: false,
             turn_state: None,

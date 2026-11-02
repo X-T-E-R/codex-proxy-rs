@@ -1,6 +1,7 @@
 //! Codex Responses WebSocket 传输
 
 mod audit;
+mod automatic_delta;
 mod breaker;
 mod control;
 mod coordinator;

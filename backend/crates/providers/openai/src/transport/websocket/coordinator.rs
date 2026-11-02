@@ -107,6 +107,54 @@ impl PreparedWebSocket {
     pub(crate) fn decision_wait_elapsed(&self) -> Duration {
         self.decision_wait_elapsed
     }
+
+    pub(crate) fn prepare_automatic_delta(
+        &mut self,
+        request: &mut crate::transport::protocol::responses::CodexResponsesRequest,
+        full_payload: &str,
+        codex: bool,
+        allow_automatic_delta: bool,
+    ) -> (bool, &'static str) {
+        let latest = self
+            .connection
+            .continuation
+            .latest_response_id()
+            .map(str::to_owned);
+        let enabled = allow_automatic_delta
+            && self.binding.reused()
+            && request.automatic_delta_scope.is_some();
+        let capture_enabled = matches!(self.binding, PoolBinding::Pooled { .. })
+            && request.automatic_delta_scope.is_some();
+        let (delta, reason) = self.connection.continuation.automatic_delta.prepare(
+            request.body(),
+            full_payload,
+            latest.as_deref(),
+            codex,
+            capture_enabled,
+            request.automatic_delta_scope.as_deref().unwrap_or_default(),
+        );
+        if enabled && let Some((response_id, input)) = delta {
+            request.body_mut().insert(
+                "previous_response_id".to_owned(),
+                serde_json::Value::String(response_id),
+            );
+            request
+                .body_mut()
+                .insert("input".to_owned(), serde_json::Value::Array(input));
+            return (true, reason);
+        }
+        (false, reason)
+    }
+
+    pub(crate) async fn release_without_send(mut self) {
+        self.connection.continuation.automatic_delta.invalidate();
+        let (lease, _, _) = self.binding.into_parts();
+        if let Some(lease) = lease {
+            lease.put(self.connection).await;
+        } else {
+            self.connection.websocket.close().await;
+        }
+    }
 }
 
 /// 只建立或租用 WebSocket，不发送 payload
@@ -654,7 +702,11 @@ pub(crate) async fn execute_prepared_response_create_request_stream(
         };
         return Err(error.with_connection_observation(observation));
     }
-    trace.record("upstream.payload.sent", serde_json::json!({}));
+    trace.record(
+        "upstream.payload.sent",
+        serde_json::json!({"actualPayloadBytes": request.payload_text().len()}),
+    );
+    tracing::info!(actual_payload_bytes = request.payload_text().len(), connection_id = %websocket.connection_id(), "OpenAI WebSocket payload sent");
     let connection_local_available = lease.is_some();
     let pool_return = lease.map(|lease| WebSocketStreamPoolReturn {
         lease,

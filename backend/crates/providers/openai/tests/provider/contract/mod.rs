@@ -1,6 +1,7 @@
 //! OpenAI 执行合同测试入口，以及协议转换与发送前校验测试
 
 mod account_isolation;
+mod automatic_delta;
 mod capacity;
 mod cookies;
 mod correlation;
@@ -5212,15 +5213,19 @@ async fn oversized_http_new_chain_uses_http_without_disabling_session_websocket(
         )
         .await
         .expect("prepare oversized HTTP request");
-    assert_eq!(stream.metadata().transport().as_str(), "http_sse");
     let mut completed = false;
+    let mut observed_http = false;
     while let Some(event) = stream.next().await {
         let event = event.expect("oversized HTTP response");
+        observed_http |= event
+            .response_observation()
+            .is_some_and(|observation| observation.transport().as_str() == "http_sse");
         completed |= event
             .wire_event()
             .is_some_and(|wire| wire.event_type() == Some("response.completed"));
     }
     assert!(completed);
+    assert!(observed_http);
     drop(stream);
 
     let requests = server.received_requests().await.unwrap();
@@ -5250,154 +5255,12 @@ async fn oversized_http_new_chain_uses_http_without_disabling_session_websocket(
 
 #[tokio::test]
 async fn oversized_http_threshold_counts_utf8_and_json_escaping() {
-    const THRESHOLD: usize = 15 * 1024 * 1024;
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_provider_contract").await;
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/codex/responses"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(CAPTURE_COMPLETED_SSE),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let seed_text = "中文\n\"\\";
-    let mut body = Map::from_iter([
-        ("model".to_owned(), json!("gpt-5.4")),
-        (
-            "input".to_owned(),
-            json!([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": seed_text}]}]),
-        ),
-        ("session_id".to_owned(), json!("oversized-boundary-session")),
-        ("stream".to_owned(), json!(true)),
-        ("store".to_owned(), json!(false)),
-    ]);
-    let provider = provider_with_base_url(&store, server.uri());
-    let mut seed = Arc::clone(&provider)
-        .execute(
-            planned_request(
-                "openai",
-                Operation::Generate(GenerateRequest::from_protocol_payload(
-                    ProtocolPayload::json_object("openai", body.clone())
-                        .unwrap()
-                        .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))])),
-                )),
-            ),
-            context("req_size_baseline", CancellationToken::new()),
-        )
-        .await
-        .unwrap();
-    while let Some(event) = seed.next().await {
-        event.expect("baseline HTTP response");
-    }
-    drop(seed);
-    let requests = server.received_requests().await.unwrap();
-    let mut frame = captured_request_body(&requests[0]);
-    frame["type"] = json!("response.create");
-    // 发送前阈值按本地请求副本计量，账号域映射在实际出站时执行
-    frame["session_id"] = body["session_id"].clone();
-    let baseline_len = serde_json::to_vec(&frame).unwrap().len();
-
-    for (payload_len, expected) in [(THRESHOLD - 1, "websocket"), (THRESHOLD, "http_sse")] {
-        let text = format!("{seed_text}{}", "x".repeat(payload_len - baseline_len));
-        body.get_mut("input").unwrap()[0]["content"][0]["text"] = json!(text);
-        let stream = Arc::clone(&provider)
-            .execute(
-                planned_request(
-                    "openai",
-                    Operation::Generate(GenerateRequest::from_protocol_payload(
-                        ProtocolPayload::json_object("openai", body.clone()).unwrap(),
-                    )),
-                ),
-                context(
-                    &format!("req_boundary_{payload_len}"),
-                    CancellationToken::new(),
-                ),
-            )
-            .await
-            .expect("prepare boundary request");
-        assert_eq!(stream.metadata().transport().as_str(), expected);
-    }
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    automatic_delta::assert_oauth_frame_threshold().await;
 }
 
 #[tokio::test]
 async fn oversized_ws_new_chain_uses_http_but_warmup_and_http_continuation_keep_websocket() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_provider_contract").await;
-    let server = MockServer::start().await;
-    let provider = provider_with_base_url(&store, server.uri());
-    let body = Map::from_iter([
-        ("model".to_owned(), json!("gpt-5.4")),
-        ("input".to_owned(), json!([])),
-        (
-            "instructions".to_owned(),
-            json!("x".repeat(16 * 1024 * 1024)),
-        ),
-        ("store".to_owned(), json!(false)),
-    ]);
-    for case in ["downstream_websocket", "warmup", "native_continuation"] {
-        let mut body = body.clone();
-        let mut request_context = Map::new();
-        let mut attempt = context(&format!("req_large_{case}"), CancellationToken::new());
-        match case {
-            "downstream_websocket" => {
-                request_context.insert(
-                    "downstream_websocket_connection_id".to_owned(),
-                    json!("ws_large"),
-                );
-            }
-            "warmup" => {
-                body.insert("generate".to_owned(), json!(false));
-            }
-            "native_continuation" => {
-                body.insert("previous_response_id".to_owned(), json!("client_previous"));
-                attempt = pinned_continuation_context(
-                    "req_large_native_continuation",
-                    "acct_provider_contract",
-                    "client_previous",
-                    "upstream_previous",
-                    1,
-                    ContinuationAttempt::Native,
-                );
-            }
-            _ => unreachable!(),
-        }
-        let mut generate = GenerateRequest::from_protocol_payload(
-            ProtocolPayload::json_object("openai", body)
-                .unwrap()
-                .with_context(request_context),
-        );
-        if case == "native_continuation" {
-            generate = generate.with_provider_session_state(
-                ProviderSessionState::new(
-                    "openai",
-                    Map::from_iter([
-                        ("account_id".to_owned(), json!("acct_provider_contract")),
-                        ("continuation_scope".to_owned(), json!("connection_local")),
-                    ]),
-                )
-                .unwrap(),
-            );
-        }
-        let stream = Arc::clone(&provider)
-            .execute(
-                planned_request("openai", Operation::Generate(generate)),
-                attempt,
-            )
-            .await
-            .expect("prepare required WebSocket request");
-        let expected = if case == "downstream_websocket" {
-            "http_sse"
-        } else {
-            "websocket"
-        };
-        assert_eq!(stream.metadata().transport().as_str(), expected, "{case}");
-    }
-    assert!(server.received_requests().await.unwrap().is_empty());
+    automatic_delta::assert_large_transport_contracts().await;
 }
 
 #[tokio::test]
@@ -5448,9 +5311,16 @@ async fn oversized_exact_websocket_continuation_requests_client_replay_before_se
                 "websocket"
             );
         } else {
-            let error = result
-                .err()
-                .expect("large native continuation requires full client input");
+            let mut stream = result.expect("lazy Provider stream");
+            let error = loop {
+                match stream.next().await.expect("size rejection before send") {
+                    Ok(event) => assert!(
+                        event.wire_event().is_none(),
+                        "no payload response before rejection"
+                    ),
+                    Err(error) => break error,
+                }
+            };
             assert_eq!(
                 error.kind(),
                 ProviderErrorKind::ContinuationRecoveryRequired
@@ -5633,11 +5503,14 @@ async fn oversized_websocket_http_response_continues_with_client_tool_history_re
         )
         .await
         .expect("prepare large WS request over HTTP");
-    assert_eq!(first.metadata().transport().as_str(), "http_sse");
     let mut state = None;
     let mut output = None;
+    let mut observed_http = false;
     while let Some(event) = first.next().await {
         let event = event.expect("HTTP tool response");
+        observed_http |= event
+            .response_observation()
+            .is_some_and(|observation| observation.transport().as_str() == "http_sse");
         if let Some(update) = event.session_update() {
             state = Some(update.clone());
         }
@@ -5647,6 +5520,7 @@ async fn oversized_websocket_http_response_continues_with_client_tool_history_re
             output = wire.data().pointer("/response/output").cloned();
         }
     }
+    assert!(observed_http);
     drop(first);
     let state = state.expect("HTTP response publishes replay requirement");
     assert_eq!(state.payload()["continuation_scope"], "replay_required");
@@ -5697,15 +5571,18 @@ async fn oversized_websocket_http_response_continues_with_client_tool_history_re
         )
         .await
         .expect("client full history replay over HTTP");
-    assert_eq!(replay.metadata().transport().as_str(), "http_sse");
     let mut completed = false;
+    let mut observed_http = false;
     while let Some(event) = replay.next().await {
+        let event = event.expect("full history HTTP response");
+        observed_http |= event
+            .response_observation()
+            .is_some_and(|observation| observation.transport().as_str() == "http_sse");
         completed |= event
-            .expect("full history HTTP response")
             .wire_event()
             .is_some_and(|wire| wire.event_type() == Some("response.completed"));
     }
-    assert!(completed);
+    assert!(completed && observed_http);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 2);
     let sent = captured_request_body(&requests[1]);

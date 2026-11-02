@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 
 use super::protocol::responses::CodexResponsesRequest;
 
-pub(super) use body::normalize_codex_request_body;
+pub(super) use body::{normalize_codex_request_body, normalize_reasoning_input_item};
 
 pub(crate) fn normalize_selected_codex_downstream_body(
     request: &mut CodexResponsesRequest,

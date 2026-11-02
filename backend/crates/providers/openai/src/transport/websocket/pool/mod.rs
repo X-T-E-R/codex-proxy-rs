@@ -140,6 +140,11 @@ impl CodexWebSocketPool {
         pool
     }
 
+    pub(crate) fn has_automatic_delta_baseline(&self, key: &CodexWebSocketPoolKey) -> bool {
+        matches!(self.lock_state().slots.get(key), Some(WebSocketPoolSlot::Idle { connection, .. })
+            if connection.continuation.automatic_delta.has_baseline())
+    }
+
     /// 新请求发布已生效的配置代次；晚到的旧请求不能回滚共享池
     /// 不取消 Busy 或 Connecting，现有流和 opening 继续完成
     pub fn configure_runtime(

@@ -526,7 +526,7 @@ pub(super) fn terminal_response_output(event: &ProviderEvent) -> Option<&[Value]
 }
 
 pub(super) enum CodexHandshakeAttemptError {
-    Client(CodexClientError),
+    Client(Box<CodexClientError>),
     Cancelled,
     Timeout,
 }
@@ -550,7 +550,7 @@ pub(super) async fn create_response_attempt(
             request,
             request_context,
             Some(account_id),
-        ) => response.map_err(CodexHandshakeAttemptError::Client),
+        ) => response.map_err(|error| CodexHandshakeAttemptError::Client(Box::new(error))),
     }
 }
 
@@ -558,7 +558,7 @@ pub(super) fn map_handshake_attempt_error(
     error: CodexHandshakeAttemptError,
 ) -> MappedProviderFailure {
     match error {
-        CodexHandshakeAttemptError::Client(error) => map_handshake_error(error),
+        CodexHandshakeAttemptError::Client(error) => map_handshake_error(*error),
         CodexHandshakeAttemptError::Cancelled => MappedProviderFailure::plain(provider_error(
             ProviderErrorKind::Cancelled,
             UpstreamSendState::Ambiguous,
@@ -603,7 +603,7 @@ pub(super) async fn create_json_attempt(
             &request.passthrough_headers,
             request.image_turn_id.as_deref(),
             request_context,
-        ) => response.map_err(CodexHandshakeAttemptError::Client),
+        ) => response.map_err(|error| CodexHandshakeAttemptError::Client(Box::new(error))),
     }
 }
 

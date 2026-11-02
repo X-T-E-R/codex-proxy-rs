@@ -25,6 +25,7 @@ pub struct CodexWebSocketPoolKey {
     connection_profile: String,
     pub(super) downstream_connection_id: String,
     egress_key: String,
+    client_scope: String,
     pub(super) proxy_capacity_key: String,
 }
 
@@ -42,6 +43,7 @@ impl CodexWebSocketPoolKey {
             connection_profile: String::new(),
             downstream_connection_id: String::new(),
             egress_key: String::new(),
+            client_scope: String::new(),
             proxy_capacity_key: String::new(),
         }
     }
@@ -70,6 +72,11 @@ impl CodexWebSocketPoolKey {
         self
     }
 
+    pub(crate) fn with_client_scope(mut self, scope: Option<&str>) -> Self {
+        self.client_scope = scope.unwrap_or_default().to_owned();
+        self
+    }
+
     pub(crate) fn with_outbound_proxy(
         mut self,
         proxy: Option<&gateway_core::account::OutboundProxy>,
@@ -90,6 +97,7 @@ impl CodexWebSocketPoolKey {
             self.connection_profile.as_str(),
             self.downstream_connection_id.as_str(),
             self.egress_key.as_str(),
+            self.client_scope.as_str(),
         ])
     }
 
@@ -98,6 +106,7 @@ impl CodexWebSocketPoolKey {
             && self.account_id == other.account_id
             && self.conversation_id == other.conversation_id
             && self.egress_key == other.egress_key
+            && self.client_scope == other.client_scope
     }
 }
 
@@ -188,9 +197,10 @@ pub(crate) struct PooledWebSocketConnection {
 }
 
 /// 只随具体 WebSocket 生命周期存在的续接状态
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub(crate) struct WebSocketContinuationState {
     latest_response_id: Option<String>,
+    pub(crate) automatic_delta: super::super::automatic_delta::AutomaticDeltaState,
 }
 
 impl WebSocketContinuationState {

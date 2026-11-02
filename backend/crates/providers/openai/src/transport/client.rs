@@ -838,6 +838,7 @@ pub(super) enum PreparedResponseRoute {
 pub(super) struct PreparedWebSocketRoute {
     pub(super) request: CodexWebSocketRequest,
     pub(super) prepared: PreparedWebSocket,
+    pub(super) automatic_delta: bool,
 }
 
 // ---------------------------------------------------------------------------

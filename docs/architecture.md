@@ -465,7 +465,8 @@ OpenAI 模型目录用于发现，不因目录缺项拒绝请求；管理员配�
   SSE 转换只发生在需要该表达的出口。插件未改写的封套继续携带原始文本，观测失败不否定交付。
   非流式 Responses 由 API 聚合 wire：终态省略或清空 `output` 时，使用同一响应的 `output_item.done`
   按 `output_index` 还原完整输出；已有非空终态输出不改写。完成项缺失或冲突时在下游提交前拒绝，
-  不凭 canonical 增量补造内容，也不让 SSE/WS 转发额外保存整份输出
+  不凭 canonical 增量补造内容。Provider 的上游自动增量只在具体存活连接内保留有界原生完成项，
+  不由 API 转发层另建 transcript，见[原生续接与会话亲和](#原生续接与会话亲和)
 - Responses、Images 与 standalone Search 的业务扩展头保留原始多值字节。API 负责剥离鉴权、账号身份和 HTTP 传输字段，
   并提取会话语义；`gateway-protocol` 共享 HTTP 传输与网关链路字段分类。客户端兼容规则集中在
   `providers/openai/src/transport/downstream/`：`headers.rs` 管理下游环境头和已提取语义的头部别名，
@@ -694,9 +695,15 @@ Core 定义、校验并统一拥有评分规则，内置选号与诊断复用同
 Continuation 受原请求的 Client Key、账号范围、Provider 和发送/交付边界约束：
 
 - native continuation 固定创建它的 Provider 与账号
-- OpenAI Provider 的 OAuth 大包传输预检在发送前执行，新链可选择 HTTP；大 connection-local
-  续接和 HTTP `store=false` 后不可原生续写的 WS 增量返回 `ClientReplayRequired`，由客户端重发
-  完整历史。体积测量复用 WS 编码结构，Provider session state 仍只携带元数据，不保存 transcript
+- OpenAI Provider 对没有显式 `previous_response_id` 的完整请求，在最终正文规范化、关联标识映射和隐私规则后，
+  比较上一轮完整 input 加真实 completed 原生 output；前缀及其余业务参数一致时，只向同一存活 WS 发送新增 input。
+  基线按 Client Key、会话、已选账号及 credential revision、出口和 opening identity 隔离，不要求客户端先支持原生增量
+- 自动基线由原连接租约独占，原生 `output_item.done` 或完整终态 output 是唯一输出来源；失败、中断、取消、断线或逐出不能迁移基线。
+  保留 JSON 的预算为每连接 32 MiB、进程合计 256 MiB，输出最多 4096 项；超预算只停止优化，正常 full 请求继续。
+  显式原生续接保持原合同，Provider session state 只携带元数据，Core、Redis 和 schema 不保存请求正文
+- OAuth 大包门禁在自动裁剪后按实际编码帧执行，达到 15 MiB 的新链改走完整 HTTP；大 connection-local
+  续接和 HTTP `store=false` 后不可原生续写的 WS 增量返回 `ClientReplayRequired`，由客户端重发完整历史。
+  自动生成的 previous 仅在尚无语义输出、明确收到历史不存在拒绝时恢复一次 full；送达不明或部分输出后不扩大重放
 - OpenAI 在有效输出交付前收到可安全重放的明确额度拒绝时，先隔离账号，再投影 `ClientReplayRequired`；
   丢弃未交付的原错误帧，由客户端提交完整历史开启新链，不把原增量输入交给其他账号。
   真实错误分类、状态码、发送状态和上游诊断保持不变，客户端合同见 [Responses API](api.md#3-openai-数据面与模型目录)

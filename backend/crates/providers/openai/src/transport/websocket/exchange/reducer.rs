@@ -41,6 +41,7 @@ pub(super) fn reduce_websocket_event(
 ) -> Result<ReducedWebSocketEvent, CodexWebSocketExchangeError> {
     // 解析只服务连接状态和观测，未知或不可解析文本仍交付下游
     let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        continuation.automatic_delta.invalidate();
         return Ok(ReducedWebSocketEvent {
             action: ExchangeAction::Forward { terminal: None },
             diagnostic_event_type: None,
@@ -73,6 +74,7 @@ pub(super) fn reduce_websocket_event(
         Some(turn_state)
     });
 
+    continuation.automatic_delta.observe(&value);
     let event = websocket_event_type(&value);
     if let Some(response_id) = websocket_response_completed_id(&value) {
         continuation.record_completed(response_id);

@@ -217,7 +217,9 @@ impl CodexBackendClientTestExt for CodexBackendClient {
         let response = self
             .create_response_stream_with_pool_account(request, context, None)
             .await?;
-        collect_backend_response(response, started_at).await
+        collect_backend_response(response, started_at)
+            .await
+            .map_err(|error| *error)
     }
 
     async fn create_response_stream(
@@ -239,14 +241,16 @@ impl CodexBackendClientTestExt for CodexBackendClient {
         let response = self
             .create_response_stream_with_pool_account(request, context, pool_account_id)
             .await?;
-        collect_backend_response(response, started_at).await
+        collect_backend_response(response, started_at)
+            .await
+            .map_err(|error| *error)
     }
 }
 
 async fn collect_backend_response(
     response: CodexBackendStreamingResponse,
     started_at: Instant,
-) -> CodexClientResult<CollectedBackendResponse> {
+) -> Result<CollectedBackendResponse, Box<CodexClientError>> {
     let CodexBackendStreamingResponse {
         mut body,
         transport,
@@ -311,7 +315,7 @@ async fn collect_backend_response(
 
 async fn execute_response_create_request(
     request: &CodexWebSocketRequest,
-) -> CodexClientResult<CollectedBackendResponse> {
+) -> Result<CollectedBackendResponse, Box<CodexClientError>> {
     let endpoint = request.connection().endpoint();
     let base_url = endpoint
         .strip_suffix("/codex/responses")
@@ -334,6 +338,7 @@ async fn execute_response_create_request(
             request_context("req_test_websocket", Some("chatgpt-account")),
         )
         .await
+        .map_err(Box::new)
 }
 
 fn codex_request(
@@ -459,7 +464,7 @@ async fn read_http_request(stream: &mut TcpStream) -> String {
     String::from_utf8(request).expect("HTTP request is UTF-8")
 }
 
-async fn read_http_request_with_body(stream: &mut TcpStream) -> Vec<u8> {
+pub(crate) async fn read_http_request_with_body(stream: &mut TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
     loop {
@@ -494,7 +499,7 @@ async fn read_http_request_with_body(stream: &mut TcpStream) -> Vec<u8> {
     request
 }
 
-async fn write_completed_sse_response(stream: &mut TcpStream) {
+pub(crate) async fn write_completed_sse_response(stream: &mut TcpStream) {
     let body = concat!(
         "event: response.created\n",
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_http_fallback\",\"model\":\"gpt-test\"}}\n\n",

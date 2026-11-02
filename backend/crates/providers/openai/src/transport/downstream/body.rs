@@ -9,27 +9,32 @@ pub(crate) fn normalize_non_codex_request_body(body: &mut Map<String, Value>) {
         return;
     };
     for item in input {
-        let Some(item) = item.as_object_mut() else {
-            continue;
-        };
-        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-            continue;
-        }
-        // SDK 输出项的 status 不属于 Codex reasoning 输入合同；其他项的 status 可能合法
-        item.shift_remove("status");
-        // Codex 只接受空 content 数组；仅在加密历史仍可回填时去掉冗余明文，
-        // 没有加密内容的历史不自动丢弃，保留给上游明确拒绝
-        if item
-            .get("encrypted_content")
-            .and_then(Value::as_str)
-            .is_some_and(|content| !content.trim().is_empty())
-            && item
-                .get("content")
-                .and_then(Value::as_array)
-                .is_some_and(|content| !content.is_empty())
-        {
-            item.shift_remove("content");
-        }
+        normalize_reasoning_input_item(item);
+    }
+}
+
+/// 完成输出回填 input 时使用相同的 Codex reasoning 兼容投影，密文和未知字段原样保留
+pub(in crate::transport) fn normalize_reasoning_input_item(item: &mut Value) {
+    let Some(item) = item.as_object_mut() else {
+        return;
+    };
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return;
+    }
+    // SDK 输出项的 status 不属于 Codex reasoning 输入合同；其他项的 status 可能合法
+    item.shift_remove("status");
+    // Codex 只接受空 content 数组；仅在加密历史仍可回填时去掉冗余明文
+    // 没有加密内容的历史不自动丢弃，保留给上游明确拒绝
+    if item
+        .get("encrypted_content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| !content.trim().is_empty())
+        && item
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| !content.is_empty())
+    {
+        item.shift_remove("content");
     }
 }
 

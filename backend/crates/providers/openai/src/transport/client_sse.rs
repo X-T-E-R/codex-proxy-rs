@@ -287,10 +287,73 @@ impl CodexBackendClient {
         pool_account_id: Option<&str>,
     ) -> CodexClientResult<CodexBackendStreamingResponse> {
         let prepared = self
-            .prepare_response_transport_with_pool_account(request, context, pool_account_id)
+            .prepare_response_transport_with_pool_account(request, context, pool_account_id, true)
             .await?;
-        self.create_response_stream_with_prepared(request, context, prepared)
-            .await
+        let automatic_delta = matches!(&prepared.route, PreparedResponseRoute::WebSocket(route) if route.automatic_delta);
+        let mut response = self
+            .create_response_stream_with_prepared(request, context, prepared)
+            .await?;
+        if !automatic_delta {
+            return Ok(response);
+        }
+        // 自动生成的 previous 只在确认历史拒绝且尚未交付语义输出时恢复一次 full
+        // 有界前导缓冲让失败尝试的响应身份不会污染成功的新链
+        let mut buffered = Vec::new();
+        let mut bytes = 0_usize;
+        while let Some(frame) = response.body.next().await {
+            let frame = frame?;
+            let value = serde_json::from_slice::<serde_json::Value>(&frame).ok();
+            let event = value
+                .as_ref()
+                .and_then(|value| value.get("type"))
+                .and_then(serde_json::Value::as_str);
+            let rejected = value.as_ref().is_some_and(|value| {
+                matches!(event, Some("error" | "response.failed"))
+                    && value
+                        .pointer("/response/output")
+                        .is_none_or(|output| output.as_array().is_some_and(Vec::is_empty))
+                    && crate::transport::protocol::responses::ResponsesSseFailure::from_raw_event(
+                        event.unwrap_or_default(),
+                        std::str::from_utf8(&frame).unwrap_or_default(),
+                        value,
+                    )
+                    .upstream_code
+                    .as_deref()
+                        == Some(
+                            crate::transport::protocol::responses::PREVIOUS_RESPONSE_NOT_FOUND_CODE,
+                        )
+            });
+            if rejected {
+                drop(response);
+                tracing::info!(
+                    request_id = context.request_id,
+                    delta_reason = "previous_response_not_found",
+                    "OpenAI automatic delta recovering full request"
+                );
+                let prepared = self
+                    .prepare_response_transport_with_pool_account(
+                        request,
+                        context,
+                        pool_account_id,
+                        false,
+                    )
+                    .await?;
+                return self
+                    .create_response_stream_with_prepared(request, context, prepared)
+                    .await;
+            }
+            let prelude = value
+                .as_ref()
+                .zip(event)
+                .is_some_and(|(value, event)| is_replaceable_response_prelude(event, value));
+            bytes = bytes.saturating_add(frame.len());
+            buffered.push(Ok(frame));
+            if !prelude || bytes >= 64 * 1024 || buffered.len() >= 32 {
+                break;
+            }
+        }
+        response.body = Box::pin(futures::stream::iter(buffered).chain(response.body));
+        Ok(response)
     }
 
     /// 在发送 payload 前完成 transport 选择和可取消的 WebSocket opening
@@ -300,6 +363,7 @@ impl CodexBackendClient {
         request: &CodexResponsesRequest,
         context: CodexRequestContext<'_>,
         pool_account_id: Option<&str>,
+        allow_automatic_delta: bool,
     ) -> CodexClientResult<PreparedResponseTransport> {
         let requirement = transport_requirement(request);
         context.trace.cloned().unwrap_or_default().record(
@@ -383,6 +447,37 @@ impl CodexBackendClient {
         );
         let pool_key =
             self.websocket_pool_key(request, context, pool_account_id, &connection_profile);
+        let size_limited = self.protocol == OpenAiUpstreamProtocol::Codex
+            && (matches!(
+                requirement,
+                TransportRequirement::NewChain | TransportRequirement::WebSocketNewChain
+            ) || (requirement == TransportRequirement::ExactWebSocketContinuation
+                && request.downstream_websocket_connection_id.is_some()));
+        const MAX_FRAME_BYTES: usize = 15 * 1024 * 1024;
+        let full_bytes = websocket_create.payload_text().len();
+        if size_limited && full_bytes >= MAX_FRAME_BYTES {
+            if requirement == TransportRequirement::ExactWebSocketContinuation {
+                return Err(websocket_exchange_error_to_client_error(CodexWebSocketExchangeError::ContinuationUnavailable {
+                    reason: crate::transport::websocket::PreviousResponseUnavailableReason::PayloadTooLarge,
+                }));
+            }
+            // 没有可比较的原连接时直接保留完整 HTTP 路径，不为超大新链额外 opening
+            let has_baseline = self
+                .websocket_pool
+                .as_ref()
+                .zip(pool_key.as_ref())
+                .is_some_and(|(pool, key)| pool.has_automatic_delta_baseline(key));
+            if !has_baseline {
+                return Ok(PreparedResponseTransport {
+                    requirement,
+                    route: PreparedResponseRoute::Http,
+                    metrics: CodexTransportMetrics {
+                        decision: Some(CodexTransportDecision::HttpRequired),
+                        ..Default::default()
+                    },
+                });
+            }
+        }
         let pool_log_context = pool_key.as_ref().map(WebSocketPoolLogContext::from_key);
         let pool = self.websocket_pool.as_deref().map(|pool| (pool, pool_key));
         let fast_path_budget = match requirement {
@@ -456,6 +551,50 @@ impl CodexBackendClient {
             }
             Err(error) => return Err(websocket_exchange_error_to_client_error(error)),
         };
+        let mut prepared = prepared;
+        let (automatic_delta, delta_reason) = prepared.prepare_automatic_delta(
+            &mut websocket_request,
+            websocket_create.payload_text(),
+            self.protocol == OpenAiUpstreamProtocol::Codex,
+            allow_automatic_delta,
+        );
+        if automatic_delta {
+            websocket_create.replace_payload_text(
+                crate::transport::protocol::websocket::websocket_response_create_payload_text(
+                    &websocket_request,
+                )
+                .map_err(CodexClientError::RequestBodyEncode)?,
+            );
+        }
+        let actual_bytes = websocket_create.payload_text().len();
+        context.trace.cloned().unwrap_or_default().record(
+            "transport.payload.prepared",
+            serde_json::json!({
+                "fullPayloadBytes": full_bytes,
+                "actualPayloadBytes": actual_bytes,
+                "automaticDelta": automatic_delta,
+                "deltaReason": delta_reason,
+            }),
+        );
+        tracing::info!(
+            request_id = context.request_id,
+            full_payload_bytes = full_bytes,
+            actual_payload_bytes = actual_bytes,
+            automatic_delta,
+            delta_reason,
+            "OpenAI upstream payload prepared"
+        );
+        if size_limited && actual_bytes >= MAX_FRAME_BYTES {
+            prepared.release_without_send().await;
+            return Ok(PreparedResponseTransport {
+                requirement,
+                route: PreparedResponseRoute::Http,
+                metrics: CodexTransportMetrics {
+                    decision: Some(CodexTransportDecision::HttpRequired),
+                    ..Default::default()
+                },
+            });
+        }
         let decision = websocket_success_decision(requirement, &prepared);
         context.trace.cloned().unwrap_or_default().record(
             "transport.prepared",
@@ -487,6 +626,7 @@ impl CodexBackendClient {
             route: PreparedResponseRoute::WebSocket(Box::new(PreparedWebSocketRoute {
                 request: websocket_create,
                 prepared,
+                automatic_delta,
             })),
             metrics,
         })
@@ -523,6 +663,7 @@ impl CodexBackendClient {
                 let PreparedWebSocketRoute {
                     request: websocket_request,
                     prepared,
+                    automatic_delta: _,
                 } = *route;
                 let mut exchange = execute_prepared_response_create_request_stream(
                     &websocket_request,
@@ -595,6 +736,7 @@ impl CodexBackendClient {
             .or(request.previous_response_id())?;
         let mut key = CodexWebSocketPoolKey::new(&self.base_url, account_id, conversation_id)
             .with_egress_key(&self.egress_key)
+            .with_client_scope(request.client_api_key_id.as_deref())
             .with_outbound_proxy(self.outbound_proxy.as_ref())
             .with_connection_profile(connection_profile);
         if let Some(connection_id) = request.downstream_websocket_connection_id.as_deref() {

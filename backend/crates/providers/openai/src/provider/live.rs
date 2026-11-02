@@ -464,7 +464,7 @@ fn cold_live_call_stream(request: ColdLiveCall) -> EventStream {
                 &request.protocol_headers,
                 request.body.clone(),
                 request_context,
-            ) => response.map_err(CodexHandshakeAttemptError::Client),
+            ) => response.map_err(|error| CodexHandshakeAttemptError::Client(Box::new(error))),
         };
         if let Err(CodexHandshakeAttemptError::Client(error)) = &attempt {
             log_client_upstream_error(

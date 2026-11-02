@@ -87,6 +87,7 @@ pub enum PreviousResponseUnavailableReason {
     LatestResponseMismatch,
     ReusedConnectionLost,
     UpstreamRejected,
+    PayloadTooLarge,
 }
 
 impl PreviousResponseUnavailableReason {
@@ -99,6 +100,7 @@ impl PreviousResponseUnavailableReason {
             Self::LatestResponseMismatch => "latest_response_mismatch",
             Self::ReusedConnectionLost => "reused_connection_lost",
             Self::UpstreamRejected => "upstream_rejected",
+            Self::PayloadTooLarge => "transport_payload_too_large",
         }
     }
 }
@@ -118,6 +120,10 @@ impl CodexWebSocketRequest {
     /// 返回将要发送的首个文本帧
     pub fn payload_text(&self) -> &str {
         &self.payload_text
+    }
+
+    pub(crate) fn replace_payload_text(&mut self, text: String) {
+        self.payload_text = text;
     }
 
     /// 返回连接续接要求
