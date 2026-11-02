@@ -379,7 +379,8 @@ OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选
 已选账号及凭据版本、出口、opening identity 和存活上游 WS 上，先比较上一轮客户端 input 与真实 completed output，
 匹配后只发送新增 input。严格比较失败时，可由原生输出生成有限的确定回填模板：已知文本分块、单个 reasoning summary
 及 function call 的 canonical 表示仅用于认领上轮并确定唯一尾项边界，历史仍以上轮保存的原生 output 为准。
-工具 `call_id/name/arguments` 和结果关联必须匹配；原生 ID、状态、未知字段、密文及顺序保留。
+工具 `call_id/name/arguments` 和结果关联必须匹配；原生快照保留 ID、状态、未知字段、密文及顺序。
+恢复发送仍遵循上述 Codex reasoning 输入兼容规则，API Key 上游保持原条件。
 未知 item、非空 annotations/logprobs、多 reasoning 等未支持重建继续 full
 
 已知模板与有效新增尾项表示续接意图；客户端要替换最近输出时，应使旧 input 或投影失配，或使用新会话／分叉身份建立新基线。

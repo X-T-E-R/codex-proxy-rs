@@ -701,6 +701,7 @@ Continuation 受原请求的 Client Key、账号范围、Provider 和发送/交�
   基线按 Client Key、会话、已选账号及 credential revision、出口、opening identity、live lease 和最新完成归属隔离
 - 自动基线由原连接租约独占，原生 `output_item.done` 或完整终态 output 是唯一输出来源；失败、中断、取消或逐出不发布基线。
   客户端 full 与原生替换段共享编码快照：下一轮前缀核客户端视图，已认领请求的安全恢复使用原生视图。
+  原生快照不改写；恢复发送和 rebase 比较按保存的 Codex 条件共用既有 reasoning 输入兼容投影，API Key 保持原条件。
   共享快照及恢复令牌按实际生命周期计入每连接 32 MiB、进程 256 MiB 预算，输出最多 4096 项；超预算只停止优化，正常 full 请求继续。
   显式原生续接保持原合同，Provider session state 只携带元数据，Core、Redis 和 schema 不保存请求正文
 - OAuth 大包门禁在自动裁剪后按实际编码帧执行，达到 15 MiB 的新链改走完整 HTTP；大 connection-local

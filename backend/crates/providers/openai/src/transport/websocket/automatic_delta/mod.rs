@@ -84,6 +84,7 @@ pub(crate) struct NativeHistory {
     request: Box<str>,
     scope: Box<str>,
     patches: Vec<Arc<NativePatch>>,
+    codex: bool,
     _budget: Budget,
 }
 
@@ -96,10 +97,14 @@ impl NativeHistory {
         for patch in self.patches.iter().rev() {
             input.splice(
                 patch.client_range.clone(),
-                patch
-                    .output
-                    .iter()
-                    .map(|item| serde_json::from_str(item).expect("validated native output")),
+                patch.output.iter().map(|item| {
+                    let mut item = serde_json::from_str(item).expect("validated native output");
+                    // 快照保持原生，恢复发送和rebase比较共用原有Codex输入兼容视图
+                    if self.codex {
+                        crate::transport::downstream::normalize_reasoning_input_item(&mut item);
+                    }
+                    item
+                }),
             );
         }
     }
@@ -315,6 +320,7 @@ impl AutomaticDeltaState {
                 request: full_payload.into(),
                 scope: scope.into(),
                 patches,
+                codex,
                 _budget: budget,
             });
             if !history.patches.is_empty() {

@@ -147,12 +147,34 @@ async fn trusted_history_rejection_restores_native_full_and_keeps_client_baselin
 
 #[tokio::test]
 async fn reasoning_summary_rebuild_and_known_typed_signature_omission_restore_raw() {
-    for typed in [false, true] {
-        let reasoning = json!({"type":"reasoning","id":"rs_native","status":"completed","summary":[{"type":"summary_text","text":"one "},{"type":"summary_text","text":"two"}],"encrypted_content":"opaque-native-ciphertext","signed_extension":"preserved"});
+    for (mode, codex, encrypted) in [
+        ("strict", true, true),
+        ("responses", true, true),
+        ("typed", true, true),
+        ("strict", true, false),
+        ("responses", false, true),
+    ] {
+        let mut reasoning = json!({"type":"reasoning","id":"rs_native","status":"completed","summary":[{"type":"summary_text","text":"one "},{"type":"summary_text","text":"two"}],"encrypted_content":"opaque-native-ciphertext","content":[{"type":"reasoning_text","text":"redundant plaintext"}],"signed_extension":"preserved"});
+        if !encrypted {
+            reasoning
+                .as_object_mut()
+                .unwrap()
+                .shift_remove("encrypted_content");
+        }
         let tool = json!({"type":"function_call","id":"fc_native","status":"completed","call_id":"call_native","name":"inspect","arguments":"{}"});
-        let mut upstream = Upstream::start(vec![vec![reasoning, tool]], true).await;
+        let mut upstream = Upstream::start(vec![vec![reasoning.clone(), tool.clone()]], true).await;
         let store = Arc::new(MemoryAccountStore::default());
-        create_account(&store, "acct_provider_contract").await;
+        if codex {
+            create_account(&store, "acct_provider_contract").await;
+        } else {
+            store
+                .seed_api_key(
+                    "acct_provider_contract",
+                    upstream.base.clone(),
+                    provider_openai::credential::ResponsesTransport::PreferWebsocket,
+                )
+                .await;
+        }
         let provider = provider_with_base_url(&store, upstream.base.clone());
         let mut input = vec![user("seed")];
         run(
@@ -165,31 +187,62 @@ async fn reasoning_summary_rebuild_and_known_typed_signature_omission_restore_ra
         )
         .await;
         upstream.frame().await;
-        if !typed {
-            input.push(json!({"type":"reasoning","summary":[{"type":"summary_text","text":"one two"}],"encrypted_content":"opaque-native-ciphertext"}));
+        if mode == "strict" {
+            input.extend([reasoning.clone(), tool.clone()]);
+        } else {
+            if mode != "typed" {
+                input.push(json!({"type":"reasoning","summary":[{"type":"summary_text","text":"one two"}],"encrypted_content":"opaque-native-ciphertext"}));
+            }
+            input.push(json!({"type":"function_call","call_id":"call_native","name":"inspect","arguments":"{}"}));
         }
-        input.push(json!({"type":"function_call","call_id":"call_native","name":"inspect","arguments":"{}"}));
         let result = json!({"type":"function_call_output","call_id":"call_native","output":"ok"});
         input.push(result.clone());
         run(
             &provider,
-            input,
+            input.clone(),
             "trusted-reasoning",
             Map::new(),
             "key_trusted",
             "req_reasoning_1",
         )
         .await;
-        let (_, delta) = upstream.frame().await;
-        assert_eq!(delta["input"], json!([result]));
+        let (connection, delta) = upstream.frame().await;
+        assert_eq!(connection, 1);
+        assert_eq!(delta["input"], json!([result.clone()]));
         assert_eq!(delta["previous_response_id"], "resp_auto_0");
         let (_, full) = upstream.frame().await;
+        let mut compatible = reasoning;
+        if codex {
+            compatible.as_object_mut().unwrap().shift_remove("status");
+            if encrypted {
+                compatible.as_object_mut().unwrap().shift_remove("content");
+            }
+        }
+        let mut native = vec![user("seed"), compatible, tool, result];
+        assert!(full.get("previous_response_id").is_none());
         assert_eq!(
-            full["input"][1]["encrypted_content"],
-            "opaque-native-ciphertext"
+            full["input"],
+            json!(native),
+            "{mode}/codex={codex}/encrypted={encrypted}"
         );
-        assert_eq!(full["input"][1]["signed_extension"], "preserved");
-        assert_eq!(full["input"][1]["summary"].as_array().unwrap().len(), 2);
+        // 恢复完成后仍比较原client视图，下一轮严格delta继续保留此前原生映射
+        input.push(user("third"));
+        run(
+            &provider,
+            input,
+            "trusted-reasoning",
+            Map::new(),
+            "key_trusted",
+            "req_reasoning_2",
+        )
+        .await;
+        let (connection, delta) = upstream.frame().await;
+        assert_eq!(connection, 2);
+        assert_eq!(delta["previous_response_id"], "resp_auto_2");
+        assert_eq!(delta["input"], json!([user("third")]));
+        let (_, full) = upstream.frame().await;
+        native.push(user("third"));
+        assert_eq!(full["input"], json!(native));
         upstream.stop().await;
     }
 }
@@ -269,7 +322,10 @@ async fn large_canonical_full_uses_small_delta_and_oversized_tail_restores_nativ
             "o".repeat(9 * 1024 * 1024)
         };
         let raw = raw_text(&text);
-        let mut upstream = Upstream::start(vec![vec![raw.clone()], vec![]], reject_delta).await;
+        let reasoning = json!({"type":"reasoning","id":"rs_http_native","status":"completed","summary":[{"type":"summary_text","text":"one "},{"type":"summary_text","text":"two"}],"encrypted_content":"gAAA_http_ciphertext","content":[{"type":"reasoning_text","text":"redundant plaintext"}],"signed_extension":"http-preserved"});
+        let compatible = json!({"type":"reasoning","id":"rs_http_native","summary":[{"type":"summary_text","text":"one "},{"type":"summary_text","text":"two"}],"encrypted_content":"gAAA_http_ciphertext","signed_extension":"http-preserved"});
+        let mut upstream =
+            Upstream::start(vec![vec![reasoning, raw.clone()], vec![]], reject_delta).await;
         let store = Arc::new(MemoryAccountStore::default());
         create_account(&store, "acct_provider_contract").await;
         let provider = provider_with_base_url(&store, upstream.base.clone());
@@ -285,7 +341,12 @@ async fn large_canonical_full_uses_small_delta_and_oversized_tail_restores_nativ
         .await;
         let (_, first) = upstream.frame().await;
         let tail = user(&"n".repeat(if large_tail { 16 * 1024 * 1024 } else { 4 }));
-        let input = vec![seed, canonical(&text), tail.clone()];
+        let input = vec![
+            seed,
+            json!({"type":"reasoning","summary":[{"type":"summary_text","text":"one two"}],"encrypted_content":"gAAA_http_ciphertext"}),
+            canonical(&text),
+            tail.clone(),
+        ];
         assert!(serde_json::to_vec(&input).unwrap().len() > 15 * 1024 * 1024);
         let transport = if reject_delta {
             let mut stream = Arc::clone(&provider)
@@ -336,7 +397,10 @@ async fn large_canonical_full_uses_small_delta_and_oversized_tail_restores_nativ
         let (connection, sent) = upstream.frame().await;
         if large_tail {
             assert_eq!(transport, "http_sse");
-            assert_eq!(sent["input"], json!([first["input"][0].clone(), raw, tail]));
+            assert_eq!(
+                sent["input"],
+                json!([first["input"][0].clone(), compatible, raw, tail])
+            );
             assert!(sent.get("previous_response_id").is_none());
         } else {
             assert_eq!(connection, 1);
@@ -350,9 +414,47 @@ async fn large_canonical_full_uses_small_delta_and_oversized_tail_restores_nativ
                 assert!(recovered.get("previous_response_id").is_none());
                 assert_eq!(
                     recovered["input"],
-                    json!([first["input"][0].clone(), raw, tail])
+                    json!([first["input"][0].clone(), compatible, raw, tail])
                 );
                 assert!(serde_json::to_vec(&recovered).unwrap().len() > 15 * 1024 * 1024);
+                assert!(upstream.frames.try_recv().is_err());
+                // HTTP store=false不发布socket基线；压缩后的新链先WS full，再恢复后续delta
+                let mut compacted = vec![
+                    user("compacted seed"),
+                    compatible.clone(),
+                    user("new baseline"),
+                ];
+                assert_eq!(
+                    run(
+                        &provider,
+                        compacted.clone(),
+                        "trusted-large",
+                        Map::new(),
+                        "key_trusted",
+                        "req_http_rebase"
+                    )
+                    .await,
+                    "websocket"
+                );
+                let (rebase_connection, full) = upstream.frame().await;
+                assert!(full.get("previous_response_id").is_none());
+                assert_eq!(full["input"], json!(compacted));
+                compacted.push(user("after rebase"));
+                run(
+                    &provider,
+                    compacted.clone(),
+                    "trusted-large",
+                    Map::new(),
+                    "key_trusted",
+                    "req_http_next",
+                )
+                .await;
+                let (delta_connection, delta) = upstream.frame().await;
+                assert_eq!(delta_connection, rebase_connection);
+                assert_eq!(delta["previous_response_id"], "resp_auto_3");
+                assert_eq!(delta["input"], json!([user("after rebase")]));
+                let (_, full) = upstream.frame().await;
+                assert_eq!(full["input"], json!(compacted));
             } else {
                 assert_eq!(transport, "websocket");
             }
