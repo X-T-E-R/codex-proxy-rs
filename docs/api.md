@@ -2277,6 +2277,21 @@ OpenAI Responses 的 `provider.request.input` 与 `provider.request.outbound` �
 出站关联头仅保存指纹，`provider.request.account_scope` 保存账号归属依据及状态处理前后的指纹。
 这些观测不重组转发正文，准备发送不等同于确认发送，指纹也不证明上游缓存仍存在
 
+OpenAI 上游 WS 的 `transport.payload.prepared` 保留 `fullPayloadBytes`、`actualPayloadBytes`、
+`automaticDelta` 与 `deltaReason`。当前缀比较失败时，可选 `prefixFailure` 按下列顺序细分；
+普通 prepared 日志使用同值的 `prefix_failure`，不记录比较内容、字段值或额外身份
+
+| `prefixFailure` | 条件 |
+| --- | --- |
+| `input_shorter` | 当前 input 少于上轮完整 input 加 completed output 的项数 |
+| `prior_input_changed` | 长度足够，但上轮 input 区域不匹配 |
+| `prior_output_metadata_only` | 旧 output 区域仅 item 的 `id/status` 或 message 中 output_text 的 `annotations/logprobs` 不匹配 |
+| `prior_output_other` | 旧 output 区域存在其他差异，包括任意未知字段变化 |
+
+分型复用两侧既有兼容规范化；`prior_output_metadata_only` 要求其余字段严格相同。
+各分类均沿用 `deltaReason: prefix_changed` 并发送 full，不改变续接资格、隔离与恢复规则。
+其他原因省略 `prefixFailure`；字节字段表示准备帧的序列化长度，按现有 trace 预算保留
+
 `provider.response.usage` 从已解析的上游终态单独提取已知数值字段，区分缺失、无效和明确的零，
 同时保存共享 parser 的解析结果；`request.usage` 保存最终提交持久化前的网关归集值。
 `provider.response.parse_gap` 标记 JSON 或 canonical 投影失败，原始 wire 仍按原有规则透传。

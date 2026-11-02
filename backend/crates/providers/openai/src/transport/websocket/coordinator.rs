@@ -114,7 +114,11 @@ impl PreparedWebSocket {
         full_payload: &str,
         codex: bool,
         allow_automatic_delta: bool,
-    ) -> (bool, &'static str) {
+    ) -> (
+        bool,
+        &'static str,
+        Option<super::automatic_delta::PrefixFailure>,
+    ) {
         let latest = self
             .connection
             .continuation
@@ -125,7 +129,7 @@ impl PreparedWebSocket {
             && request.automatic_delta_scope.is_some();
         let capture_enabled = matches!(self.binding, PoolBinding::Pooled { .. })
             && request.automatic_delta_scope.is_some();
-        let (delta, reason) = self.connection.continuation.automatic_delta.prepare(
+        let prepared = self.connection.continuation.automatic_delta.prepare(
             request.body(),
             full_payload,
             latest.as_deref(),
@@ -133,7 +137,7 @@ impl PreparedWebSocket {
             capture_enabled,
             request.automatic_delta_scope.as_deref().unwrap_or_default(),
         );
-        if enabled && let Some((response_id, input)) = delta {
+        if enabled && let Some((response_id, input)) = prepared.delta {
             request.body_mut().insert(
                 "previous_response_id".to_owned(),
                 serde_json::Value::String(response_id),
@@ -141,9 +145,9 @@ impl PreparedWebSocket {
             request
                 .body_mut()
                 .insert("input".to_owned(), serde_json::Value::Array(input));
-            return (true, reason);
+            return (true, prepared.reason, prepared.prefix_failure);
         }
-        (false, reason)
+        (false, prepared.reason, prepared.prefix_failure)
     }
 
     pub(crate) async fn release_without_send(mut self) {

@@ -553,7 +553,7 @@ impl CodexBackendClient {
             Err(error) => return Err(websocket_exchange_error_to_client_error(error)),
         };
         let mut prepared = prepared;
-        let (automatic_delta, delta_reason) = prepared.prepare_automatic_delta(
+        let (automatic_delta, delta_reason, prefix_failure) = prepared.prepare_automatic_delta(
             &mut websocket_request,
             websocket_create.payload_text(),
             self.protocol == OpenAiUpstreamProtocol::Codex,
@@ -568,21 +568,28 @@ impl CodexBackendClient {
             );
         }
         let actual_bytes = websocket_create.payload_text().len();
-        context.trace.cloned().unwrap_or_default().record(
-            "transport.payload.prepared",
-            serde_json::json!({
-                "fullPayloadBytes": full_bytes,
-                "actualPayloadBytes": actual_bytes,
-                "automaticDelta": automatic_delta,
-                "deltaReason": delta_reason,
-            }),
-        );
+        let prefix_failure = prefix_failure.map(|failure| failure.as_str());
+        let mut payload_metadata = serde_json::json!({
+            "fullPayloadBytes": full_bytes,
+            "actualPayloadBytes": actual_bytes,
+            "automaticDelta": automatic_delta,
+            "deltaReason": delta_reason,
+        });
+        if let Some(failure) = prefix_failure {
+            payload_metadata["prefixFailure"] = serde_json::json!(failure);
+        }
+        context
+            .trace
+            .cloned()
+            .unwrap_or_default()
+            .record("transport.payload.prepared", payload_metadata);
         tracing::info!(
             request_id = context.request_id,
             full_payload_bytes = full_bytes,
             actual_payload_bytes = actual_bytes,
             automatic_delta,
             delta_reason,
+            prefix_failure,
             "OpenAI upstream payload prepared"
         );
         if size_limited && actual_bytes >= MAX_FRAME_BYTES {

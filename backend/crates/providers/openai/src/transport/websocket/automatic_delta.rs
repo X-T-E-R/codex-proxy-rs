@@ -1,6 +1,7 @@
 //! 同一存活上游连接内的有界完整历史比较与原生完成项基线
 
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fmt,
     sync::atomic::{AtomicUsize, Ordering},
@@ -79,6 +80,49 @@ impl fmt::Debug for AutomaticDeltaState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrefixFailure {
+    InputShorter,
+    PriorInputChanged,
+    PriorOutputMetadataOnly,
+    PriorOutputOther,
+}
+
+impl PrefixFailure {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::InputShorter => "input_shorter",
+            Self::PriorInputChanged => "prior_input_changed",
+            Self::PriorOutputMetadataOnly => "prior_output_metadata_only",
+            Self::PriorOutputOther => "prior_output_other",
+        }
+    }
+}
+
+pub(crate) struct AutomaticDeltaPreparation {
+    pub(crate) delta: Option<(String, Vec<Value>)>,
+    pub(crate) reason: &'static str,
+    pub(crate) prefix_failure: Option<PrefixFailure>,
+}
+
+impl AutomaticDeltaPreparation {
+    fn full(reason: &'static str) -> Self {
+        Self {
+            delta: None,
+            reason,
+            prefix_failure: None,
+        }
+    }
+
+    fn prefix_failure(failure: PrefixFailure) -> Self {
+        Self {
+            delta: None,
+            reason: "prefix_changed",
+            prefix_failure: Some(failure),
+        }
+    }
+}
+
 impl AutomaticDeltaState {
     /// 消费上一轮基线并为本轮保留逻辑 full，不把已发送的 suffix 当成下轮历史
     pub(crate) fn prepare(
@@ -89,7 +133,7 @@ impl AutomaticDeltaState {
         codex: bool,
         enabled: bool,
         scope: &str,
-    ) -> (Option<(String, Vec<Value>)>, &'static str) {
+    ) -> AutomaticDeltaPreparation {
         self.pending = None;
         let previous = self.baseline.take();
         if !enabled
@@ -98,20 +142,20 @@ impl AutomaticDeltaState {
                 .is_some_and(|id| !id.is_null())
             || body.get("generate") == Some(&Value::Bool(false))
         {
-            return (None, "ineligible");
+            return AutomaticDeltaPreparation::full("ineligible");
         }
         let Some(input) = body.get("input").and_then(Value::as_array) else {
-            return (None, "input_not_array");
+            return AutomaticDeltaPreparation::full("input_not_array");
         };
-        let (delta, reason) = match previous.as_ref() {
+        let mut prepared = match previous.as_ref() {
             Some(previous) if previous.scope.as_ref() != scope => {
-                (None, "credential_revision_changed")
+                AutomaticDeltaPreparation::full("credential_revision_changed")
             }
             Some(previous) if Some(previous.response_id.as_ref()) != latest_response_id => {
-                (None, "owner_changed")
+                AutomaticDeltaPreparation::full("owner_changed")
             }
             Some(previous) => compare(previous, body, input, codex),
-            None => (None, "no_baseline"),
+            None => AutomaticDeltaPreparation::full("no_baseline"),
         };
         drop(previous);
         let mut budget = Budget(0);
@@ -126,12 +170,11 @@ impl AutomaticDeltaState {
                 budget,
             });
         }
-        let reason = if self.pending.is_none() && delta.is_none() {
-            "budget_exhausted"
-        } else {
-            reason
-        };
-        (delta, reason)
+        if self.pending.is_none() && prepared.delta.is_none() {
+            prepared.reason = "budget_exhausted";
+            prepared.prefix_failure = None;
+        }
+        prepared
     }
 
     pub(crate) fn has_baseline(&self) -> bool {
@@ -274,41 +317,58 @@ fn compare(
     body: &Map<String, Value>,
     input: &[Value],
     codex: bool,
-) -> (Option<(String, Vec<Value>)>, &'static str) {
+) -> AutomaticDeltaPreparation {
     let Ok(previous_body) = serde_json::from_str::<Map<String, Value>>(&previous.request) else {
-        return (None, "invalid_baseline");
+        return AutomaticDeltaPreparation::full("invalid_baseline");
     };
     if properties(&previous_body) != properties(body) {
-        return (None, "properties_changed");
+        return AutomaticDeltaPreparation::full("properties_changed");
     }
     let Some(previous_input) = previous_body.get("input").and_then(Value::as_array) else {
-        return (None, "invalid_baseline");
+        return AutomaticDeltaPreparation::full("invalid_baseline");
     };
     let count = previous_input.len().saturating_add(previous.output.len());
-    if input.len() < count
-        || !previous_input
-            .iter()
-            .zip(input)
-            .all(|(old, new)| items_match(old, new, codex))
-    {
-        return (None, "prefix_changed");
+    if input.len() < count {
+        return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::InputShorter);
     }
+    if !previous_input
+        .iter()
+        .zip(input)
+        .all(|(old, new)| items_match(old, new, codex))
+    {
+        return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::PriorInputChanged);
+    }
+    let mut metadata_only = false;
     for (old, new) in previous
         .output
         .iter()
         .zip(&input[previous_input.len()..count])
     {
         let Ok(old) = serde_json::from_str::<Value>(old) else {
-            return (None, "invalid_baseline");
+            return AutomaticDeltaPreparation::full("invalid_baseline");
         };
-        if !items_match(&old, new, codex) {
-            return (None, "prefix_changed");
+        if old == *new {
+            continue;
         }
+        let old = project_item(&old, codex);
+        let new = project_item(new, codex);
+        if old == new {
+            continue;
+        }
+        if !output_metadata_matches(&old, &new) {
+            return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::PriorOutputOther);
+        }
+        // 继续核对其余完成项，不能让首项的元数据差异掩盖后续业务字段变化
+        metadata_only = true;
     }
-    (
-        Some((previous.response_id.to_string(), input[count..].to_vec())),
-        "delta",
-    )
+    if metadata_only {
+        return AutomaticDeltaPreparation::prefix_failure(PrefixFailure::PriorOutputMetadataOnly);
+    }
+    AutomaticDeltaPreparation {
+        delta: Some((previous.response_id.to_string(), input[count..].to_vec())),
+        reason: "delta",
+        prefix_failure: None,
+    }
 }
 
 fn properties(body: &Map<String, Value>) -> Map<String, Value> {
@@ -329,18 +389,65 @@ fn properties(body: &Map<String, Value>) -> Map<String, Value> {
 }
 
 fn items_match(previous: &Value, current: &Value, codex: bool) -> bool {
-    if previous == current {
-        return true;
+    previous == current || project_item(previous, codex) == project_item(current, codex)
+}
+
+fn project_item(item: &Value, codex: bool) -> Cow<'_, Value> {
+    if item
+        .get("internal_chat_message_metadata_passthrough")
+        .is_none()
+        && (!codex || item.get("type").and_then(Value::as_str) != Some("reasoning"))
+    {
+        return Cow::Borrowed(item);
     }
-    let project = |item: &Value| {
-        let mut item = item.clone();
-        if let Some(object) = item.as_object_mut() {
-            object.shift_remove("internal_chat_message_metadata_passthrough");
-        }
-        if codex {
-            crate::transport::downstream::normalize_reasoning_input_item(&mut item);
-        }
-        item
+    let mut item = item.clone();
+    if let Some(object) = item.as_object_mut() {
+        object.shift_remove("internal_chat_message_metadata_passthrough");
+    }
+    if codex {
+        crate::transport::downstream::normalize_reasoning_input_item(&mut item);
+    }
+    Cow::Owned(item)
+}
+
+fn output_metadata_matches(previous: &Value, current: &Value) -> bool {
+    let (Some(previous), Some(current)) = (previous.as_object(), current.as_object()) else {
+        return false;
     };
-    project(previous) == project(current)
+    // 只分型已知位置，不递归忽略未知业务对象中碰巧同名的字段
+    if !objects_match_without(previous, current, &["id", "status", "content"]) {
+        return false;
+    }
+    match (previous.get("content"), current.get("content")) {
+        (Some(Value::Array(old)), Some(Value::Array(new)))
+            if previous.get("type").and_then(Value::as_str) == Some("message") =>
+        {
+            old.len() == new.len()
+                && old
+                    .iter()
+                    .zip(new)
+                    .all(|(old, new)| match (old.as_object(), new.as_object()) {
+                        (Some(old), Some(new))
+                            if old.get("type").and_then(Value::as_str) == Some("output_text") =>
+                        {
+                            objects_match_without(old, new, &["annotations", "logprobs"])
+                        }
+                        _ => old == new,
+                    })
+        }
+        (old, new) => old == new,
+    }
+}
+
+fn objects_match_without(
+    previous: &Map<String, Value>,
+    current: &Map<String, Value>,
+    ignored: &[&str],
+) -> bool {
+    previous
+        .iter()
+        .all(|(key, value)| ignored.contains(&key.as_str()) || current.get(key) == Some(value))
+        && current
+            .keys()
+            .all(|key| ignored.contains(&key.as_str()) || previous.contains_key(key))
 }

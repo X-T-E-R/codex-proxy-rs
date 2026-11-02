@@ -3,6 +3,8 @@
 use super::*;
 use tokio::{sync::mpsc, task::JoinSet};
 
+mod diagnostics;
+
 struct Upstream {
     base: String,
     frames: mpsc::UnboundedReceiver<(usize, Value)>,
