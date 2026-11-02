@@ -26,5 +26,6 @@ fn request_retention_accepts_short_windows_without_changing_other_targets() {
         assert_eq!(policy.days(RetentionTarget::ModelRequests), days);
         assert_eq!(policy.days(RetentionTarget::OpsEvents), 30);
         assert_eq!(policy.days(RetentionTarget::AdminAuditEvents), 90);
+        assert_eq!(policy.days(RetentionTarget::SuccessfulDiagnosticTraces), 3);
     }
 }

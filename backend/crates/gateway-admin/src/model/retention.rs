@@ -7,6 +7,7 @@ pub enum RetentionTarget {
     ModelRequests,
     OpsEvents,
     AdminAuditEvents,
+    SuccessfulDiagnosticTraces,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,8 @@ impl RetentionPolicy {
             RetentionTarget::ModelRequests => self.usage_days,
             RetentionTarget::OpsEvents => self.ops_days,
             RetentionTarget::AdminAuditEvents => self.audit_days,
+            // 成功诊断与请求摘要分层保留，不改变请求和用量窗口
+            RetentionTarget::SuccessfulDiagnosticTraces => 3,
         }
     }
 }

@@ -1,4 +1,4 @@
-//! 验证短保留期升级、分批清理边界与统计异步收敛期间的查询可用性
+//! 验证历史删除、成功诊断清除的分批边界与统计查询不变量
 
 use std::{num::NonZeroU32, time::Duration};
 
@@ -682,5 +682,208 @@ async fn upgrade_protected_failures_survive_automatic_retention() {
         .await
         .unwrap();
     assert_eq!(retained, ["protected"]);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn successful_diagnostic_trace_batches_preserve_requests_usage_and_failure_evidence() {
+    let Some(database) = TestDatabase::create("successful_trace_retention").await else {
+        return;
+    };
+    let now = "2026-11-02T00:00:00Z"
+        .parse::<chrono::DateTime<Utc>>()
+        .unwrap();
+    let trace = serde_json::json!({"schemaVersion": 3, "events": [{"stage": "request.finished"}]});
+    for (id, age, outcome) in [
+        ("expired_a", 4, "succeeded"),
+        ("expired_b", 8, "succeeded"),
+        ("boundary", 3, "succeeded"),
+        ("recent", 2, "succeeded"),
+        ("failed", 8, "failed"),
+        ("cancelled", 8, "cancelled"),
+        ("incomplete", 8, "incomplete"),
+        ("running", 8, "running"),
+        ("protected", 8, "succeeded"),
+        ("already_null", 8, "succeeded"),
+    ] {
+        seed(
+            &database.pool,
+            id,
+            now - ChronoDuration::days(age) - ChronoDuration::minutes(1),
+            &[],
+        )
+        .await;
+        sqlx::query("update model_requests set outcome=$2, diagnostic_trace_json=$3,
+            client_status_code=case when $2='running' then null when $2='succeeded' then 200 else 503 end,
+            completed_at=case when $2='running' then null else completed_at end,
+            downstream_committed_at=case when $2='running' then null else downstream_committed_at end
+            where id=$1")
+            .bind(id).bind(outcome).bind(if id == "already_null" { None } else { Some(&trace) })
+            .execute(&database.pool).await.unwrap();
+    }
+    sqlx::query("insert into upgrade_retention_protected_requests(request_id) values('protected')")
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    sqlx::query("insert into ops_events(id,model_request_id,attempt_index,level,component,operation,failure_kind,message,created_at)
+        values('retry','expired_a',1,'warning','routing','responses','rate_limited','synthetic',$1)")
+        .bind(now-ChronoDuration::days(4)).execute(&database.pool).await.unwrap();
+    drain_analytics(&database.pool).await;
+    let before_rows: Vec<serde_json::Value> = sqlx::query_scalar(
+        "select to_jsonb(model_requests)-'diagnostic_trace_json' from model_requests order by id",
+    )
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let before_settings: (i64, i64, i64, i64) = sqlx::query_as(
+        "select usage_retention_days,ops_event_retention_days,audit_retention_days,config_revision from runtime_settings where id=1")
+        .fetch_one(&database.pool).await.unwrap();
+    let statistics = observability_repository(&database.pool);
+    let range = ObservabilityRange::new(now - ChronoDuration::days(31), now).unwrap();
+    let original = statistics
+        .usage_summary(range, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(original.requests.request_count, 10);
+    assert!(original.requests.total_tokens > 0);
+    let repository = PgRetentionRepository::new(database.pool.clone());
+    let policy = repository.load_policy().await.unwrap();
+    assert_eq!(policy.days(RetentionTarget::ModelRequests), 31);
+    for expected in [1, 1, 0] {
+        assert_eq!(
+            repository
+                .purge_batch(
+                    RetentionTarget::SuccessfulDiagnosticTraces,
+                    now,
+                    policy,
+                    NonZeroU32::new(1).unwrap()
+                )
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    let remaining_traces: Vec<String> = sqlx::query_scalar(
+        "select id from model_requests where diagnostic_trace_json is not null order by id",
+    )
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining_traces,
+        [
+            "boundary",
+            "cancelled",
+            "failed",
+            "incomplete",
+            "protected",
+            "recent",
+            "running"
+        ]
+    );
+    let after_rows: Vec<serde_json::Value> = sqlx::query_scalar(
+        "select to_jsonb(model_requests)-'diagnostic_trace_json' from model_requests order by id",
+    )
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    assert_eq!(after_rows, before_rows);
+    let after_settings: (i64, i64, i64, i64) = sqlx::query_as(
+        "select usage_retention_days,ops_event_retention_days,audit_retention_days,config_revision from runtime_settings where id=1")
+        .fetch_one(&database.pool).await.unwrap();
+    assert_eq!(after_settings, before_settings);
+    let event_count: i64 = sqlx::query_scalar("select count(*) from ops_events where id='retry'")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(event_count, 1);
+    let after = statistics
+        .usage_summary(range, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        after.requests.request_count,
+        original.requests.request_count
+    );
+    assert_eq!(after.requests.total_tokens, original.requests.total_tokens);
+    assert_eq!(
+        after.attempts.failure_count,
+        original.attempts.failure_count
+    );
+    assert_eq!(after.analytics.generation, original.analytics.generation);
+    assert_eq!(after.analytics.state, original.analytics.state);
+    let pending: i64 =
+        sqlx::query_scalar("select count(*) from request_analytics_pending_requests")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        pending, 0,
+        "trace-only updates must not enqueue usage rebuilds"
+    );
+    let detail = admin_observability_store(&database.pool)
+        .usage_record_detail("expired_a")
+        .await
+        .unwrap();
+    assert!(detail.trace.is_none());
+    assert_eq!(detail.request.id, "expired_a");
+    assert_eq!(detail.request.total_tokens, Some(120));
+    database.close().await;
+}
+
+#[tokio::test]
+async fn locked_successful_traces_are_skipped_and_revisited_without_deleting_rows() {
+    let Some(database) = TestDatabase::create("successful_trace_locked").await else {
+        return;
+    };
+    let now = Utc::now();
+    for id in ["locked", "available"] {
+        seed(&database.pool, id, now - ChronoDuration::days(4), &[]).await;
+    }
+    sqlx::query(r#"update model_requests set diagnostic_trace_json='{"schemaVersion":3}'::jsonb"#)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let mut writing = database.pool.begin().await.unwrap();
+    sqlx::query("select id from model_requests where id='locked' for update")
+        .execute(&mut *writing)
+        .await
+        .unwrap();
+    let repository = PgRetentionRepository::new(database.pool.clone());
+    let policy = RetentionPolicy::try_new(31, 30, 90).unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            repository.purge_batch(
+                RetentionTarget::SuccessfulDiagnosticTraces,
+                now,
+                policy,
+                NonZeroU32::new(10).unwrap()
+            )
+        )
+        .await
+        .expect("trace cleanup must skip occupied rows")
+        .unwrap(),
+        1
+    );
+    writing.commit().await.unwrap();
+    assert_eq!(
+        repository
+            .purge_batch(
+                RetentionTarget::SuccessfulDiagnosticTraces,
+                now,
+                policy,
+                NonZeroU32::new(10).unwrap()
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    let counts: (i64, i64) =
+        sqlx::query_as("select count(*),count(diagnostic_trace_json) from model_requests")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(counts, (2, 0));
     database.close().await;
 }

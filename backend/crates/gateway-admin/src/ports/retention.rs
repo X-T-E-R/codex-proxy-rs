@@ -1,4 +1,4 @@
-//! 有界保留期删除，不承载周期、暂停或重试策略
+//! 有界历史删除与诊断清除，不承载周期、暂停或重试策略
 
 use std::num::NonZeroU32;
 
@@ -12,7 +12,8 @@ use crate::model::retention::{RetentionPolicy, RetentionTarget};
 pub trait RetentionStore: Send + Sync {
     async fn load_policy(&self) -> AdminStoreResult<RetentionPolicy>;
 
-    /// 每次最多删除 limit 行；请求关联事件随请求事务级联删除
+    /// 每批最多处理 limit 行，返回该 target 的受影响行数
+    /// 请求删除级联清理关联事件；成功诊断 target 只清除 trace，保留请求
     async fn purge_batch(
         &self,
         target: RetentionTarget,

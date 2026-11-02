@@ -1,4 +1,4 @@
-//! PostgreSQL 保留期投影与单批删除适配器
+//! PostgreSQL 保留期投影、单批历史删除与成功诊断清除适配器
 
 use crate::{admin_store_error, postgres_unavailable};
 use async_trait::async_trait;
@@ -67,6 +67,19 @@ impl RetentionStore for PgRetentionRepository {
                     for update skip locked
                  )"
             }
+            RetentionTarget::SuccessfulDiagnosticTraces => {
+                "update model_requests set diagnostic_trace_json = null
+                 where ctid in (
+                   select ctid from model_requests
+                    where outcome = 'succeeded'
+                      and diagnostic_trace_json is not null
+                      and not exists (select 1 from upgrade_retention_protected_requests protected where protected.request_id=model_requests.id)
+                      and completed_at < $1 - ($2 * interval '1 day')
+                    order by completed_at
+                    limit $3
+                    for update skip locked
+                 )"
+            }
             RetentionTarget::OpsEvents => {
                 "delete from ops_events
                  where ctid in (
@@ -103,19 +116,19 @@ impl RetentionStore for PgRetentionRepository {
             .execute(&mut *transaction)
             .await
             .map_err(|source| unavailable("set retention lock timeout", source))?;
-        let deleted = sqlx::query(sql)
+        let affected = sqlx::query(sql)
             .bind(now)
             .bind(i64::from(policy.days(target)))
             .bind(i64::from(limit.get()))
             .execute(&mut *transaction)
             .await
             .map(|result| result.rows_affected())
-            .map_err(|source| unavailable("delete expired records", source))?;
+            .map_err(|source| unavailable("purge expired history", source))?;
         transaction
             .commit()
             .await
             .map_err(|source| unavailable("commit retention batch", source))?;
-        Ok(deleted)
+        Ok(affected)
     }
 }
 

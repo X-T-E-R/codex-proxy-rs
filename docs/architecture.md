@@ -1036,7 +1036,7 @@ Provider metadata 的 `upstreamServiceTier`，不改写客户端收到的响应�
 Worker 由各 Bundle 贡献、由 Host 统一监督：
 
 - Store：过期请求恢复和 PostgreSQL/Redis 观测队列
-- Host：历史保留任务，持有调度、单轮行数/批数/时长预算、取消和日志；Admin 校验[保留窗口](api.md#历史保留)，Store 执行有界批量删除
+- Host：历史保留任务，持有调度、单轮行数/批数/时长预算、取消和日志；Admin 拥有[保留规则](api.md#历史保留)，Store 执行有界历史删除与成功诊断清除，两类处理独立计数
 - Core：`runtime` owner 的 RuntimeSnapshot 周期对账和 Redis change 订阅
 - Admin：S3/R2 备份 daemon，负责调度、执行、删除收敛与保留清理；
   以及账号冻结恢复 worker（容量熔断的自适应并发下调与到期探测解冻）

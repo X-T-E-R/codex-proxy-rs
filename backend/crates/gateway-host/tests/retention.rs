@@ -1,4 +1,4 @@
-//! 验证历史清理的轮转、批次预算、时长限制与取消行为
+//! 验证历史删除与诊断清除的轮转、批次预算、时长限制与取消行为
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -25,7 +25,9 @@ struct Store {
     calls: Mutex<Vec<RetentionTarget>>,
     fail: bool,
     full: bool,
+    full_target: Option<RetentionTarget>,
     block_load: bool,
+    block_target: Option<RetentionTarget>,
 }
 
 #[async_trait]
@@ -44,6 +46,9 @@ impl RetentionStore for Store {
         limit: NonZeroU32,
     ) -> AdminStoreResult<u64> {
         self.calls.lock().unwrap().push(target);
+        if self.block_target == Some(target) {
+            std::future::pending::<()>().await;
+        }
         if self.fail {
             return Err(AdminStoreError::new(
                 AdminStoreErrorKind::Unavailable,
@@ -51,7 +56,11 @@ impl RetentionStore for Store {
                 "fixture",
             ));
         }
-        Ok(if self.full { u64::from(limit.get()) } else { 0 })
+        Ok(if self.full || self.full_target == Some(target) {
+            u64::from(limit.get())
+        } else {
+            0
+        })
     }
 }
 
@@ -66,7 +75,7 @@ fn context(cancellation: CancellationToken) -> WorkerCycleContext {
 fn budget() -> RetentionCycleBudget {
     RetentionCycleBudget {
         batch_rows: NonZeroU32::new(2).unwrap(),
-        max_batches: NonZeroU32::new(4).unwrap(),
+        max_batches: NonZeroU32::new(6).unwrap(),
         max_duration: Duration::from_secs(1),
         batch_pause: Duration::ZERO,
     }
@@ -88,7 +97,32 @@ async fn full_tables_rotate_until_batch_budget_is_exhausted() {
             RetentionTarget::ModelRequests,
             RetentionTarget::OpsEvents,
             RetentionTarget::AdminAuditEvents,
-            RetentionTarget::ModelRequests
+            RetentionTarget::SuccessfulDiagnosticTraces,
+            RetentionTarget::ModelRequests,
+            RetentionTarget::OpsEvents,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn successful_trace_backlog_uses_remaining_batches_without_revisiting_empty_tables() {
+    let store = Arc::new(Store {
+        full_target: Some(RetentionTarget::SuccessfulDiagnosticTraces),
+        ..Store::default()
+    });
+    RetentionTask::new(store.clone(), budget())
+        .run_cycle(context(CancellationToken::new()))
+        .await
+        .unwrap();
+    assert_eq!(
+        *store.calls.lock().unwrap(),
+        [
+            RetentionTarget::ModelRequests,
+            RetentionTarget::OpsEvents,
+            RetentionTarget::AdminAuditEvents,
+            RetentionTarget::SuccessfulDiagnosticTraces,
+            RetentionTarget::SuccessfulDiagnosticTraces,
+            RetentionTarget::SuccessfulDiagnosticTraces,
         ]
     );
 }
@@ -100,7 +134,7 @@ async fn empty_tables_are_not_revisited_and_errors_stop_the_cycle() {
         .run_cycle(context(CancellationToken::new()))
         .await
         .unwrap();
-    assert_eq!(store.calls.lock().unwrap().len(), 3);
+    assert_eq!(store.calls.lock().unwrap().len(), 4);
     let store = Arc::new(Store {
         fail: true,
         ..Store::default()
@@ -145,4 +179,30 @@ async fn cancellation_interrupts_settings_read_before_any_delete() {
     }
     run.await.unwrap();
     assert!(store.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_interrupts_successful_trace_cleanup() {
+    let store = Arc::new(Store {
+        block_target: Some(RetentionTarget::SuccessfulDiagnosticTraces),
+        ..Store::default()
+    });
+    let token = CancellationToken::new();
+    let task = RetentionTask::new(store.clone(), budget());
+    let run = task.run_cycle(context(token.clone()));
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => panic!("unexpected completion: {result:?}"),
+        () = tokio::task::yield_now() => token.cancel(),
+    }
+    run.await.unwrap();
+    assert_eq!(
+        *store.calls.lock().unwrap(),
+        [
+            RetentionTarget::ModelRequests,
+            RetentionTarget::OpsEvents,
+            RetentionTarget::AdminAuditEvents,
+            RetentionTarget::SuccessfulDiagnosticTraces,
+        ]
+    );
 }

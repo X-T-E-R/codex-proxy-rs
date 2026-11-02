@@ -332,6 +332,45 @@ async fn related_read_failures_and_limits_keep_primary_evidence() {
 }
 
 #[tokio::test]
+async fn successful_request_with_expired_trace_exports_detail_and_explicit_evidence_gap() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    fixture.usage_detail.lock().unwrap().replace(UsageDetail {
+        request: usage_record_with_account(
+            "req_retained_success",
+            "acct_success",
+            "fixture",
+            "fixture@example.invalid",
+            "api_key",
+            Utc::now() - chrono::Duration::days(4),
+        ),
+        attempts: Vec::new(),
+        trace: None,
+        related_requests: Vec::new(),
+    });
+    let (status, _, file) = export(&fixture, "?requestId=req_retained_success", true).await;
+    assert_eq!(status, StatusCode::OK, "{file}");
+    assert_eq!(file["requests"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        file["requests"][0]["evidence"]["detail"]["requestId"],
+        "req_retained_success"
+    );
+    assert!(file["requests"][0]["evidence"]["trace"].is_null());
+    assert_eq!(file["requests"][0]["errors"], json!([]));
+    assert_eq!(file["exportTruncated"], false);
+    assert!(
+        file["availability"]["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| {
+                gap["section"] == "requests.req_retained_success.trace"
+                    && gap["reason"] == "not_recorded_or_retained"
+            })
+    );
+}
+
+#[tokio::test]
 async fn credential_schemas_are_redacted_without_guessing_business_field_names() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");

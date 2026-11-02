@@ -1,4 +1,4 @@
-//! 保留期任务的调度、单轮预算、取消与日志；删除事务由 Store 端口负责
+//! 保留期任务的调度、单轮预算、取消与日志；历史删除和诊断清除事务由 Store 负责
 
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 
@@ -76,10 +76,11 @@ impl RetentionTask {
             (RetentionTarget::ModelRequests, 0_u64, false),
             (RetentionTarget::OpsEvents, 0, false),
             (RetentionTarget::AdminAuditEvents, 0, false),
+            (RetentionTarget::SuccessfulDiagnosticTraces, 0, false),
         ];
         let mut batches = 0;
         'cycles: loop {
-            for (target, deleted, complete) in &mut targets {
+            for (target, affected, complete) in &mut targets {
                 if *complete {
                     continue;
                 }
@@ -95,7 +96,7 @@ impl RetentionTask {
                     .await
                     .map_err(|_| WorkerTaskError::safe("retention cleanup failed"))?;
                 batches += 1;
-                *deleted = deleted.saturating_add(count);
+                *affected = affected.saturating_add(count);
                 *complete = count < u64::from(self.budget.batch_rows.get());
                 if !*complete
                     && batches < self.budget.max_batches.get()
@@ -116,6 +117,7 @@ impl RetentionTask {
             model_requests = targets[0].1,
             ops_events = targets[1].1,
             admin_audit_events = targets[2].1,
+            successful_diagnostic_traces_cleared = targets[3].1,
             batches,
             budget_exhausted = targets.iter().any(|(_, _, complete)| !complete),
             elapsed_milliseconds =
