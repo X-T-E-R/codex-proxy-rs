@@ -211,6 +211,58 @@ class PreparationRecoveryTest(unittest.TestCase):
             self.assertEqual(schema53.product_contract(schema53.BUNDLE, accepted()['schema53Contract'])['actions'][
                 'prebuild']['online_index_statement_timeout_ms'], 120000)
 
+    def test_cleanup_after_linked_prepare_rechecks_source_and_full_lineage(self):
+        for depth in (1, 2):
+            for drift in ('activation', 'issued_unknown', 'receipt', 'pid_alive', 'reservation'):
+                with self.subTest(depth=depth, drift=drift), tempfile.TemporaryDirectory() as tmp, \
+                     SchemaSite(tmp, 'build_failed') as site, patch.object(remote, 'fcntl', real_fcntl or remote.fcntl):
+                    blocked_source(site, 'prepare')
+                    with patch.object(remote.os, 'kill', side_effect=ProcessLookupError):
+                        child = child_run(site, 'prepare')
+                        if depth == 2:
+                            with patch.object(remote, 'gate_enter', side_effect=RuntimeError('restart_gate_lifecycle_busy')):
+                                self.assertTrue(remote.Deployment(child).prepare()['zeroSqlConfirmed'])
+                            evidence = remote.preparation_recovery_evidence(child, 'prepare', accepted())
+                            child = child_run(site, 'prepare', digit='3', evidence=evidence)
+                        prepared = remote.Deployment(child).prepare()
+                    self.assertEqual(prepared['schemaCommands']['prepare']['outcome'], 'failed')
+                    self.assertEqual(prepared['schemaWrites'], 1)
+                    original = (child / 'prepare-result.json').read_bytes()
+                    if drift == 'activation':
+                        (site.run / 'attempt-claimed.json').touch()
+                        expected = 'source_activation_claimed'
+                    elif drift == 'issued_unknown':
+                        value = json.loads((site.run / 'prepare-result.json').read_text())
+                        value.update(schemaWrites=1, schemaCommands={'prepare': {'outcome': 'unknown'}})
+                        remote.atomic(site.run / 'prepare-result.json', value)
+                        expected = 'confirmed_zero_sql'
+                    elif drift == 'receipt':
+                        value = json.loads((site.run / 'prepare-result.json').read_text())
+                        value['finishedAt'] = '2099-01-01T00:00:00+00:00'
+                        remote.atomic(site.run / 'prepare-result.json', value)
+                        expected = 'source_receipt_drift'
+                    elif drift == 'reservation':
+                        slot = site.run.parent / ('schema53-recovery-' + site.run.name + '-prepare-claimed.json')
+                        value = json.loads(slot.read_text())
+                        value['successorRunId'] = 'task40-' + 'f' * 32
+                        remote.atomic(slot, value)
+                        expected = 'reservation_owner_drift' if depth == 1 else 'source_not_admitted_successor'
+                    else:
+                        expected = 'source_process_not_exited'
+                    events = list(site.schema_events)
+                    with patch.object(remote.os, 'kill', side_effect=None if drift == 'pid_alive' else ProcessLookupError):
+                        result = remote.Deployment(child).prepare(cleanup=True)
+                    self.assertEqual(result['phase'], 'schema53_preparation_requires_operator')
+                    self.assertIn(expected, result['errorCode'])
+                    self.assertEqual(result['schemaWrites'], 0)
+                    self.assertNotIn('schemaCommands', result)
+                    self.assertEqual(result['preparationFailure']['stage'], 'recovery_admission')
+                    self.assertEqual(site.schema_events, events)
+                    self.assertEqual(site.index, 'invalid')
+                    self.assertEqual((child / 'prepare-result.json').read_bytes(), original)
+                    self.assertTrue(site.current['running'])
+                    self.assertFalse((site.gate / 'maintenance').exists())
+
     def test_prepare_recovery_still_supports_activate_or_separate_cleanup_after_sql_failure(self):
         for fail in (None, 'build_failed'):
             with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmp, SchemaSite(tmp, fail) as site:

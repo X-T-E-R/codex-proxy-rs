@@ -580,9 +580,8 @@ class Deployment:
             require(link['role'] == 'prepare' and role == 'cleanup' and
                     json.loads((self.root / 'prepare-result.json').read_text()).get('preparationRecovery', {}).get(
                         'successorRunId') == self.root.name, 'schema53_recovery_role_or_owner_drift')
-            return
         source = self.root.parent / link['runId']
-        evidence = preparation_recovery_evidence(source, role, self.m, active_held=True, successor=self.root.name)
+        evidence = preparation_recovery_evidence(source, link['role'], self.m, active_held=True, successor=self.root.name)
         require(evidence['receiptSha256'] == link['receiptSha256'], 'schema53_recovery_source_receipt_drift')
         self.result['preparationRecovery'] = dict(evidence, successorRunId=self.root.name)
 
