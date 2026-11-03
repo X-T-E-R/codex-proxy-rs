@@ -226,7 +226,7 @@ fn explicit_fields_match(native: &[Value], rebuilt: &[Value]) -> bool {
             candidates
         };
         *position += 1;
-        if !fields_present_match(item, candidates, known) {
+        if !fields_present_match(item, candidates, known, &[]) {
             return false;
         }
         for key in ["content", "summary"] {
@@ -253,7 +253,13 @@ fn explicit_fields_match(native: &[Value], rebuilt: &[Value]) -> bool {
                                 | "reasoning_text"
                         )
                     ) {
-                        if !fields_present_match(part, candidates, &["type", "text"]) {
+                        let optional: &[&str] =
+                            if matches!(kind, Some("output_text" | "input_text" | "text")) {
+                                &["annotations", "logprobs"]
+                            } else {
+                                &[]
+                            };
+                        if !fields_present_match(part, candidates, &["type", "text"], optional) {
                             return false;
                         }
                     } else if !candidates.contains(&part) {
@@ -266,7 +272,12 @@ fn explicit_fields_match(native: &[Value], rebuilt: &[Value]) -> bool {
     })
 }
 
-fn fields_present_match(item: &Value, native: &[&Value], known: &[&str]) -> bool {
+fn fields_present_match(
+    item: &Value,
+    native: &[&Value],
+    known: &[&str],
+    optional: &[&str],
+) -> bool {
     let Some(object) = item.as_object() else {
         return false;
     };
@@ -274,7 +285,7 @@ fn fields_present_match(item: &Value, native: &[&Value], known: &[&str]) -> bool
         .iter()
         .filter(|(key, value)| {
             !known.contains(&key.as_str())
-                && !(matches!(key.as_str(), "annotations" | "logprobs")
+                && !(optional.contains(&key.as_str())
                     && (value.is_null() || value.as_array().is_some_and(Vec::is_empty)))
         })
         .collect();

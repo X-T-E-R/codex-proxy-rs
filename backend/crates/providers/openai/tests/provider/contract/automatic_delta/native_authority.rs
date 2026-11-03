@@ -26,7 +26,7 @@ fn rebuilt(turn: usize, style: usize) -> Vec<Value> {
             json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"after"}]}),
         ],
         _ => vec![
-            json!({"type":"message","role":"assistant","content":[{"type":"input_text","text":"before "},{"type":"input_text","text":"after"}],"annotations":[]}),
+            json!({"type":"message","role":"assistant","content":[{"type":"input_text","text":"before ","annotations":[]},{"type":"input_text","text":"after","logprobs":[]}]}),
         ],
     };
     if style != 2 {
@@ -220,6 +220,7 @@ async fn native_authority_rejects_explicit_content_signature_and_tool_conflicts(
         "opaque_order",
         "ambiguous_tools",
         "annotation",
+        "unknown_annotations",
         "compaction",
         "prior_user",
         "fork",
@@ -273,6 +274,7 @@ async fn native_authority_rejects_explicit_content_signature_and_tool_conflicts(
             "annotation" => {
                 output[0]["content"] = json!([{"type":"output_text","text":"before after","annotations":[{"opaque":"edited"}]}]);
             }
+            "unknown_annotations" => output[0]["annotations"] = json!([]),
             "prior_user" => input[0] = user("changed seed"),
             _ => {}
         }
