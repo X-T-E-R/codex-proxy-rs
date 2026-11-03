@@ -493,6 +493,78 @@ PG 精确确认后仅调用一次 `releaseConfirmed` 批次，批次复用同一
 PG 提交后先持久化 batch 单次意图；已有意图或结果未知时保持维护闸，观察原进程与同一 receipt，由启动器受检接管，不再次执行 batch。
 不要删 receipt 后重新准备。`complete` 表示该 manifest 已处理，不表示所有无归属 Redis 槽已清空
 
+### 在现役 watchdog 上安装版本化恢复器
+
+`recovery-helper-install.py` 适用于已安装 Task36 单部署 watchdog、当前仍健康运行且 `restart=no` 的站点。
+它保留应用容器和原 `site-recovery.py`，在同目录写入 root 所有、`0600` 的 `site-recovery-confirmed-v1.py`，再原子替换 `binding.json`。
+安装只对正式 helper 做一次正常认证/PING，不连接 PG、不终结请求、不释放槽，也不重放部署或恢复 run。
+新 host 仅在未来真实退出代际由原 watchdog 调用
+
+站点动作须单独批准。在 root 所有、不可被组或其他用户写入的 staging 目录保留以下相对路径，普通文件权限设为 `0600`：
+
+```text
+recovery-helper-install.py
+recovery-helper-install-988.json
+site-recovery.py
+task40-prod-upgrade/remote.py
+```
+
+输入 [recovery-helper-install-988.json](recovery-helper-install-988.json) 固定现役 988 的容器 ID/StartedAt、应用 digest、bac2 helper revision/digest 和 host SHA-256，初始 `accepted=false`。
+`site-recovery.py` 必须是该输入所核的原始字节，不转换换行；helper 镜像必须已由单独批准的精确 digest 拉取准备好，安装器不 pull。
+不要把站点配置或真实凭据放入输入
+
+1. **取得 fresh proposal**。在 Linux root 下执行；`inspect` 只读站点文件、容器/镜像与 timer 状态，运行 host 的 `--describe`，不运行 Redis helper，也不创建维护闸
+
+   ```bash
+   umask 077
+   STAGE=/opt/codex-proxy-rs/.runtime/recovery-helper-candidate-bac2
+   python3 -B "$STAGE/recovery-helper-install.py" inspect \
+     --manifest "$STAGE/recovery-helper-install-988.json" > "$STAGE/proposal.json"
+   ```
+
+   审核输出中的完整 runtime 与 `proposal.previous` 三个 SHA-256（原 binding、原 host、watchdog），将完整 `proposal` 对象保存为 staging 下的 `accepted.json` 并由批准者设 `accepted=true`。
+   `previous` 只含完整性摘要，输出不包含 recovery argv 或业务 receipt；示例输入不代替 fresh proposal
+
+2. **批准后单次安装**。安装器依次非阻塞持有 `task36-active.lock`、`task40-active.lock`、`lifecycle.lock`，建立本操作独有 maintenance。
+   它复核同一容器代际、image ID/source、live pin、有效 Compose、配置文件状态、原始字节、timer enabled/active 和完整 helper 能力；原 watchdog 在锁内必须实际返回 `lifecycle_busy`
+
+   ```bash
+   python3 - "$STAGE/proposal.json" "$STAGE/accepted.json" <<'PY'
+   import json, sys
+   proposal = json.load(open(sys.argv[1]))['proposal']
+   proposal['accepted'] = True
+   with open(sys.argv[2], 'x') as output:
+       json.dump(proposal, output, indent=2)
+   PY
+   python3 -B "$STAGE/recovery-helper-install.py" install \
+     --manifest "$STAGE/accepted.json" --GO
+   python3 -B "$STAGE/recovery-helper-install.py" observe \
+     --manifest "$STAGE/accepted.json"
+   ```
+
+   完成结果为 `installed`；只读观察应为 `bindingState=confirmed`、`baselineMatches=true`、`maintenance=absent`、`evidenceMatches=true`、`versionedHostMatches=true`，`helperContainersPresent=[]`。
+   安装不修改 systemd unit、timer 或 Docker restart policy；timer 只读检查沿用既有部署合同
+
+3. **故障先观察，再受检收束**。同一 operation ID 不能再次 install；超时、丢 ACK 或原子写结果未知时，保留本操作 maintenance 和 `helper-installs/<operationId>/`，使用上面的 `observe`。
+   认证 helper 的 cidfile、固定 name 与单次 intent 留在该操作目录；观察同时按固定 name 和 cidfile 完整 ID 查询容器，即使容器被改名也不会漏掉，不自动终止或重跑 helper
+
+   若完整基线仍一致、该认证容器已消失、没有 foreign binding/maintenance 或遗留临时文件，经独立批准可选择保留已验证的新绑定，或恢复备份的原 binding 精确字节：
+
+   ```bash
+   python3 -B "$STAGE/recovery-helper-install.py" settle \
+     --manifest "$STAGE/accepted.json" --binding confirmed --GO
+   # 或恢复原 476/f8 绑定
+   python3 -B "$STAGE/recovery-helper-install.py" settle \
+     --manifest "$STAGE/accepted.json" --binding previous --GO
+   ```
+
+   `settle` 不再次认证；确认目标 host/image/原始字节与代际后才放闸。绑定已是目标时只核验，不重发替换；此前同一 settle 写入已有意图但未观察到目标时拒绝重发。
+   结果为 `settled`，随后用 `observe` 核对所选 `bindingState` 与 maintenance 已解除。
+   代际、pin、权限或完整性漂移，foreign owner、认证意图已有但 cidfile 身份未确认、仍存在的认证容器、`evidenceMatches=false` 或遗留 `.helper-install.tmp` 都须停止写操作并保留现场，交操作员核查，不能删除意图、临时文件或更换 operation ID 绕过
+
+保留 staging、操作目录内的 accepted 输入、原/新 binding 与新 host 副本，供独立观察和恢复；原 host 与全部完成 run 原样保留。
+后续 Task40 部署消费新绑定时，manifest 的 `recoveryHelper` 必须与新 binding 的 source/image/contract 相同，不能继续声明旧 476 helper
+
 ## 本地开发
 
 源码环境、前后端启动与组件库联调见 [开发与源码联调](../docs/development.md)

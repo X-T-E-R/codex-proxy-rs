@@ -1,0 +1,17 @@
+{
+  "contract": "cpr-recovery-helper-install/1",
+  "operationId": "helper-install-c8f1a3fd38f34dbf89938d1c81b092a7",
+  "accepted": false,
+  "baseline": {
+    "source": "9888052ce26e106bb3cd2dc86c5d3050a6eccc9c",
+    "image": "ghcr.io/x-t-e-r/codex-proxy-rs@sha256:2dfdc87ab6bc3354628e9f59bfbaa9bf05b44c61babdb089b7a7d8dcb8114538",
+    "containerId": "36d1a213f9c1ef70f1b225a042cf9cd8eb6d897b8bc5a379959113f6af78a39b",
+    "startedAt": "2026-11-03T07:17:41.105110141Z"
+  },
+  "helper": {
+    "source": "bac2c8e0f4d7eae551d8eb194f79d285eede140b",
+    "image": "ghcr.io/x-t-e-r/codex-proxy-rs@sha256:6809441bf0cef500485abd2767f63ddab388ee2f65cae5dd721e3883422742d7",
+    "contract": "cpr-recovery-confirmed/1"
+  },
+  "hostSha256": "e454ae18e65c57c96b9c9fdbe3fd2c274cdf01d30237c15970984623f4d1cb56"
+}
