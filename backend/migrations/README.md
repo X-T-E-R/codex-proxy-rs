@@ -32,6 +32,33 @@ sha256sum --check --strict .frozen-sha256
 
 遇到 checksum 不一致，先核对运行版本和文件来源；不要修改数据库中的 checksum 来绕过校验
 
+## 大表成功诊断待清索引
+
+`0053_successful_trace_pending_index.sql` 为成功且仍有诊断的请求建立部分索引，清理查询不再扫描已清空诊断的时间前缀。
+索引只包含 `completed_at`，不保存 trace 内容，也不改变成功诊断 3 天和请求历史保留策略
+
+存量大表应在旧应用仍服务时，以独立自动提交连接预建索引；不要在 `BEGIN`、SQLx 迁移事务或切版停服窗口内执行较慢的预建：
+
+```sql
+set statement_timeout = '5s';
+set lock_timeout = '500ms';
+create index concurrently model_requests_successful_trace_pending_idx
+    on model_requests using btree (completed_at)
+    where outcome = 'succeeded' and diagnostic_trace_json is not null;
+```
+
+并发建立允许业务读写，但会扫描 heap、等待既有事务并增加 I/O；超时或取消可能留下无效同名索引。
+先检查 `pg_index.indisvalid`、`indisready`、`indislive` 及完整索引定义，再决定是否重试。
+只对已确认失败的同名待清索引使用独立自动提交连接执行 `DROP INDEX CONCURRENTLY`；不得用 `IF NOT EXISTS` 接受无效或异义对象，或删除有效索引来重建
+
+预建不登记迁移，数据库仍为 52，旧应用可以继续启动和使用索引。
+候选启动时，53 在原有 5 秒语句、500 毫秒锁等待预算内验证定义和有效性后登记；未预建的小库可直接创建。
+定义错误、无效残留或超时会回滚整个迁移事务，保留原迁移记录
+
+数据库登记 53 后，只内置 1–52 迁移的旧二进制会因缺少 53 拒绝启动。
+仅在确认数据库恰好为匹配 checksum 的 1–53、应用已停止且有效索引保留时，受检回退可只撤销 53 的登记，恢复旧二进制启动条件并保留请求、用量及诊断数据。
+这项索引专用回退不适用于后续迁移；不得直接修改 checksum 或通用跳过缺失迁移检查
+
 ## 本地测试库
 
 `gateway-store` 的 PostgreSQL/Redis 集成测试使用以下环境变量；所需测试服务未配置时，本地相关测试跳过，CI 直接失败：

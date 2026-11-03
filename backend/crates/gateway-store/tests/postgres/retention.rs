@@ -894,7 +894,7 @@ async fn large_toasted_successful_traces_advance_through_backlog_and_sparse_tail
         return;
     };
     let now = Utc::now();
-    // 20 万条已清诊断在索引前部，覆盖接近生产积压规模的稀疏尾部扫描
+    // 30 万条宽行已清诊断在时间索引前部，覆盖大 heap 下的稀疏尾部查找
     // 同一合成随机状字符串在各行独立 TOAST，不使用可被压成小值的重复填充
     let trace: serde_json::Value = sqlx::query_scalar(
         "select jsonb_build_object('schemaVersion',3,'events',jsonb_build_array(
@@ -917,21 +917,31 @@ async fn large_toasted_successful_traces_advance_through_backlog_and_sparse_tail
          select 'toast_'||value::text,'key_toast','responses','http_sse','model_a',
              'succeeded',200,$1-interval '8 days',100,20,120,$1-interval '9 days',
              $1-interval '4 days',
-             case when value<=200000 then $1-interval '8 days' else $1-interval '4 days' end,
-             case when value<=200000 then null else $2::jsonb end,
+             case when value<=300000 then $1-interval '8 days' else $1-interval '4 days' end,
+             case when value<=300000 then null else $2::jsonb end,
              jsonb_build_object('request',jsonb_build_object('configRevision',1,'protocol','openai',
-                 'endpoint','/v1/responses','compact',false),'routing',jsonb_build_object('scope','all',
+                 'endpoint','/v1/responses','compact',false,'userAgent',
+                 (select string_agg(md5(padding::text),'' order by padding) from generate_series(1,32) padding)),
+                 'routing',jsonb_build_object('scope','all',
                  'groupRefs','[]'::jsonb,'groupNamesSnapshot','[]'::jsonb),'timings',
                  jsonb_build_object('local',jsonb_build_object('latencyMs',100,'firstTokenMs',50)))
-         from generate_series(1,201003) value",
+         from generate_series(1,301003) value",
     )
     .bind(now)
     .bind(&trace)
     .execute(&database.pool)
     .await
     .unwrap();
+    let heap_bytes: i64 = sqlx::query_scalar("select pg_relation_size('model_requests')")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert!(
+        heap_bytes > 400_000_000,
+        "fixture must exercise a wide heap"
+    );
     let stored_bytes: i32 = sqlx::query_scalar(
-        "select pg_column_size(diagnostic_trace_json) from model_requests where id='toast_201001'",
+        "select pg_column_size(diagnostic_trace_json) from model_requests where id='toast_301001'",
     )
     .fetch_one(&database.pool)
     .await
@@ -941,7 +951,7 @@ async fn large_toasted_successful_traces_advance_through_backlog_and_sparse_tail
         "fixture must retain a large TOAST value"
     );
     sqlx::query(
-        "insert into upgrade_retention_protected_requests(request_id) values('toast_201002')",
+        "insert into upgrade_retention_protected_requests(request_id) values('toast_301002')",
     )
     .execute(&database.pool)
     .await
@@ -951,7 +961,7 @@ async fn large_toasted_successful_traces_advance_through_backlog_and_sparse_tail
         .await
         .unwrap();
     let mut writing = database.pool.begin().await.unwrap();
-    sqlx::query("select id from model_requests where id='toast_201003' for update")
+    sqlx::query("select id from model_requests where id='toast_301003' for update")
         .execute(&mut *writing)
         .await
         .unwrap();
@@ -1034,9 +1044,9 @@ async fn large_toasted_successful_traces_advance_through_backlog_and_sparse_tail
     let retained: (i64, i64, i64) = sqlx::query_as(
         "select count(*),count(diagnostic_trace_json),sum(total_tokens)::bigint from model_requests",
     ).fetch_one(&database.pool).await.unwrap();
-    assert_eq!(retained, (201003, 1, 201003 * 120));
+    assert_eq!(retained, (301003, 1, 301003 * 120));
     let protected: bool = sqlx::query_scalar(
-        "select diagnostic_trace_json is not null from model_requests where id='toast_201002'",
+        "select diagnostic_trace_json is not null from model_requests where id='toast_301002'",
     )
     .fetch_one(&database.pool)
     .await
