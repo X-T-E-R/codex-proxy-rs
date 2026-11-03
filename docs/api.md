@@ -378,10 +378,13 @@ OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选
 没有显式 `previous_response_id` 时，客户端可继续提交完整历史。Provider 在同一 Client Key、会话、
 已选账号及凭据版本、出口、opening identity 和存活上游 WS 上，核实旧客户端 input 和最新完成归属后，
 默认以保存的原生 output 续接，只发送新增 input。严格 raw 匹配是快路径；普通重建按首个新增 user／tool-result
-确定轮边界，支持消息和文本分段、ID/status 重建、reasoning summary 分块或展示缺省，无需命中特定客户端模板。
+确定轮边界，支持消息和文本分段、ID/status 重建，无需命中特定客户端模板。
+reasoning 按原生 ID 或一致的显式事实逐项认领，支持项内 summary/content 分块和部分项展示缺省；
+仍显式提交的文本须对应完整原生项，不按跨项拼接或任意子串认领。
 原生历史始终保留未知项、标注、密文和工具相对顺序；客户端显式提交的业务正文、未知字段或签名冲突仍完整重建。
-工具 name 和 arguments 原字符串保持一致，结果必须完整且不重复；重新生成的 call ID 只有在调用签名唯一、
-顺序及结果关联明确时才映射为原生 call ID，映射同时用于实际发送和完整恢复。
+function/custom 两类工具结果均可确定轮边界；调用类别、name 和 arguments/input 原字符串保持一致，
+结果须同类关联、完整且不重复。重新生成的 call ID 只有在调用签名唯一、顺序及结果关联明确时才映射为原生 call ID，
+映射同时用于实际发送和完整恢复。
 恢复发送仍遵循上述 Codex reasoning 输入兼容规则，API Key 上游保持原条件
 
 每轮 instructions、tools、tool_choice、reasoning、输出格式、档位和缓存路由设置使用当前请求值，

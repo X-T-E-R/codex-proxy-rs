@@ -552,7 +552,7 @@ fn compare(
             .iter()
             .flat_map(|patch| &patch.output)
             .filter_map(|item| serde_json::from_str::<Value>(item).ok())
-            .filter(|item| item["type"] == "function_call")
+            .filter(projection::is_tool_call)
             .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
             .collect();
         match projection::boundary(&output, current, previous_input, &native_calls) {

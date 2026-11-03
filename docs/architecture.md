@@ -698,7 +698,8 @@ Continuation 受原请求的 Client Key、账号范围、Provider 和发送/交�
 - OpenAI Provider 对没有显式 `previous_response_id` 的完整请求，在最终正文规范化、关联标识映射和隐私规则后，
   核旧客户端 input、历史策略和最新完成归属后，默认复用真实 completed 原生 output。
   raw 严格匹配为快路径，其余以新增 user／tool-result 轮边界认领，不按客户端输出模板决定准入。
-  展示重建与显式业务冲突分别处理；原生完成项拥有历史内容和顺序，工具映射进入实际 tail 及原生恢复 patch。
+  展示重建与显式业务冲突分别处理；reasoning 的显式事实按原生单项认领，省略展示不合并成跨项相等门禁。
+  原生完成项拥有历史内容和顺序，function/custom 工具按类别核调用与结果，映射进入实际 tail 及原生恢复 patch。
   当前轮生成参数直接随帧发送，不与历史策略或请求私有恢复令牌的完整参数校验混用。
   基线按 Client Key、会话、已选账号及 credential revision、出口、opening identity、live lease 和最新完成归属隔离
 - 自动基线由原连接租约独占，原生 `output_item.done` 或完整终态 output 是唯一输出来源；失败、中断、取消或逐出不发布基线。

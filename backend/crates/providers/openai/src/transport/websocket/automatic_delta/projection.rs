@@ -9,7 +9,7 @@ pub(super) struct Claim {
 }
 
 /// 身份、旧 input、live lease 与最新 completed owner 已由调用方核实
-/// user / tool-result 是新增轮边界，不按客户端字段模板推测 item 数量
+/// user / 已知 tool-result 是新增轮边界，不按客户端字段模板推测 item 数量
 pub(super) fn boundary(
     output: &[Value],
     current: &[Value],
@@ -18,7 +18,7 @@ pub(super) fn boundary(
 ) -> Result<Claim, &'static str> {
     let count = current
         .iter()
-        .position(|item| is_message(item, "user") || item["type"] == "function_call_output")
+        .position(|item| is_message(item, "user") || ToolKind::result(item).is_some())
         .ok_or("turn_boundary_missing")?;
     if count > super::MAX_OUTPUT_ITEMS {
         return Err("output_claim_limit");
@@ -29,9 +29,7 @@ pub(super) fn boundary(
     // 文本分段、message 合并和已知 reasoning 的缺省不改变原生内容
     // 有意删除与正常缺省完全相同时，由现有 fork/session 合同建立新基线
     if !text_equal(&native.text, &client.text)
-        || (!client.summary.is_empty() && !text_equal(&native.summary, &client.summary))
-        || (!client.reasoning.is_empty() && !text_equal(&native.reasoning, &client.reasoning))
-        || !is_subsequence(&native.encrypted, &client.encrypted)
+        || !reasoning_matches(&native.reasoning, &client.reasoning)
         || !is_subsequence(&native.opaque, &client.opaque)
         || native.calls.len() != client.calls.len()
         || !explicit_fields_match(output, rebuilt)
@@ -39,25 +37,28 @@ pub(super) fn boundary(
         return Err("output_conflict");
     }
     let mut aliases = HashMap::new();
-    let native_ids: HashSet<_> = native.calls.iter().map(|call| call.0).collect();
+    let native_ids: HashSet<_> = native.calls.iter().map(|call| call.id).collect();
     let historical: HashSet<_> = previous_input
         .iter()
-        .filter(|item| item["type"] == "function_call")
+        .filter(|item| is_tool_call(item))
         .filter_map(|item| item["call_id"].as_str())
         .chain(native_calls.iter().map(String::as_str))
         .collect();
     let mut signatures = HashMap::new();
     for call in &native.calls {
-        *signatures.entry((call.1, call.2)).or_insert(0_usize) += 1;
+        *signatures
+            .entry((call.kind, call.name, call.input))
+            .or_insert(0_usize) += 1;
     }
     for (old, new) in native.calls.iter().zip(&client.calls) {
-        if old.1 != new.1
-            || old.2 != new.2
-            || (old.0 != new.0
-                && (native_ids.contains(new.0)
-                    || historical.contains(new.0)
-                    || signatures[&(old.1, old.2)] != 1))
-            || aliases.insert(new.0, old.0).is_some()
+        if old.kind != new.kind
+            || old.name != new.name
+            || old.input != new.input
+            || (old.id != new.id
+                && (native_ids.contains(new.id)
+                    || historical.contains(new.id)
+                    || signatures[&(old.kind, old.name, old.input)] != 1))
+            || aliases.insert(new.id, *old).is_some()
         {
             return Err("tool_conflict");
         }
@@ -73,14 +74,64 @@ fn is_message(item: &Value, role: &str) -> bool {
     item["role"] == role && item.get("type").is_none_or(|kind| kind == "message")
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum ToolKind {
+    Function,
+    Custom,
+}
+
+impl ToolKind {
+    fn call(item: &Value) -> Option<Self> {
+        match item["type"].as_str()? {
+            "function_call" => Some(Self::Function),
+            "custom_tool_call" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+
+    fn result(item: &Value) -> Option<Self> {
+        match item["type"].as_str()? {
+            "function_call_output" => Some(Self::Function),
+            "custom_tool_call_output" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn is_tool_call(item: &Value) -> bool {
+    ToolKind::call(item).is_some()
+}
+
+#[derive(Clone, Copy)]
+struct ToolCall<'a> {
+    kind: ToolKind,
+    id: &'a str,
+    name: &'a str,
+    input: &'a str,
+}
+
+impl<'a> ToolCall<'a> {
+    fn read(item: &'a Value) -> Option<Self> {
+        let kind = ToolKind::call(item)?;
+        Some(Self {
+            kind,
+            id: item["call_id"].as_str().filter(|id| !id.is_empty())?,
+            name: item["name"].as_str().filter(|name| !name.is_empty())?,
+            input: item[match kind {
+                ToolKind::Function => "arguments",
+                ToolKind::Custom => "input",
+            }]
+            .as_str()?,
+        })
+    }
+}
+
 #[derive(Default)]
 struct View<'a> {
     text: Vec<&'a str>,
-    summary: Vec<&'a str>,
-    reasoning: Vec<&'a str>,
-    encrypted: Vec<&'a Value>,
+    reasoning: Vec<&'a Value>,
     opaque: Vec<&'a Value>,
-    calls: Vec<(&'a str, &'a str, &'a str)>,
+    calls: Vec<ToolCall<'a>>,
 }
 
 impl<'a> View<'a> {
@@ -103,32 +154,10 @@ impl<'a> View<'a> {
                 )?;
             } else {
                 match item["type"].as_str()? {
-                    "reasoning" => {
-                        if let Some(summary) = item.get("summary") {
-                            text_parts(
-                                summary,
-                                &["summary_text"],
-                                &mut view.summary,
-                                &mut view.opaque,
-                            )?;
-                        }
-                        if let Some(content) = item.get("content") {
-                            text_parts(
-                                content,
-                                &["reasoning_text"],
-                                &mut view.reasoning,
-                                &mut view.opaque,
-                            )?;
-                        }
-                        if let Some(encrypted) =
-                            item.get("encrypted_content").filter(|v| !v.is_null())
-                        {
-                            view.encrypted.push(encrypted);
-                        }
-                    }
-                    "function_call" => {
-                        let call = function_call(item)?;
-                        if !calls.insert(call.0) {
+                    "reasoning" => view.reasoning.push(item),
+                    "function_call" | "custom_tool_call" => {
+                        let call = ToolCall::read(item)?;
+                        if !calls.insert(call.id) {
                             return None;
                         }
                         view.calls.push(call);
@@ -142,12 +171,54 @@ impl<'a> View<'a> {
     }
 }
 
-fn function_call(item: &Value) -> Option<(&str, &str, &str)> {
-    Some((
-        item["call_id"].as_str().filter(|id| !id.is_empty())?,
-        item["name"].as_str().filter(|name| !name.is_empty())?,
-        item["arguments"].as_str()?,
-    ))
+/// 已知原生 ID 优先定位；重建 ID 用完整显式事实按顺序认领单项，不能跨项拼接摘要
+fn reasoning_matches(native: &[&Value], rebuilt: &[&Value]) -> bool {
+    let ids: HashSet<_> = native
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    let mut remaining = native.iter();
+    rebuilt.iter().all(|item| {
+        let id = item["id"].as_str().filter(|id| ids.contains(id));
+        remaining.any(|old| {
+            id.is_none_or(|id| old["id"] == id)
+                && item
+                    .get("encrypted_content")
+                    .filter(|v| !v.is_null())
+                    .is_none_or(|encrypted| old.get("encrypted_content") == Some(encrypted))
+                && reasoning_display_matches(old, item, "summary", "summary_text")
+                && reasoning_display_matches(old, item, "content", "reasoning_text")
+                && item_fields_match(
+                    item,
+                    &[*old],
+                    &[
+                        "type",
+                        "id",
+                        "status",
+                        "summary",
+                        "content",
+                        "encrypted_content",
+                    ],
+                )
+        })
+    })
+}
+
+fn reasoning_display_matches(native: &Value, rebuilt: &Value, key: &str, kind: &str) -> bool {
+    let Some(value) = rebuilt.get(key).filter(|value| !value.is_null()) else {
+        return true;
+    };
+    let (mut text, mut opaque) = (Vec::new(), Vec::new());
+    if text_parts(value, &[kind], &mut text, &mut opaque).is_none() {
+        return false;
+    }
+    if text.is_empty() && opaque.is_empty() {
+        return true;
+    }
+    let (mut old_text, mut old_opaque) = (Vec::new(), Vec::new());
+    text_parts(&native[key], &[kind], &mut old_text, &mut old_opaque).is_some()
+        && text_equal(&old_text, &text)
+        && is_subsequence(&old_opaque, &opaque)
 }
 
 fn text_parts<'a>(
@@ -202,15 +273,10 @@ fn explicit_fields_match(native: &[Value], rebuilt: &[Value]) -> bool {
             &["type", "role", "id", "status", "content"]
         } else {
             match item["type"].as_str() {
-                Some("reasoning") => &[
-                    "type",
-                    "id",
-                    "status",
-                    "summary",
-                    "content",
-                    "encrypted_content",
-                ],
+                // reasoning 的显式字段由已认领的单项核实，不按剩余项数推测位置
+                Some("reasoning") => return true,
                 Some("function_call") => &["type", "id", "status", "call_id", "name", "arguments"],
+                Some("custom_tool_call") => &["type", "id", "status", "call_id", "name", "input"],
                 _ => return native.contains(item),
             }
         };
@@ -226,50 +292,48 @@ fn explicit_fields_match(native: &[Value], rebuilt: &[Value]) -> bool {
             candidates
         };
         *position += 1;
-        if !fields_present_match(item, candidates, known, &[]) {
-            return false;
-        }
-        for key in ["content", "summary"] {
-            if let Some(parts) = item.get(key).and_then(Value::as_array) {
-                let native_parts: Vec<_> = candidates
-                    .iter()
-                    .filter_map(|old| old.get(key).and_then(Value::as_array))
-                    .flatten()
-                    .collect();
-                for (index, part) in parts.iter().enumerate() {
-                    let candidates = if native_parts.len() == parts.len() {
-                        &native_parts[index..index + 1]
-                    } else {
-                        &native_parts
-                    };
-                    let kind = part["type"].as_str();
-                    if matches!(
-                        kind,
-                        Some(
-                            "output_text"
-                                | "input_text"
-                                | "text"
-                                | "summary_text"
-                                | "reasoning_text"
-                        )
-                    ) {
-                        let optional: &[&str] =
-                            if matches!(kind, Some("output_text" | "input_text" | "text")) {
-                                &["annotations", "logprobs"]
-                            } else {
-                                &[]
-                            };
-                        if !fields_present_match(part, candidates, &["type", "text"], optional) {
-                            return false;
-                        }
-                    } else if !candidates.contains(&part) {
+        item_fields_match(item, candidates, known)
+    })
+}
+
+fn item_fields_match(item: &Value, candidates: &[&Value], known: &[&str]) -> bool {
+    if !fields_present_match(item, candidates, known, &[]) {
+        return false;
+    }
+    for key in ["content", "summary"] {
+        if let Some(parts) = item.get(key).and_then(Value::as_array) {
+            let native_parts: Vec<_> = candidates
+                .iter()
+                .filter_map(|old| old.get(key).and_then(Value::as_array))
+                .flatten()
+                .collect();
+            for (index, part) in parts.iter().enumerate() {
+                let candidates = if native_parts.len() == parts.len() {
+                    &native_parts[index..index + 1]
+                } else {
+                    &native_parts
+                };
+                let kind = part["type"].as_str();
+                if matches!(
+                    kind,
+                    Some("output_text" | "input_text" | "text" | "summary_text" | "reasoning_text")
+                ) {
+                    let optional: &[&str] =
+                        if matches!(kind, Some("output_text" | "input_text" | "text")) {
+                            &["annotations", "logprobs"]
+                        } else {
+                            &[]
+                        };
+                    if !fields_present_match(part, candidates, &["type", "text"], optional) {
                         return false;
                     }
+                } else if !candidates.contains(&part) {
+                    return false;
                 }
             }
         }
-        true
-    })
+    }
+    true
 }
 
 fn fields_present_match(
@@ -300,7 +364,7 @@ fn fields_present_match(
 
 fn map_tail(
     tail: &mut [Value],
-    aliases: HashMap<&str, &str>,
+    aliases: HashMap<&str, ToolCall<'_>>,
     historical: HashSet<&str>,
     native_ids: HashSet<&str>,
 ) -> bool {
@@ -310,36 +374,50 @@ fn map_tail(
         .chain(aliases.keys().copied())
         .map(str::to_owned)
         .collect();
-    let mut outstanding: HashMap<String, String> = aliases
+    let mut outstanding: HashMap<_, _> = aliases
         .into_iter()
-        .map(|(alias, native)| (alias.to_owned(), native.to_owned()))
+        .map(|(alias, native)| {
+            (
+                alias.to_owned(),
+                (native.kind, native.id.to_owned(), native.name.to_owned()),
+            )
+        })
         .collect();
     let mut resolving_previous = !outstanding.is_empty();
     for item in tail {
-        match item["type"].as_str() {
-            Some("function_call_output") => {
-                let Some(call) = item["call_id"].as_str() else {
-                    return false;
-                };
-                let Some(native) = outstanding.remove(call) else {
-                    return false;
-                };
-                if native != call {
-                    item["call_id"] = Value::String(native);
-                }
-                resolving_previous &= !outstanding.is_empty();
+        if let Some(kind) = ToolKind::result(item) {
+            let Some(call) = item["call_id"].as_str() else {
+                return false;
+            };
+            let Some((expected_kind, native, name)) = outstanding.remove(call) else {
+                return false;
+            };
+            if kind != expected_kind
+                || (kind == ToolKind::Custom
+                    && item
+                        .get("name")
+                        .filter(|v| !v.is_null())
+                        .is_some_and(|value| value.as_str() != Some(name.as_str())))
+            {
+                return false;
             }
-            Some("function_call") if !resolving_previous => {
-                let Some((call, _, _)) = function_call(item) else {
-                    return false;
-                };
-                if !seen.insert(call.to_owned()) {
-                    return false;
-                }
-                outstanding.insert(call.to_owned(), call.to_owned());
+            if native != call {
+                item["call_id"] = Value::String(native);
             }
-            _ if outstanding.is_empty() => {}
-            _ => return false,
+            resolving_previous &= !outstanding.is_empty();
+        } else if is_tool_call(item) && !resolving_previous {
+            let Some(call) = ToolCall::read(item) else {
+                return false;
+            };
+            if !seen.insert(call.id.to_owned()) {
+                return false;
+            }
+            outstanding.insert(
+                call.id.to_owned(),
+                (call.kind, call.id.to_owned(), call.name.to_owned()),
+            );
+        } else if !outstanding.is_empty() {
+            return false;
         }
     }
     outstanding.is_empty()

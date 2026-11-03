@@ -4,6 +4,7 @@ use super::*;
 use tokio::{sync::mpsc, task::JoinSet};
 
 mod diagnostics;
+mod known_items;
 mod native_authority;
 mod trusted;
 
