@@ -1,0 +1,72 @@
+{
+  "contract": "cpr-successful-trace-index/2",
+  "product_candidate": "9888052ce26e106bb3cd2dc86c5d3050a6eccc9c",
+  "database": "codex_proxy",
+  "schema": "public",
+  "target_schema": 53,
+  "migration_file": "0053_successful_trace_pending_index.sql",
+  "migration_sha384": "d6eaa47ee3e93f871c3c74bb388d91a73ae25d1f9bbde4c4208bd6f32f5455de24c13ab630bb03a3e3ef0097b866c1d0",
+  "migration_sha256": "bd3f373cd93d18c82dc35b663850b582b3aaa9df456e395db3c33264f096fba4",
+  "sqlx_session_advisory_lock": 2426029098782969884,
+  "index_name": "model_requests_successful_trace_pending_idx",
+  "statement_timeout_ms": 5000,
+  "lock_timeout_ms": 500,
+  "index_states": {
+    "missing": "the named index is absent",
+    "valid": "exact migration53 shape; indisvalid, indisready and indislive are all true",
+    "invalid": "exact migration53 shape; indislive is true and indisvalid or indisready is false",
+    "drop_incomplete": "exact migration53 shape; indisvalid, indisready and indislive are all false after an interrupted concurrent drop",
+    "unexpected": "named object exists but is neither the exact valid index nor a recognized recoverable residue"
+  },
+  "actions": {
+    "inspect": {
+      "effect": "read only",
+      "success": {
+        "schema_state": [
+          "schema52",
+          "schema53",
+          "mismatch"
+        ],
+        "index_state": [
+          "missing",
+          "valid",
+          "invalid",
+          "drop_incomplete",
+          "unexpected"
+        ]
+      }
+    },
+    "prebuild": {
+      "effect": "online concurrent build; no migration ledger write",
+      "success": {
+        "schema_state": "schema52",
+        "index_state": "valid"
+      }
+    },
+    "cleanup-invalid": {
+      "effect": "with exact schema52, the SQLx advisory lock and an empty active_operations list, drop only exact-shape invalid/drop_incomplete residues concurrently; no ledger write",
+      "success": {
+        "schema_state": "schema52",
+        "index_state": "missing"
+      }
+    },
+    "revert": {
+      "effect": "app stopped; remove only checked migration53 ledger row; retain valid index and all business data",
+      "success": {
+        "schema_state": "schema52",
+        "index_state": "valid"
+      }
+    }
+  },
+  "output": "psql -X -q -A -t -v ON_ERROR_STOP=1; exactly one final JSON document on stdout after successful action",
+  "errors": {
+    "55000": "CPR_SCHEMA53_PRECONDITION; observe and resolve, no blind retry",
+    "55P03": "busy or 500ms lock timeout; observe before retry",
+    "57014": "5s statement timeout; concurrent build may leave invalid residue; inspect",
+    "transport_or_process_failure": "unknown; inspect schema/index and active_operations; never replay while an operation remains active"
+  },
+  "migration53_postcondition": {
+    "schema_state": "schema53",
+    "index_state": "valid"
+  }
+}

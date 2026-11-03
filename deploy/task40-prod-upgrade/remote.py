@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task40 一次性同 schema52 切换；只由 controller 传入父签 manifest 后运行。"""
+"""Task40 单次部署：在线准备、52/53 切换及受检恢复，消费父签 manifest"""
 import argparse
 import datetime as dt
 import gzip
@@ -81,9 +81,17 @@ def baseline_identity(value):
 
 
 def manifest(m):
-    require(type(m) is dict and m.get('accepted') is True and m.get('schema') == 52 and
-            m.get('noMigrationChanges') is True and m.get('hardCutAuthorized') is True,
-            'parent_accepted_same52_hardcut_required')
+    require(type(m) is dict and m.get('accepted') is True and m.get('hardCutAuthorized') is True,
+            'parent_accepted_hardcut_required')
+    if m.get('schema') == 52:
+        require(m.get('noMigrationChanges') is True, 'parent_accepted_same52_hardcut_required')
+    else:
+        require(m.get('schema') == 53 and m.get('noMigrationChanges') is False and
+                m.get('baselineSchema') == 52 and m.get('admissionMode') == 'healthy',
+                'parent_accepted_schema53_transition_required')
+        import schema53
+        schema53.contract(m.get('schema53Contract'))
+        require(m.get('source') == m['schema53Contract']['source'], 'schema53_runtime_product_source_mismatch')
     b = baseline_identity(m.get('baseline'))
     require(re.fullmatch('[0-9a-f]{40}', m.get('source', '')) is not None and
             re.fullmatch(IMAGE_RE, m.get('image', '')) is not None and
@@ -206,8 +214,12 @@ def sql(query):
 
 
 def facts():
-    value = json.loads(sql(FACTS_SQL))
-    require((value['schemaMax'], value['schemaCount'], value['schemaSuccess']) == (52, 52, True), 'schema52_required')
+    return json.loads(sql(FACTS_SQL))
+
+
+def require_schema(value, version):
+    require((value['schemaMax'], value['schemaCount'], value['schemaSuccess']) ==
+            (version, version, True), 'schema' + str(version) + '_required')
     return value
 
 
@@ -422,7 +434,134 @@ class Deployment:
 
     def save(self, phase):
         self.result['phase'] = phase
-        atomic(self.root / 'progress.json', self.result)
+        atomic(self.root / getattr(self, 'progress_name', 'progress.json'), self.result)
+
+    def schema_observation(self, version, pending_required=False):
+        value = require_schema(facts(), version)
+        if self.m['schema'] == 53:
+            import schema53
+            observed = schema53.inspect(self.root / 'schema53-artifacts', self.m['schema53Contract'], sql)
+            schema53.validate_observation(observed, version, pending_required)
+            self.result.setdefault('schemaObservations', []).append({'at': now(), 'facts': {
+                key: value[key] for key in ('schemaMax', 'schemaCount', 'schemaSuccess')}, 'product': observed})
+        return value
+
+    def schema_command(self, role, attempt=None):
+        import schema53
+        key = attempt or role
+        commands = self.result.setdefault('schemaCommands', {})
+        require(key not in commands, 'schema53_' + key + '_already_claimed_no_reissue')
+        commands[key] = {'role': role, 'outcome': 'intent', 'issuedAt': now()}
+        self.result['schemaWrites'] += 1
+        self.save('schema53_' + key + '_intent')
+        try:
+            outcome = schema53.execute(self.root / 'schema53-artifacts', self.m['schema53Contract'],
+                                       role, PG, 2100 if role == 'prepare' else 30)
+        except Exception:
+            outcome = {'outcome': 'unknown'}
+        commands[key].update(outcome)
+        if outcome['outcome'] != 'completed':
+            try:
+                commands[key]['observedAfter'] = schema53.inspect(
+                    self.root / 'schema53-artifacts', self.m['schema53Contract'], sql)
+            except Exception:
+                commands[key]['observationError'] = 'schema53_read_only_inspection_unavailable'
+        self.save('schema53_' + key + '_' + outcome['outcome'])
+        require(outcome['outcome'] != 'unknown', 'schema53_' + role + '_result_unknown_no_reissue')
+        require(outcome['outcome'] == 'completed', 'schema53_' + role + '_failed_inspect_before_new_GO')
+
+    def prepare(self, cleanup=False):
+        require(self.m['schema'] == 53, 'schema53_prepare_only')
+        role = 'cleanup' if cleanup else 'prepare'
+        with (self.root / ('schema53-' + role + '-claimed.json')).open('x') as claim:
+            json.dump({'at': now(), 'pid': os.getpid(), 'singleAttempt': True}, claim)
+            claim.flush()
+            os.fsync(claim.fileno())
+        self.progress_name = role + '-progress.json'
+        lock = None
+        try:
+            # 慢准备不持生命周期锁、不写维护闸，旧进程继续提供业务
+            self.gate, lock, self.binding = gate_enter(self.root, self.b)
+            self.preflight(self.binding, preparation=True)
+            lock.close()
+            lock = None
+            self.schema_observation(52)
+            self.owned(self.old, self.b['image'], True)
+            self.schema_command(role)
+            self.schema_observation(52, pending_required=not cleanup)
+            self.owned(self.old, self.b['image'], True)
+            self.gate, lock, binding = gate_enter(self.root, self.b)
+            require(binding == self.binding, 'schema53_prepare_binding_drift')
+            preserve(self.before, self.schema_observation(52, pending_required=not cleanup))
+            self.result.update(phase='schema53_cleaned' if cleanup else 'schema53_prepared',
+                               healthzObserved=health_status())
+        except Exception as error:
+            self.result['phase'] = 'schema53_preparation_requires_operator'
+            self.result['errorCode'] = str(error) if isinstance(error, RuntimeError) else 'schema53_prepare_error_suppressed'
+        finally:
+            if lock:
+                lock.close()
+            self.result['finishedAt'] = now()
+            atomic(self.root / (role + '-result.json'), self.result)
+        return self.result
+
+    def reconcile_preparation(self):
+        import schema53
+        require(self.m['schema'] == 53 and not (self.root / 'attempt-claimed.json').exists(),
+                'schema53_preparation_only_before_activation')
+        # 持全局执行锁时调用；数据库侧原 psql 也必须确定退出
+        schema53.require_quiescent(self.root, self.m['schema53Contract'], sql)
+        gate, lock, binding = gate_enter(self.root, self.b)
+        try:
+            self.gate, self.binding = gate, binding
+            self.progress_name = 'prepare-observed-progress.json'
+            self.preflight(binding, preparation=True)
+            value = self.schema_observation(52, pending_required=True)
+            self.owned(self.old, self.b['image'], True)
+            result = {'phase': 'schema53_prepared', 'at': now(), 'runId': self.root.name,
+                      'runtime': self.old, 'facts': value, 'healthzObserved': health_status(),
+                      'origin': 'read_only_reconciliation'}
+            atomic(self.root / 'prepare-observed.json', result)
+            return result
+        finally:
+            lock.close()
+
+    def preparation_admission(self):
+        if self.m['schema'] == 52:
+            return
+        import schema53
+        schema53.require_quiescent(self.root, self.m['schema53Contract'], sql)
+        path = self.root / 'prepare-observed.json'
+        if not path.exists():
+            path = self.root / 'prepare-result.json'
+        prepared = json.loads(path.read_text())
+        require(prepared.get('phase') == 'schema53_prepared' and prepared.get('runId') == self.root.name,
+                'schema53_online_preparation_required')
+        self.result['preparationReceipt'] = path.name
+        self.result['schema53Contract'] = self.m['schema53Contract']
+        self.result['targetSchema'] = 53
+
+    def rollback_schema(self):
+        if self.m['schema'] == 52:
+            return
+        current = container()
+        require(not current['running'] and
+                (self.gate / 'maintenance').read_text() == self.root.name,
+                'schema53_rollback_requires_stopped_owned_generation')
+        import schema53
+        observed = schema53.require_quiescent(self.root, self.m['schema53Contract'], sql)
+        # 产品脚本负责逐条校验迁移身份；消费者不猜可删除的记录
+        prior = self.result.get('schemaCommands', {}).get('rollback')
+        if prior is None:
+            self.schema_command('rollback')
+        elif (prior.get('outcome') == 'failed' and getattr(self, 'operator_takeover', False) and
+              observed.get('schema_state') == 'schema53'):
+            # 新恢复 GO 只给已知失败一条独立接管声明；未知动作仅能观察其结果
+            self.schema_observation(53, pending_required=True)
+            self.schema_command('rollback', attempt='rollback_takeover')
+        self.schema_observation(52, pending_required=True)
+        self.result['schemaRollback'] = {'phase': 'verified52', 'at': now()}
+        self.save('schema53_rollback_verified52')
 
     def compose(self, args):
         cmd = ['docker', 'compose', '--project-directory', self.workdir, '--env-file', str(BASE / '.env'), '-p', SERVICE]
@@ -457,7 +596,7 @@ class Deployment:
         evidence = disk_recovery_evidence(old, self.m['degradedEvidence'])
         return dict(evidence, mode='disk_logging_recovery')
 
-    def preflight(self, binding):
+    def preflight(self, binding, preparation=False):
         old = container()
         bound_runtime(old, self.b)
         require(binding['runtime'] == {k: old[k] for k in ('id', 'project', 'service', 'revision')}, 'restart_binding_runtime_drift')
@@ -481,8 +620,9 @@ class Deployment:
         require(pin(BASE / '.env')[2] == self.b['image'] and self.effective_image() == self.b['image'],
                 'target_service_image_or_pin_drift')
         require(shutil.disk_usage(BASE).free >= 2 * 1024**3, 'disk_space_low')
-        self.result['baselineHealthAdmission'] = self.admit_baseline_health(old)
-        self.before = facts()
+        self.result['baselineHealthAdmission'] = ({'mode': 'online_preparation', 'healthz': health_status()}
+                                                if preparation else self.admit_baseline_health(old))
+        self.before = self.schema_observation(52, pending_required=not preparation)
         self.file_stamps = self.stamps()
         self.result.update(beforeRuntime=old, beforeFacts=self.before, targetImage=target,
                            admittedFileStamps=self.file_stamps, envOpaqueDigest=opaque_env_digest(BASE / '.env'),
@@ -641,9 +781,11 @@ class Deployment:
         else:
             self.owned(self.old, previous_pin, False)
         previous = current or self.old
+        self.rollback_schema()
         old = self.start(previous, previous_pin, self.b['image'], self.old['imageId'], self.b['source'], 'rollback')
-        preserve(self.before, facts())
-        self.result.update(rollbackRuntime=old, rollbackHealthz=204, afterFacts=facts())
+        after = self.schema_observation(52, pending_required=self.m['schema'] == 53)
+        preserve(self.before, after)
+        self.result.update(rollbackRuntime=old, rollbackHealthz=204, afterFacts=after)
         self.save('rollback_verified_pending_gate')
 
     def settle_gate(self):
@@ -671,7 +813,9 @@ class Deployment:
         updated = dict(self.binding)
         updated['runtime'] = {k: current[k] for k in ('id', 'project', 'service', 'revision')}
         # 先核健康和完整保全再放行 watchdog
-        preserve(self.result['beforeFacts'], facts())
+        preserve(self.result['beforeFacts'], self.schema_observation(
+            self.m['schema'] if phase == 'candidate_verified_pending_gate' else 52,
+            pending_required=self.m['schema'] == 53))
         atomic(self.gate / 'binding.json', updated)
         require(json.loads((self.gate / 'binding.json').read_text()) == updated, 'gate_rebind_not_persisted')
         require(self.stamps() == self.file_stamps and
@@ -691,12 +835,13 @@ class Deployment:
     def execute(self):
         gate_lock = None
         try:
+            self.preparation_admission()
             self.gate, gate_lock, self.binding = gate_enter(self.root, self.b)
             self.preflight(self.binding)
             self.owned(self.old, self.b['image'], True)
             # 硬切有在飞请求时，退出代际恢复负责 PG 终结和 Redis 槽位 CAS；不探针、不重放
             self.result['beforeCutActivity'] = self.activity()
-            self.before = facts()
+            self.before = self.schema_observation(52, pending_required=self.m['schema'] == 53)
             preserve(self.result['beforeFacts'], self.before)
             self.result['beforeCutHealthAdmission'] = self.admit_baseline_health(
                 self.owned(self.old, self.b['image'], True))
@@ -708,7 +853,7 @@ class Deployment:
             self.old_recovered = True
             candidate = self.start(self.old, self.b['image'], self.m['image'], self.target['id'], self.m['source'], 'candidate')
             self.result['candidateRuntime'] = candidate
-            after = facts()
+            after = self.schema_observation(self.m['schema'], pending_required=self.m['schema'] == 53)
             preserve(self.before, after)
             self.owned(candidate, self.m['image'], True)
             self.result.update(afterRuntime=candidate, afterFacts=after, healthz=204)
@@ -786,13 +931,16 @@ class Deployment:
             _, candidate_receipt = self.recovery_receipt(candidate)
             require(candidate_receipt and candidate_receipt['phase'] == 'complete',
                     'takeover_candidate_receipt_unproven')
-        preserve(self.before, facts())
+        preserve(self.before, self.schema_observation(
+            self.m['schema'] if phase == 'candidate_verified_pending_gate' else 52,
+            pending_required=self.m['schema'] == 53))
         self.result['restartRecoveryGate'] = {'phase': 'rebound', 'runtime': self.binding['runtime']}
         self.result['phase'] = 'deployed' if phase == 'candidate_verified_pending_gate' else 'rolled_back_same52'
         self.result['success'] = phase == 'candidate_verified_pending_gate'
         self.result['rollback'] = phase == 'rollback_verified_pending_gate'
 
     def resume(self, retry_readonly=False, active_held=False):
+        self.operator_takeover = True
         # 每次接管保留独立终态；无结果接管以进程退出和未改进度证据重获一次新 GO
         origin = self.root / 'result.json'
         prior = self.root / 'takeover-result.json'
@@ -912,7 +1060,7 @@ class Deployment:
                                                             self.b['image'], 'rollback', limit=3)
                         require(current['running'] and current['health'] == 'healthy' and health(),
                                 'takeover_rollback_health_drift')
-                        preserve(self.before, facts())
+                        preserve(self.before, self.schema_observation(52, pending_required=self.m['schema'] == 53))
                         self.result['rollbackRuntime'] = current
                         self.save('rollback_verified_pending_gate')
                     else:
@@ -1038,7 +1186,7 @@ def baseline(mode='healthy'):
         bound_runtime(container(), b)
     return {'capturedAt': now(), 'baseline': b, 'admissionMode': mode, 'runtime': old,
             'envPin': b['image'], 'healthz': evidence['healthz'], 'degradedEvidence': evidence,
-            'schemaAndPreservationFacts': facts(), 'activity': app.activity(),
+            'schemaAndPreservationFacts': require_schema(facts(), 52), 'activity': app.activity(),
             'freeBytes': shutil.disk_usage(BASE).free,
             'recoveryBindingRuntime': binding['runtime'], 'helperSource': binding['helperSource'],
             'helperImage': binding['helperImage'], 'maintenanceExists': False,
@@ -1069,7 +1217,8 @@ def verify(root):
     app = Deployment(root)
     app.workdir, app.files = current['workingDir'], current['composeFiles'].split(',')
     require(app.effective_image() == expected_image, 'fresh_compose_drift')
-    fresh = facts()
+    fresh = app.schema_observation(target['schema'] if result['phase'] == 'deployed' else 52,
+                                   pending_required=target['schema'] == 53)
     preserve(result['beforeFacts'], fresh)
     return {'phase': 'verified', 'capturedAt': now(), 'runId': root.name,
             'runtime': current, 'envPin': expected_image, 'serviceImage': expected_image,
@@ -1078,7 +1227,8 @@ def verify(root):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['run', 'resume', 'retry-admission', 'receipt', 'verify'])
+    parser.add_argument('action', choices=['run', 'prepare', 'cleanup', 'reconcile-preparation',
+                                          'resume', 'retry-admission', 'receipt', 'verify'])
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--GO', action='store_true')
     parser.add_argument('--retry-readonly', action='store_true')
@@ -1110,6 +1260,14 @@ def main():
     lock_path = BASE / '.runtime/deployments/task40-active.lock'
     with lock_path.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if args.action == 'reconcile-preparation':
+            print(json.dumps(app.reconcile_preparation()))
+            return
+        if args.action in ('prepare', 'cleanup'):
+            require(args.GO and (args.root / ('schema53-' + args.action + '-launch-claimed.json')).exists() and
+                    not (args.root / 'attempt-claimed.json').exists(), 'new_schema53_preparation_GO_required')
+            print(json.dumps(app.prepare(cleanup=args.action == 'cleanup')))
+            return
         if args.action == 'resume':
             retry = args.retry_readonly
             launch = args.root / ('takeover-retry-launch-claimed.json' if retry else 'takeover-launch-claimed.json')

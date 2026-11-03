@@ -45,8 +45,18 @@ print(json.dumps(namespace['baseline'](payload['mode'])))
     return ssh(code, {'code': (HERE / 'remote.py').read_text(encoding='utf-8'), 'mode': mode}, timeout=90)
 
 
-def provision(m, root):
-    code = """import ast,json,os
+def provision(m, root, artifacts=None):
+    import base64
+    files = {}
+    if m['schema'] == 53:
+        import schema53
+        remote.require(artifacts is not None, 'schema53_artifact_directory_required')
+        files['schema53.py'] = base64.b64encode((HERE / 'schema53.py').read_bytes()).decode()
+        for role in schema53.ROLES:
+            item = m['schema53Contract']['artifacts'][role]
+            files['schema53-artifacts/' + item['name']] = base64.b64encode(
+                schema53.artifact_bytes(artifacts, m['schema53Contract'], role)).decode()
+    code = """import ast,base64,json,os
 from pathlib import Path
 os.umask(0o077)
 r=Path(payload['root'])
@@ -55,9 +65,15 @@ ast.parse(payload['code'])
 r.mkdir(mode=0o700)
 (r/'remote.py').write_text(payload['code'])
 (r/'accepted.json').write_text(json.dumps(payload['manifest']))
+for name,content in payload['files'].items():
+ p=r/name
+ assert p.resolve().is_relative_to(r)
+ p.parent.mkdir(exist_ok=True)
+ p.write_bytes(base64.b64decode(content))
 print(json.dumps({'phase':'provisioned'}))
 """
-    return ssh(code, {'root': root, 'code': (HERE / 'remote.py').read_text(encoding='utf-8'), 'manifest': m})
+    return ssh(code, {'root': root, 'code': (HERE / 'remote.py').read_text(encoding='utf-8'),
+                      'manifest': m, 'files': files})
 
 
 def receipt(root):
@@ -92,16 +108,27 @@ with (r/'launch.guard').open('a') as lock:
     return ssh(code, root)
 
 
-def observe(root, seconds=4500, clock=time.monotonic, sleep=time.sleep):
+def preparation_receipt(root, cleanup=False):
+    code = """import json
+from pathlib import Path
+r=Path(payload['root'])
+role='cleanup' if payload['cleanup'] else 'prepare'
+p=r/(role+'-result.json')
+print(p.read_text() if p.exists() else json.dumps({'phase':'pending'}))
+"""
+    return ssh(code, {'root': root, 'cleanup': cleanup})
+
+
+def observe(root, seconds=4500, clock=time.monotonic, sleep=time.sleep, preparation=False, cleanup=False):
     until = clock() + seconds
     unstarted = 0
     while clock() < until:
         try:
-            value = receipt(root)
+            value = preparation_receipt(root, cleanup) if preparation else receipt(root)
             if value['phase'] != 'pending':
                 return value
             unstarted = unstarted + 1 if not value.get('attemptClaimed') else 0
-            if unstarted >= 3:
+            if not preparation and unstarted >= 3:
                 value = abandon_unstarted(root)
                 if value['phase'] != 'pending':
                     return value
@@ -112,9 +139,10 @@ def observe(root, seconds=4500, clock=time.monotonic, sleep=time.sleep):
 
 
 def pull_exact(root):
-    code = """import json,subprocess
+    code = """import json,subprocess,sys
 from pathlib import Path
 r=Path(payload)
+sys.path.insert(0,str(r))
 namespace={'__name__':'task40_image_admission'}
 exec(compile((r/'remote.py').read_text(),'remote.py','exec'),namespace)
 m=namespace['manifest'](json.loads((r/'accepted.json').read_text()))
@@ -201,6 +229,30 @@ print(json.dumps({'phase':'detached_started','pid':p.pid}))
     return ssh(code, root)
 
 
+def start_remote_preparation(root, cleanup=False):
+    code = """import json,subprocess
+from pathlib import Path
+r=Path(payload['root'])
+role='cleanup' if payload['cleanup'] else 'prepare'
+assert not (r/'attempt-claimed.json').exists()
+with (r/('schema53-'+role+'-launch-claimed.json')).open('x') as file:
+ json.dump({'singleAttempt':True},file)
+with (r/(role+'-console.private')).open('xb') as log:
+ p=subprocess.Popen(['python3',str(r/'remote.py'),role,'--root',str(r),'--GO'],stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True,close_fds=True)
+print(json.dumps({'phase':'detached_preparation_started','pid':p.pid}))
+"""
+    return ssh(code, {'root': root, 'cleanup': cleanup})
+
+
+def reconcile_preparation(root):
+    code = """import json,subprocess
+r=payload
+p=subprocess.run(['python3',r+'/remote.py','reconcile-preparation','--root',r],capture_output=True,timeout=40)
+print(p.stdout.decode() if p.returncode==0 else json.dumps({'phase':'schema53_preparation_unverified'}))
+"""
+    return ssh(code, root, timeout=55)
+
+
 @contextmanager
 def action_lock(path, seconds=420):
     import msvcrt
@@ -228,19 +280,36 @@ def work(run_dir):
         j = read(jpath)
         try:
             remote.require(not (run_dir / 'recovery-requested').exists(), 'locally_fenced')
-            j['phase'] = 'provision_intent'; save(jpath, j)
-            # provision ack 失联可能已建远端目录；不猜测是否可重发
-            provision(j['accepted'], j['remoteRoot'])
+            operation = j.get('operation', 'launch')
+            if operation in ('launch', 'prepare'):
+                remote.require(not j.get('provisionIntent'), 'provision_already_claimed_no_reissue')
+                j['phase'] = 'provision_intent'; j['provisionIntent'] = True; save(jpath, j)
+                # provision ack 失联可能已建远端目录；不猜测是否可重发
+                if operation == 'prepare':
+                    provision(j['accepted'], j['remoteRoot'], j['schema53Artifacts'])
+                else:
+                    provision(j['accepted'], j['remoteRoot'])
+                remote.require(not (run_dir / 'recovery-requested').exists(), 'locally_fenced')
+                j['phase'] = 'pulling_exact_image'; save(jpath, j)
+                pull_exact(j['remoteRoot'])
             remote.require(not (run_dir / 'recovery-requested').exists(), 'locally_fenced')
-            j['phase'] = 'pulling_exact_image'; save(jpath, j)
-            pull_exact(j['remoteRoot'])
-            remote.require(not (run_dir / 'recovery-requested').exists(), 'locally_fenced')
-            j['phase'] = 'launch_intent'; j['remoteMayHaveStarted'] = True; save(jpath, j)
+            preparing = operation in ('prepare', 'cleanup')
+            claim = 'schema53' + operation.title() + 'Intent' if preparing else 'launchIntent'
+            remote.require(not j.get(claim), 'local_action_already_claimed_no_reissue')
+            j[claim] = True
+            j['phase'] = operation + '_intent'
+            j['schemaMayHaveStarted' if preparing else 'remoteMayHaveStarted'] = True
+            save(jpath, j)
             try:
-                j['launch'] = start_remote(j['remoteRoot']); save(jpath, j)
+                j['launch'] = (start_remote_preparation(j['remoteRoot'], cleanup=operation == 'cleanup')
+                               if preparing else start_remote(j['remoteRoot']))
             except RuntimeError:
-                j['launchAckUnknown'] = True; save(jpath, j)
-            j['remote'] = observe(j['remoteRoot'])
+                j['launchAckUnknown'] = True
+            save(jpath, j)
+            j['remote'] = (observe(j['remoteRoot'], preparation=True, cleanup=operation == 'cleanup')
+                           if preparing else observe(j['remoteRoot']))
+            if preparing:
+                j[operation + 'Receipt'] = j['remote']
             save(jpath, j)
             if j['remote']['phase'] in ('deployed', 'rolled_back_same52'):
                 j['fresh'] = verify_remote(j['remoteRoot'])
@@ -256,10 +325,14 @@ def supervise(run_dir):
         child = subprocess.Popen([sys.executable, '-B', str(HERE / 'controller.py'), 'worker', '--run-dir', str(run_dir)],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         child.wait()
+        # 释放全局锁前固定本阶段，避免新 GO 先改 operation 而错写阶段收据
+        j = read(run_dir / 'controller.json')
     # supervisor 与 worker 均已退出持锁范围；不自动重发远端动作
-    j = read(run_dir / 'controller.json')
-    save(run_dir / 'supervisor.json', {'phase': j['phase'], 'workerExit': child.returncode,
-                                      'localLocks': 'unheld', 'capturedAt': remote.now()})
+    value = {'phase': j['phase'], 'workerExit': child.returncode,
+             'localLocks': 'unheld', 'capturedAt': remote.now()}
+    save(run_dir / 'supervisor.json', value)
+    if j['accepted']['schema'] == 53:
+        save(run_dir / ('supervisor-' + j['operation'] + '.json'), value)
 
 
 def recover_local(run_dir):
@@ -270,6 +343,9 @@ def recover_local(run_dir):
             j = read(run_dir / 'controller.json')
             if j.get('remoteMayHaveStarted'):
                 j['remote'] = receipt(j['remoteRoot'])
+                save(run_dir / 'controller.json', j)
+            elif j.get('schemaMayHaveStarted'):
+                j['remote'] = preparation_receipt(j['remoteRoot'], cleanup=j['operation'] == 'cleanup')
                 save(run_dir / 'controller.json', j)
             return j
 
@@ -313,32 +389,70 @@ def takeover(run_dir):
                     'launchAckUnknown': j.get('takeoverAckUnknown', False)}
 
 
+def spawn_supervisor(run_dir):
+    child = subprocess.Popen([sys.executable, '-B', str(HERE / 'controller.py'), 'supervise', '--run-dir', str(run_dir)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+    return {'phase': 'detached_supervisor_started', 'pid': child.pid, 'runDirectory': str(run_dir)}
+
+
+def continue_schema53(run_dir, operation):
+    remote.require(operation in ('activate', 'cleanup'), 'schema53_operation_invalid')
+    with action_lock(HERE / 'controller-active.lock'):
+        with action_lock(run_dir / 'worker.lock'):
+            j = read(run_dir / 'controller.json')
+            remote.require(j['accepted']['schema'] == 53 and j.get('schemaMayHaveStarted') and
+                           not j.get('remoteMayHaveStarted') and not j.get('launchIntent') and
+                           not (run_dir / 'recovery-requested').exists(), 'schema53_run_already_activated_or_fenced')
+            authorization = operation + 'Authorized'
+            remote.require(not j.get(authorization), 'schema53_operation_already_authorized_no_reissue')
+            if operation == 'activate':
+                j['preparationAdmission'] = reconcile_preparation(j['remoteRoot'])
+                remote.require(j['preparationAdmission'].get('phase') == 'schema53_prepared',
+                               'schema53_preparation_unverified_no_activation')
+            else:
+                remote.require(not j.get('schema53CleanupIntent'), 'schema53_cleanup_already_claimed_no_reissue')
+            j['operation'] = operation
+            j[authorization] = True
+            j['phase'] = operation + '_authorized'
+            save(run_dir / 'controller.json', j)
+            return spawn_supervisor(run_dir)
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('action', choices=['baseline', 'launch', 'supervise', 'worker', 'status', 'recover-local', 'takeover'])
+    p.add_argument('action', choices=['baseline', 'launch', 'prepare', 'activate', 'cleanup', 'preparation-status',
+                                     'supervise', 'worker', 'status', 'recover-local', 'takeover'])
     p.add_argument('--accepted', type=Path)
     p.add_argument('--run-dir', type=Path)
     p.add_argument('--GO', action='store_true')
     p.add_argument('--mode', choices=['healthy', 'disk_logging_recovery'], default='healthy')
+    p.add_argument('--artifacts', type=Path, default=HERE / 'schema53-contract')
     a = p.parse_args()
     if a.action == 'baseline':
         print(json.dumps(baseline(a.mode), indent=2))
         return
-    if a.action == 'launch':
+    if a.action in ('launch', 'prepare'):
         remote.require(os.name == 'nt' and a.GO and a.accepted, 'Windows_new_GO_and_manifest_required')
         m = remote.manifest(read(a.accepted))
+        remote.require((a.action == 'launch' and m['schema'] == 52) or
+                       (a.action == 'prepare' and m['schema'] == 53 and a.artifacts),
+                       'schema53_requires_online_prepare_then_new_activation_GO')
+        if a.action == 'prepare':
+            import schema53
+            for role in schema53.ROLES:
+                schema53.artifact_bytes(a.artifacts, m['schema53Contract'], role)
         run_dir = HERE / ('task40-' + uuid.uuid4().hex)
         run_dir.mkdir(mode=0o700)
-        j = {'runId': run_dir.name, 'phase': 'prepared', 'accepted': m,
+        j = {'runId': run_dir.name, 'phase': 'prepared', 'accepted': m, 'operation': a.action,
              'remoteRoot': '/opt/codex-proxy-rs/.runtime/deployments/' + run_dir.name,
              'startedAt': remote.now(), 'providerProbes': 0, 'channelMutations': 0}
+        if a.artifacts:
+            j['schema53Artifacts'] = str(a.artifacts.resolve())
         save(run_dir / 'controller.json', j)
         subprocess.run(['icacls', str(run_dir), '/inheritance:r', '/grant:r', os.getlogin() + ':(OI)(CI)F'],
                        capture_output=True, check=True)
-        child = subprocess.Popen([sys.executable, '-B', str(HERE / 'controller.py'), 'supervise', '--run-dir', str(run_dir)],
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
-        print(json.dumps({'phase': 'detached_supervisor_started', 'pid': child.pid, 'runDirectory': str(run_dir)}))
+        print(json.dumps(spawn_supervisor(run_dir)))
         return
     remote.require(a.run_dir and a.run_dir.resolve().parent == HERE and
                    a.run_dir.name.startswith('task40-') and (a.run_dir / 'controller.json').exists(), 'owned_run_required')
@@ -350,6 +464,12 @@ def main():
     elif a.action == 'takeover':
         remote.require(os.name == 'nt' and a.GO, 'Windows_new_operator_recovery_GO_required')
         print(json.dumps(takeover(a.run_dir)))
+    elif a.action in ('activate', 'cleanup'):
+        remote.require(os.name == 'nt' and a.GO, 'Windows_new_schema53_operation_GO_required')
+        print(json.dumps(continue_schema53(a.run_dir, a.action)))
+    elif a.action == 'preparation-status':
+        j = read(a.run_dir / 'controller.json')
+        print(json.dumps(reconcile_preparation(j['remoteRoot'])))
     else:
         j = read(a.run_dir / 'controller.json')
         if (a.run_dir / 'supervisor.json').exists():

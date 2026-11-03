@@ -3,14 +3,27 @@ name: Task40 production candidate verification
 on:
   push:
     branches: [task40/prod-upstream-v334-20261027]
+    paths-ignore:
+      - 'deploy/task40-prod-upgrade/**'
+      - '.github/scripts/task40-*.py'
+      - '.github/workflows/task40.yml'
   workflow_dispatch:
+    inputs:
+      verify_image:
+        description: 'Existing immutable runtime image for schema53 deployment verification only'
+        type: string
+        default: ''
+      verify_source:
+        description: 'Exact runtime source SHA carried by verify_image'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   quality:
-    if: github.ref == 'refs/heads/task40/prod-upstream-v334-20261027'
+    if: github.ref == 'refs/heads/task40/prod-upstream-v334-20261027' && inputs.verify_image == ''
     uses: ./.github/workflows/_quality.yml
     with:
       ref: ${{ github.sha }}
@@ -18,7 +31,7 @@ jobs:
       run_frontend: true
 
   candidate-image:
-    if: github.ref == 'refs/heads/task40/prod-upstream-v334-20261027'
+    if: github.ref == 'refs/heads/task40/prod-upstream-v334-20261027' && inputs.verify_image == ''
     needs: [quality]
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -104,4 +117,36 @@ jobs:
         with:
           name: task40-image-${{ github.sha }}
           path: ${{ runner.temp }}/task40-image.txt
+          if-no-files-found: error
+
+  deployment-carrier:
+    if: github.ref == 'refs/heads/task40/prod-upstream-v334-20261027' && github.event_name == 'workflow_dispatch' && inputs.verify_image != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout deployment carrier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Verify deployment journal and recovery simulations
+        run: python3 -B -m unittest discover -s deploy/task40-prod-upgrade -p 'test_*.py' -v
+
+      - name: Verify exact runtime schema53 upgrade and checked recovery
+        env:
+          VERIFY_IMAGE: ${{ inputs.verify_image }}
+          VERIFY_SOURCE: ${{ inputs.verify_source }}
+        run: >-
+          python3 -B .github/scripts/task40-schema53-smoke.py
+          --image "$VERIFY_IMAGE" --source "$VERIFY_SOURCE"
+          --output "$RUNNER_TEMP/task40-schema53.json"
+
+      - name: Preserve schema and recovery evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: task40-schema53-${{ github.sha }}
+          path: ${{ runner.temp }}/task40-schema53.json
           if-no-files-found: error
