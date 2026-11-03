@@ -131,7 +131,7 @@ index_status as (
           and pg_get_expr(i.indpred, i.indrelid) = '((outcome = ''succeeded''::text) AND (diagnostic_trace_json IS NOT NULL))') then 'drop_incomplete'
  else 'unexpected' end as state
 )
-select json_build_object('contract','cpr-successful-trace-index/2','schema_state',ledger.state,
+select json_build_object('contract','cpr-successful-trace-index/3','schema_state',ledger.state,
  'schema_version',(select max(version) from _sqlx_migrations),'index_state',index_status.state,
  'active_operations',(select coalesce(json_agg(json_build_object('pid',pid,'application_name',application_name,'state',state,'wait_event_type',wait_event_type,'wait_event',wait_event)),'[]'::json)
  from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid()
@@ -260,7 +260,7 @@ index_status as (
           and pg_get_expr(i.indpred, i.indrelid) = '((outcome = ''succeeded''::text) AND (diagnostic_trace_json IS NOT NULL))') then 'drop_incomplete'
  else 'unexpected' end as state
 )
-select json_build_object('contract','cpr-successful-trace-index/2','schema_state',ledger.state,
+select json_build_object('contract','cpr-successful-trace-index/3','schema_state',ledger.state,
  'schema_version',(select max(version) from _sqlx_migrations),'index_state',index_status.state,
  'active_operations',(select coalesce(json_agg(json_build_object('pid',pid,'application_name',application_name,'state',state,'wait_event_type',wait_event_type,'wait_event',wait_event)),'[]'::json)
  from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid()

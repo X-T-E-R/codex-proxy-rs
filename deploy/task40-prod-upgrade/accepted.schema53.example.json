@@ -19,11 +19,11 @@
     "source": "9888052ce26e106bb3cd2dc86c5d3050a6eccc9c",
     "evidence": "",
     "artifacts": {
-      "contract": {"name": "contract.json", "sha256": "13260867bf53844a2be42b7b6bdacb67c657b7d954357b606fbb5055ea15ce66"},
-      "inspect": {"name": "inspect.sql", "sha256": "f211ee195ce794c9ededb1dd6b499be4251b28adbc3f506ac898b6bb69433372"},
-      "prepare": {"name": "prebuild.sql", "sha256": "9849a62099d48eadc41d06951b970107fe04a7e13aa1daf582d1b6e9f20266fe"},
-      "cleanup": {"name": "cleanup-invalid.sql", "sha256": "7ebb23b870d6f21de5af9bb9af964be01fd28fcc351a2dd67187164b91823fcd"},
-      "rollback": {"name": "revert.sql", "sha256": "bd1e86668be2756925a9d99c5bddfb1d05f5cf35937bc05714f3b6e3b4f463a2"}
+      "contract": {"name": "contract.json", "sha256": "3e85ac340c0f6733e68844249ebff6a52e7544143cee1511f7d97e5a3c549c7d"},
+      "inspect": {"name": "inspect.sql", "sha256": "56644d1d62183e73bf55c512c09f0fb8eaea18e15c8068db6ba5d33f8151ff51"},
+      "prepare": {"name": "prebuild.sql", "sha256": "4df5975554ee4c5390a6d00f356f53346aa7a6b0329a7e90a2d50bd0191ab361"},
+      "cleanup": {"name": "cleanup-invalid.sql", "sha256": "8369797e35a72078795fd8182a09cb644b03947526cba7484dbed23b5ef05647"},
+      "rollback": {"name": "revert.sql", "sha256": "65d637973d9b06ea7195cd010685dda632a14b0f52e72e48347ed4654a26a758"}
     }
   }
 }

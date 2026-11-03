@@ -13,7 +13,7 @@ python -B deploy/task40-prod-upgrade/controller.py baseline
 父级将输出中的 `baseline` 原样写入独立 manifest，绑定现役的 `source`、不可变 `image`、`containerId` 和 `startedAt`，再填写候选精确40位 source、完整 digest URL、`migrationEvidence` 和 `acceptanceEvidence`。精确镜像须为 linux/amd64，RepoDigests 包含该 URL，revision 标签等于 source；本地精确镜像已存在时核身份后使用，仅确认不存在时 pull
 
 - 同 schema52：使用 `accepted.example.json`，迁移字节冻结、插件协议不变，同镜像启动、Admin、恢复及功能验收完成后签发
-- schema52→53：使用 `accepted.schema53.example.json`，`source` 与 `schema53Contract.source` 必须一致，合同为 `cpr-successful-trace-index/2`。`schema53Contract.artifacts` 绑定产品 owner 的五份原文字节，`evidence` 指向该合同及同镜像验收。SQL 原文位于 `schema53-contract/`，不改写索引定义或迁移身份
+- schema52→53：使用 `accepted.schema53.example.json`，`source` 与 `schema53Contract.source` 必须一致，合同为 `cpr-successful-trace-index/3`。`schema53Contract.artifacts` 绑定产品 owner 的五份原文字节，`evidence` 指向该合同及同镜像验收。SQL 原文位于 `schema53-contract/`，不改写索引定义或迁移身份；已有 `/2` run 保留其冻结工件
 
 父级批准硬切及同代际在飞请求终结后，才将 `accepted`、`hardCutAuthorized` 设为 `true`。每个新 run 重新取基线及授权，已终结 run 的 manifest、GO 和收据不重放
 
@@ -29,7 +29,7 @@ schema53 只接受 `admissionMode: "healthy"`。准备阶段可以记录现役�
    python -B deploy/task40-prod-upgrade/controller.py prepare --accepted <父签schema53-manifest> --GO
    ```
 
-   记录返回的 `<新run目录>`。`prepare` 不停止应用、不写 maintenance，也不在慢预建期间占用生命周期锁。产品 SQL 在同一 psql session 中持 SQLx advisory lock，以5秒语句、500毫秒锁预算并发预建；成功要求精确 `schema52 + valid`，不登记53
+   记录返回的 `<新run目录>`。`prepare` 不停止应用、不写 maintenance，也不在慢预建期间占用生命周期锁。产品 SQL 在同一 psql session 中持 SQLx advisory lock，仅对 missing 索引顺序执行 SET120秒 → CIC → SET5秒；前后检查、valid-noop、cleanup、revert 仍为5秒语句，锁等待均为500毫秒。prebuild 的进程传输等待为180秒，容纳120秒CIC及连接/短检查；cleanup、revert 为30秒。传输中断仍记 unknown。准备成功要求精确 `schema52 + valid`，不登记53
 
 2. 观察准备收据及数据库现状：
 
@@ -59,6 +59,18 @@ schema53 只接受 `admissionMode: "healthy"`。准备阶段可以记录现役�
 每次 schema53 GO 会先写 `pendingOperation` 并把该动作绑定到 supervisor/worker；前一阶段待启动、执行或发布收据时，下一 GO 会被阻断。supervisor 在同一全局锁内先保存独立阶段收据、再更新 `supervisor.json` 摘要，最后清除 pending。收据的 `localLocks` 记录发布时 worker 已退出、controller 仍持锁；当前锁状态由 fresh verify 核实。pending 留存时先观察收据及原进程，不重复启动
 
 `55000` 为产品前提不符，`55P03` 为忙或锁超时，`57014` 为语句超时；失败后先 inspect 再决定新的授权。进程/传输失败、缺少最终单份JSON均记 unknown，每个动作仅声明并下发一次
+
+准备或清理的前置阻断保存 `preparationStage`、`preparationFailure` 的异常类型/errno及 `zeroSqlConfirmed`，不保存异常正文。生命周期锁忙为 `restart_gate_lifecycle_busy`，部署执行锁忙为 `schema53_deployment_busy`；两者均保留 claim 和独立失败收据
+
+原 run 已结束且同角色终态明确 `schemaWrites=0`、没有 `schemaCommands` 时，父级可签 fresh `/3` manifest 及新的恢复 GO：
+
+```powershell
+python -B deploy/task40-prod-upgrade/controller.py recover-preparation --run-dir <原run目录> --accepted <父签新schema53-manifest> --GO
+```
+
+该入口仅为原 `prepare` 或 `cleanup` 创建同角色的新 linked run，返回的目录用于后续 status。新 manifest 必须绑定相同候选与精确旧代际；控制器派生 `preparationRecovery`，绑定原 run、角色及终态收据字节身份。原 PID 必须已退出、没有激活声明或临时收据、执行锁可得；执行前重新核原收据、全条祖先链、现役、schema52及空 `active_operations`。历史收据缺少诊断字段时仍按原计数/Commands/claim核实，不推测异常原因
+
+本地和远端的唯一后继声明放在原目录之外，原 run 的 journal、SQL、claim及失败收据全部保留。后继已预留后，原 run 不再 activate、cleanup 或再派第二后继；provision/launch确认丢失只观察该子 run。子 run 若也有明确零SQL终态，可另签 GO 从该子 run 接续；已有 SQL 声明、unknown、缺终态或仍有进程时保持观察，不借祖先 run 重发。新 cleanup 成功后仍须另签新 prepare run，prepare 成功后再签 activate GO
 
 ## 同 schema52：一次授权切换
 

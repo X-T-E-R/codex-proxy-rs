@@ -25,7 +25,7 @@ def accepted():
 
 
 def observation(version=52, index='valid', active=None):
-    return {'contract': 'cpr-successful-trace-index/2', 'schema_state': 'schema' + str(version),
+    return {'contract': 'cpr-successful-trace-index/3', 'schema_state': 'schema' + str(version),
             'schema_version': version, 'index_state': index, 'active_operations': active or []}
 
 

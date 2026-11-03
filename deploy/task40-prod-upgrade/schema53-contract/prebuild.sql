@@ -129,14 +129,18 @@ index_status as (
           and pg_get_expr(i.indpred, i.indrelid) = '((outcome = ''succeeded''::text) AND (diagnostic_trace_json IS NOT NULL))') then 'drop_incomplete'
  else 'unexpected' end as state
 )
-select json_build_object('contract','cpr-successful-trace-index/2','schema_state',ledger.state,
+select json_build_object('contract','cpr-successful-trace-index/3','schema_state',ledger.state,
  'schema_version',(select max(version) from _sqlx_migrations),'index_state',index_status.state,
  'active_operations',(select coalesce(json_agg(json_build_object('pid',pid,'application_name',application_name,'state',state,'wait_event_type',wait_event_type,'wait_event',wait_event)),'[]'::json)
  from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid()
   and (application_name like 'cpr:schema53:%' or application_name='codex-proxy-rs:migration')))
 from ledger cross join index_status) as q(snapshot);
 do $$ begin if not (select snapshot->>'schema_state'='schema52' and snapshot->>'index_state' in ('missing','valid') from cpr_schema53_observed) then raise exception using errcode='55000',message='CPR_SCHEMA53_PRECONDITION: requires exact schema52 and missing or valid index'; end if; end $$;
-select 'create index concurrently model_requests_successful_trace_pending_idx on model_requests using btree (completed_at) where outcome = ''succeeded'' and diagnostic_trace_json is not null' where (select snapshot->>'index_state' from cpr_schema53_observed)='missing'
+select command from (values
+ (1, 'set statement_timeout=''120s'''),
+ (2, 'create index concurrently model_requests_successful_trace_pending_idx on model_requests using btree (completed_at) where outcome = ''succeeded'' and diagnostic_trace_json is not null'),
+ (3, 'set statement_timeout=''5s''')
+) as ddl(ordinal,command) where (select snapshot->>'index_state' from cpr_schema53_observed)='missing' order by ordinal
 \gexec
 with expected(version,checksum) as (values (1,'66daf12a89a1ec11a81110c1ce6289f110bf65beaa432f2668a2bddc6fd246933138dba2d70a60a3d29c6aa6b2e631c1'),
 (2,'9c29e6c73340926f312b58af3b58b5be43b021ccc77797b4ebbf016cac6da802948d99f8e4a324cd1113184698e7ae8a'),
@@ -257,7 +261,7 @@ index_status as (
           and pg_get_expr(i.indpred, i.indrelid) = '((outcome = ''succeeded''::text) AND (diagnostic_trace_json IS NOT NULL))') then 'drop_incomplete'
  else 'unexpected' end as state
 )
-select json_build_object('contract','cpr-successful-trace-index/2','schema_state',ledger.state,
+select json_build_object('contract','cpr-successful-trace-index/3','schema_state',ledger.state,
  'schema_version',(select max(version) from _sqlx_migrations),'index_state',index_status.state,
  'active_operations',(select coalesce(json_agg(json_build_object('pid',pid,'application_name',application_name,'state',state,'wait_event_type',wait_event_type,'wait_event',wait_event)),'[]'::json)
  from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid()

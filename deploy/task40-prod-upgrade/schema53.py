@@ -40,7 +40,7 @@ def artifact_bytes(directory, value, role):
 
 def product_contract(directory, value):
     result = json.loads(artifact_bytes(directory, value, 'contract'))
-    require(result.get('contract') == 'cpr-successful-trace-index/2' and result.get('target_schema') == 53 and
+    require(result.get('contract') == 'cpr-successful-trace-index/3' and result.get('target_schema') == 53 and
             result.get('product_candidate') == value['source'], 'schema53_product_contract_version_mismatch')
     return result
 

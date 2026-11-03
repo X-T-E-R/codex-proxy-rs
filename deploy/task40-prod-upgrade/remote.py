@@ -92,6 +92,14 @@ def manifest(m):
         import schema53
         schema53.contract(m.get('schema53Contract'))
         require(m.get('source') == m['schema53Contract']['source'], 'schema53_runtime_product_source_mismatch')
+    if 'preparationRecovery' in m:
+        link = m['preparationRecovery']
+        require(m['schema'] == 53 and isinstance(link, dict) and
+                set(link) == {'runId', 'role', 'receiptSha256'} and
+                re.fullmatch(r'task40-[0-9a-f]{32}', link.get('runId', '')) and
+                link.get('role') in ('prepare', 'cleanup') and
+                re.fullmatch('[0-9a-f]{64}', link.get('receiptSha256', '')),
+                'schema53_recovery_link_invalid')
     b = baseline_identity(m.get('baseline'))
     require(re.fullmatch('[0-9a-f]{40}', m.get('source', '')) is not None and
             re.fullmatch(IMAGE_RE, m.get('image', '')) is not None and
@@ -402,12 +410,19 @@ def configured_service_image(raw):
     return services[SERVICE]['image']
 
 
+def lock_nonblocking(lock, code):
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        raise RuntimeError(code) from error
+
+
 def gate_enter(root, baseline):
     gate = BASE / '.runtime/restart-recovery'
     require((gate / 'binding.json').is_file(), 'restart_gate_required')
     lock = (gate / 'lifecycle.lock').open('a')
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_nonblocking(lock, 'restart_gate_lifecycle_busy')
         require(not (gate / 'maintenance').exists(), 'restart_gate_maintenance_occupied')
         binding = json.loads((gate / 'binding.json').read_text())
         require(binding.get('runtime', {}).get('revision') == baseline['source'] and
@@ -416,6 +431,74 @@ def gate_enter(root, baseline):
     except BaseException:
         lock.close()
         raise
+
+
+def zero_sql_preparation(value):
+    require(type(value.get('schemaWrites')) is int and value['schemaWrites'] == 0 and
+            value.get('schemaCommands', {}) == {}, 'schema53_recovery_requires_confirmed_zero_sql')
+
+
+def require_no_preparation_successor(root):
+    require(not any((root.parent / ('schema53-recovery-' + root.name + '-' + role + '-claimed.json')).exists()
+                    for role in ('prepare', 'cleanup')), 'schema53_recovery_successor_already_claimed_observe_child')
+
+
+def preparation_recovery_evidence(root, role, target, active_held=False, successor=None, lineage=()):
+    root = Path(root)
+    require(role in ('prepare', 'cleanup') and re.fullmatch(r'task40-[0-9a-f]{32}', root.name) and
+            root.parent == BASE / '.runtime/deployments' and root.name not in lineage,
+            'schema53_recovery_source_invalid')
+    active = None
+    try:
+        if not active_held:
+            active = (root.parent / 'task40-active.lock').open('r')
+            lock_nonblocking(active, 'schema53_deployment_busy')
+        prior = json.loads((root / 'accepted.json').read_text())
+        require(prior.get('schema') == target.get('schema') == 53 and
+                all(prior.get(key) == target.get(key) for key in ('baseline', 'source', 'image')),
+                'schema53_recovery_target_or_baseline_drift')
+        require(not any((root / name).exists() for name in ('attempt-claimed.json', 'launch-claimed.json')),
+                'schema53_recovery_source_activation_claimed')
+        ancestry = prior.get('preparationRecovery')
+        if ancestry:
+            ancestor_slot = root.parent / ('schema53-recovery-' + ancestry['runId'] + '-' + ancestry['role'] + '-claimed.json')
+            require(ancestor_slot.exists() and
+                    json.loads(ancestor_slot.read_text()).get('successorRunId') == root.name,
+                    'schema53_recovery_source_not_admitted_successor')
+            ancestor = preparation_recovery_evidence(root.parent / ancestry['runId'], ancestry['role'], prior,
+                active_held=True, successor=root.name, lineage=lineage + (root.name,))
+            require(ancestor['receiptSha256'] == ancestry['receiptSha256'], 'schema53_recovery_source_receipt_drift')
+        if successor is None:
+            require_no_preparation_successor(root)
+        else:
+            slot = root.parent / ('schema53-recovery-' + root.name + '-' + role + '-claimed.json')
+            reserved = json.loads(slot.read_text())
+            require(reserved.get('successorRunId') == successor and reserved.get('source') == target['preparationRecovery'],
+                    'schema53_recovery_reservation_owner_drift')
+        path = root / (role + '-result.json')
+        for name in (role + '-result.json', role + '-progress.json'):
+            require(not (root / (name + '.tmp')).exists(), 'schema53_recovery_source_unsettled')
+            if (root / name).exists():
+                zero_sql_preparation(json.loads((root / name).read_text()))
+        value = json.loads(path.read_text())
+        require(value.get('runId') == root.name and value.get('phase') == 'schema53_preparation_requires_operator' and
+                value.get('success') is False and value.get('rollback') is False and value.get('finishedAt'),
+                'schema53_recovery_source_terminal_required')
+        claim = json.loads((root / ('schema53-' + role + '-claimed.json')).read_text())
+        require(type(claim.get('pid')) is int and claim['pid'] > 1 and claim.get('singleAttempt') is True,
+                'schema53_recovery_source_process_unproven')
+        try:
+            os.kill(claim['pid'], 0)
+        except ProcessLookupError:
+            pass
+        else:
+            raise RuntimeError('schema53_recovery_source_process_not_exited')
+        return {'runId': root.name, 'role': role, 'receiptSha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                'sourcePid': claim['pid'], 'sourceProcess': 'exited', 'schemaWrites': 0,
+                'executionLock': 'held_during_admission'}
+    finally:
+        if active is not None:
+            active.close()
 
 
 class Deployment:
@@ -451,12 +534,13 @@ class Deployment:
         key = attempt or role
         commands = self.result.setdefault('schemaCommands', {})
         require(key not in commands, 'schema53_' + key + '_already_claimed_no_reissue')
-        commands[key] = {'role': role, 'outcome': 'intent', 'issuedAt': now()}
+        timeout = 180 if role == 'prepare' else 30
+        commands[key] = {'role': role, 'outcome': 'intent', 'issuedAt': now(), 'transportTimeoutSeconds': timeout}
         self.result['schemaWrites'] += 1
         self.save('schema53_' + key + '_intent')
         try:
             outcome = schema53.execute(self.root / 'schema53-artifacts', self.m['schema53Contract'],
-                                       role, PG, 2100 if role == 'prepare' else 30)
+                                       role, PG, timeout)
         except Exception:
             outcome = {'outcome': 'unknown'}
         commands[key].update(outcome)
@@ -470,6 +554,38 @@ class Deployment:
         require(outcome['outcome'] != 'unknown', 'schema53_' + role + '_result_unknown_no_reissue')
         require(outcome['outcome'] == 'completed', 'schema53_' + role + '_failed_inspect_before_new_GO')
 
+    def preparation_stage(self, stage):
+        self.result['preparationStage'] = stage
+        self.save('schema53_' + self.result['preparationRole'] + '_checking')
+
+    def reserve_preparation_recovery(self, role):
+        link = self.m.get('preparationRecovery')
+        if link is None or link['role'] != role:
+            return
+        require(link['runId'] != self.root.name, 'schema53_recovery_role_or_owner_drift')
+        # 单次预留先于执行锁；即使被该锁阻断，零 SQL 后继仍可在新 GO 下继续
+        slot = self.root.parent / ('schema53-recovery-' + link['runId'] + '-' + role + '-claimed.json')
+        require(not slot.exists(), 'schema53_recovery_successor_already_claimed_observe_child')
+        with slot.open('x') as claim:
+            json.dump({'source': link, 'successorRunId': self.root.name, 'at': now()}, claim)
+            claim.flush()
+            os.fsync(claim.fileno())
+
+    def claim_preparation_recovery(self, role):
+        link = self.m.get('preparationRecovery')
+        if link is None:
+            return
+        require(link['runId'] != self.root.name, 'schema53_recovery_role_or_owner_drift')
+        if link['role'] != role:
+            require(link['role'] == 'prepare' and role == 'cleanup' and
+                    json.loads((self.root / 'prepare-result.json').read_text()).get('preparationRecovery', {}).get(
+                        'successorRunId') == self.root.name, 'schema53_recovery_role_or_owner_drift')
+            return
+        source = self.root.parent / link['runId']
+        evidence = preparation_recovery_evidence(source, role, self.m, active_held=True, successor=self.root.name)
+        require(evidence['receiptSha256'] == link['receiptSha256'], 'schema53_recovery_source_receipt_drift')
+        self.result['preparationRecovery'] = dict(evidence, successorRunId=self.root.name)
+
     def prepare(self, cleanup=False):
         require(self.m['schema'] == 53, 'schema53_prepare_only')
         role = 'cleanup' if cleanup else 'prepare'
@@ -478,31 +594,58 @@ class Deployment:
             claim.flush()
             os.fsync(claim.fileno())
         self.progress_name = role + '-progress.json'
-        lock = None
+        self.result['preparationRole'] = role
+        lock = active = None
         try:
+            self.preparation_stage('recovery_reservation')
+            self.reserve_preparation_recovery(role)
+            self.preparation_stage('execution_lock')
+            active = (self.root.parent / 'task40-active.lock').open('a')
+            lock_nonblocking(active, 'schema53_deployment_busy')
+            self.preparation_stage('recovery_admission')
+            require_no_preparation_successor(self.root)
+            self.claim_preparation_recovery(role)
             # 慢准备不持生命周期锁、不写维护闸，旧进程继续提供业务
+            self.preparation_stage('lifecycle_gate')
             self.gate, lock, self.binding = gate_enter(self.root, self.b)
+            self.preparation_stage('preflight')
             self.preflight(self.binding, preparation=True)
             lock.close()
             lock = None
+            self.preparation_stage('before_sql_observation')
             self.schema_observation(52)
             self.owned(self.old, self.b['image'], True)
+            self.preparation_stage('sql_action')
             self.schema_command(role)
+            self.preparation_stage('after_sql_observation')
             self.schema_observation(52, pending_required=not cleanup)
             self.owned(self.old, self.b['image'], True)
+            self.preparation_stage('final_lifecycle_gate')
             self.gate, lock, binding = gate_enter(self.root, self.b)
             require(binding == self.binding, 'schema53_prepare_binding_drift')
+            self.preparation_stage('preservation')
             preserve(self.before, self.schema_observation(52, pending_required=not cleanup))
             self.result.update(phase='schema53_cleaned' if cleanup else 'schema53_prepared',
                                healthzObserved=health_status())
         except Exception as error:
             self.result['phase'] = 'schema53_preparation_requires_operator'
             self.result['errorCode'] = str(error) if isinstance(error, RuntimeError) else 'schema53_prepare_error_suppressed'
+            # 只持久化类型和 errno，不把可能含配置或业务正文的异常文本放入诊断
+            cause = error.__cause__ or error
+            self.result['preparationFailure'] = {'stage': self.result.get('preparationStage'),
+                'errorType': type(error).__name__, 'causeType': type(cause).__name__}
+            if isinstance(cause, OSError) and type(cause.errno) is int:
+                self.result['preparationFailure']['errno'] = cause.errno
+            self.result['zeroSqlConfirmed'] = self.result['schemaWrites'] == 0 and not self.result.get('schemaCommands')
         finally:
             if lock:
                 lock.close()
             self.result['finishedAt'] = now()
-            atomic(self.root / (role + '-result.json'), self.result)
+            try:
+                atomic(self.root / (role + '-result.json'), self.result)
+            finally:
+                if active:
+                    active.close()
         return self.result
 
     def reconcile_preparation(self):
@@ -530,6 +673,7 @@ class Deployment:
         if self.m['schema'] == 52:
             return
         import schema53
+        require_no_preparation_successor(self.root)
         schema53.require_quiescent(self.root, self.m['schema53Contract'], sql)
         path = self.root / 'prepare-observed.json'
         if not path.exists():
@@ -1257,16 +1401,16 @@ def main():
     if args.action == 'verify':
         print(json.dumps(verify(args.root)))
         return
+    if args.action in ('prepare', 'cleanup'):
+        require(args.GO and (args.root / ('schema53-' + args.action + '-launch-claimed.json')).exists() and
+                not (args.root / 'attempt-claimed.json').exists(), 'new_schema53_preparation_GO_required')
+        print(json.dumps(app.prepare(cleanup=args.action == 'cleanup')))
+        return
     lock_path = BASE / '.runtime/deployments/task40-active.lock'
     with lock_path.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if args.action == 'reconcile-preparation':
             print(json.dumps(app.reconcile_preparation()))
-            return
-        if args.action in ('prepare', 'cleanup'):
-            require(args.GO and (args.root / ('schema53-' + args.action + '-launch-claimed.json')).exists() and
-                    not (args.root / 'attempt-claimed.json').exists(), 'new_schema53_preparation_GO_required')
-            print(json.dumps(app.prepare(cleanup=args.action == 'cleanup')))
             return
         if args.action == 'resume':
             retry = args.retry_readonly

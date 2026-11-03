@@ -253,6 +253,17 @@ print(p.stdout.decode() if p.returncode==0 else json.dumps({'phase':'schema53_pr
     return ssh(code, root, timeout=55)
 
 
+def preparation_recovery_admission(root, role, target):
+    # 用当前消费者只读取原 run 的有界结构收据，不替换其脚本或 claim
+    code = """import json
+namespace={'__name__':'task40_preparation_recovery_admission'}
+exec(compile(payload['code'],'remote-observer.py','exec'),namespace)
+print(json.dumps(namespace['preparation_recovery_evidence'](payload['root'],payload['role'],payload['target'])))
+"""
+    return ssh(code, {'code': (HERE / 'remote.py').read_text(encoding='utf-8'),
+                      'root': root, 'role': role, 'target': target})
+
+
 @contextmanager
 def action_lock(path, seconds=420):
     import msvcrt
@@ -292,11 +303,12 @@ def work(run_dir, operation=None):
         operation = bound_operation(j, operation)
         try:
             remote.require(not (run_dir / 'recovery-requested').exists(), 'locally_fenced')
-            if operation in ('launch', 'prepare'):
+            if operation in ('launch', 'prepare') or (
+                    operation == 'cleanup' and j['accepted'].get('preparationRecovery', {}).get('role') == 'cleanup'):
                 remote.require(not j.get('provisionIntent'), 'provision_already_claimed_no_reissue')
                 j['phase'] = 'provision_intent'; j['provisionIntent'] = True; save(jpath, j)
                 # provision ack 失联可能已建远端目录；不猜测是否可重发
-                if operation == 'prepare':
+                if j['accepted']['schema'] == 53:
                     provision(j['accepted'], j['remoteRoot'], j['schema53Artifacts'])
                 else:
                     provision(j['accepted'], j['remoteRoot'])
@@ -415,11 +427,17 @@ def spawn_supervisor(run_dir, operation):
             'operation': operation}
 
 
+def preparation_successor_path(run_dir):
+    return HERE / ('schema53-recovery-' + run_dir.name + '-claimed.json')
+
+
 def continue_schema53(run_dir, operation):
     remote.require(operation in ('activate', 'cleanup'), 'schema53_operation_invalid')
     with action_lock(HERE / 'controller-active.lock'):
         with action_lock(run_dir / 'worker.lock'):
             j = read(run_dir / 'controller.json')
+            remote.require(not preparation_successor_path(run_dir).exists(),
+                           'schema53_recovery_successor_already_claimed_observe_child')
             remote.require(j['accepted']['schema'] == 53 and j.get('schemaMayHaveStarted') and
                            not j.get('remoteMayHaveStarted') and not j.get('launchIntent') and
                            not (run_dir / 'recovery-requested').exists(), 'schema53_run_already_activated_or_fenced')
@@ -440,10 +458,64 @@ def continue_schema53(run_dir, operation):
             return spawn_supervisor(run_dir, operation)
 
 
+def new_run(m, operation, artifacts, recovery_source=None):
+    if m['schema'] == 53:
+        import schema53
+        schema53.product_contract(artifacts, m['schema53Contract'])
+        for role in schema53.ROLES:
+            schema53.artifact_bytes(artifacts, m['schema53Contract'], role)
+    run_dir = HERE / ('task40-' + uuid.uuid4().hex)
+    run_dir.mkdir(mode=0o700)
+    j = {'runId': run_dir.name, 'phase': 'prepared', 'accepted': m, 'operation': operation,
+         'remoteRoot': '/opt/codex-proxy-rs/.runtime/deployments/' + run_dir.name,
+         'startedAt': remote.now(), 'providerProbes': 0, 'channelMutations': 0}
+    if m['schema'] == 53:
+        j['pendingOperation'] = operation
+    if artifacts:
+        j['schema53Artifacts'] = str(artifacts.resolve())
+    if recovery_source:
+        j['recoverySourceDirectory'] = str(recovery_source.resolve())
+    save(run_dir / 'controller.json', j)
+    subprocess.run(['icacls', str(run_dir), '/inheritance:r', '/grant:r', os.getlogin() + ':(OI)(CI)F'],
+                   capture_output=True, check=True)
+    if recovery_source:
+        with preparation_successor_path(recovery_source).open('x') as claim:
+            json.dump({'sourceRunId': recovery_source.name, 'successorRunId': run_dir.name,
+                       'role': operation, 'at': remote.now()}, claim)
+            claim.flush()
+            os.fsync(claim.fileno())
+    return spawn_supervisor(run_dir, operation)
+
+
+def recover_preparation(run_dir, target, artifacts):
+    with action_lock(HERE / 'controller-active.lock'):
+        with action_lock(run_dir / 'worker.lock'):
+            j = read(run_dir / 'controller.json')
+            remote.require(not preparation_successor_path(run_dir).exists(),
+                           'schema53_recovery_successor_already_claimed_observe_child')
+            role = j.get('operation')
+            remote.require(target['schema'] == j['accepted']['schema'] == 53 and
+                           role in ('prepare', 'cleanup') and j.get('schemaMayHaveStarted') and
+                           not j.get('remoteMayHaveStarted') and not j.get('launchIntent') and
+                           j.get('phase') in ('finished', 'worker_exit') and not j.get('pendingOperation') and
+                           j['remoteRoot'].endswith('/' + run_dir.name), 'schema53_recovery_source_not_settled')
+            original = j.get(role + 'Receipt', {})
+            remote.zero_sql_preparation(original)
+            remote.require(original.get('phase') == 'schema53_preparation_requires_operator',
+                           'schema53_recovery_source_terminal_required')
+            evidence = preparation_recovery_admission(j['remoteRoot'], role, target)
+            remote.require(evidence.get('runId') == run_dir.name and evidence.get('role') == role and
+                           evidence.get('sourceProcess') == 'exited' and evidence.get('schemaWrites') == 0,
+                           'schema53_recovery_remote_evidence_invalid')
+            m = dict(target, preparationRecovery={key: evidence[key] for key in ('runId', 'role', 'receiptSha256')})
+            remote.manifest(m)
+            return new_run(m, role, artifacts, recovery_source=run_dir)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('action', choices=['baseline', 'launch', 'prepare', 'activate', 'cleanup', 'preparation-status',
-                                     'supervise', 'worker', 'status', 'recover-local', 'takeover'])
+                                     'recover-preparation', 'supervise', 'worker', 'status', 'recover-local', 'takeover'])
     p.add_argument('--accepted', type=Path)
     p.add_argument('--run-dir', type=Path)
     p.add_argument('--operation', choices=['launch', 'prepare', 'activate', 'cleanup'])
@@ -460,23 +532,8 @@ def main():
         remote.require((a.action == 'launch' and m['schema'] == 52) or
                        (a.action == 'prepare' and m['schema'] == 53 and a.artifacts),
                        'schema53_requires_online_prepare_then_new_activation_GO')
-        if a.action == 'prepare':
-            import schema53
-            for role in schema53.ROLES:
-                schema53.artifact_bytes(a.artifacts, m['schema53Contract'], role)
-        run_dir = HERE / ('task40-' + uuid.uuid4().hex)
-        run_dir.mkdir(mode=0o700)
-        j = {'runId': run_dir.name, 'phase': 'prepared', 'accepted': m, 'operation': a.action,
-             'remoteRoot': '/opt/codex-proxy-rs/.runtime/deployments/' + run_dir.name,
-             'startedAt': remote.now(), 'providerProbes': 0, 'channelMutations': 0}
-        if m['schema'] == 53:
-            j['pendingOperation'] = a.action
-        if a.artifacts:
-            j['schema53Artifacts'] = str(a.artifacts.resolve())
-        save(run_dir / 'controller.json', j)
-        subprocess.run(['icacls', str(run_dir), '/inheritance:r', '/grant:r', os.getlogin() + ':(OI)(CI)F'],
-                       capture_output=True, check=True)
-        print(json.dumps(spawn_supervisor(run_dir, a.action)))
+        remote.require('preparationRecovery' not in m, 'schema53_recovery_requires_linked_GO_entry')
+        print(json.dumps(new_run(m, a.action, a.artifacts)))
         return
     remote.require(a.run_dir and a.run_dir.resolve().parent == HERE and
                    a.run_dir.name.startswith('task40-') and (a.run_dir / 'controller.json').exists(), 'owned_run_required')
@@ -488,6 +545,11 @@ def main():
     elif a.action == 'takeover':
         remote.require(os.name == 'nt' and a.GO, 'Windows_new_operator_recovery_GO_required')
         print(json.dumps(takeover(a.run_dir)))
+    elif a.action == 'recover-preparation':
+        remote.require(os.name == 'nt' and a.GO and a.accepted, 'Windows_new_preparation_recovery_GO_required')
+        target = remote.manifest(read(a.accepted))
+        remote.require('preparationRecovery' not in target, 'schema53_recovery_link_is_derived_from_source')
+        print(json.dumps(recover_preparation(a.run_dir, target, a.artifacts)))
     elif a.action in ('activate', 'cleanup'):
         remote.require(os.name == 'nt' and a.GO, 'Windows_new_schema53_operation_GO_required')
         print(json.dumps(continue_schema53(a.run_dir, a.action)))

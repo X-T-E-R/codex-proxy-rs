@@ -1,5 +1,5 @@
 {
-  "contract": "cpr-successful-trace-index/2",
+  "contract": "cpr-successful-trace-index/3",
   "product_candidate": "9888052ce26e106bb3cd2dc86c5d3050a6eccc9c",
   "database": "codex_proxy",
   "schema": "public",
@@ -38,6 +38,11 @@
     },
     "prebuild": {
       "effect": "online concurrent build; no migration ledger write",
+      "online_index_statement_timeout_ms": 120000,
+      "checks_statement_timeout_ms": 5000,
+      "lock_timeout_ms": 500,
+      "budget_scope": "only emitted CREATE INDEX CONCURRENTLY has120s; dispatcher and final inspection stay5s; successful CIC resets the session to5s before inspection; on error psql exits and the session closes",
+      "transport_requirement": "controller timeout must exceed120s plus connection and short-check overhead; any interrupted transport remains unknown and must be inspected before another action",
       "success": {
         "schema_state": "schema52",
         "index_state": "valid"
@@ -62,7 +67,7 @@
   "errors": {
     "55000": "CPR_SCHEMA53_PRECONDITION; observe and resolve, no blind retry",
     "55P03": "busy or 500ms lock timeout; observe before retry",
-    "57014": "5s statement timeout; concurrent build may leave invalid residue; inspect",
+    "57014": "statement timeout:120s only for online CIC,5s for checks and other actions; a timed-out CIC may leave invalid residue; inspect",
     "transport_or_process_failure": "unknown; inspect schema/index and active_operations; never replay while an operation remains active"
   },
   "migration53_postcondition": {
