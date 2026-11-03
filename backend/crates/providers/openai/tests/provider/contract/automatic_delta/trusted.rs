@@ -248,37 +248,16 @@ async fn reasoning_summary_rebuild_and_known_typed_signature_omission_restore_ra
 }
 
 #[tokio::test]
-async fn trusted_projection_edits_and_unsupported_native_shapes_stay_full() {
-    for case in [
-        "text",
-        "opaque",
-        "id",
-        "status",
-        "role",
-        "annotations",
-        "logprobs",
-        "unknown",
-        "multiple_reasoning",
-        "assistant_tail",
-    ] {
-        let mut raw = vec![raw_text("answer")];
+async fn trusted_explicit_edits_and_missing_new_turn_stay_full() {
+    for case in ["text", "opaque", "status", "role", "assistant_tail"] {
+        let raw = vec![raw_text("answer")];
         let mut rebuilt = canonical("answer");
         let mut tail = user("next");
         match case {
             "text" => rebuilt["content"][0]["text"] = json!("edited"),
             "opaque" => rebuilt["future"] = json!({"signature":"edited"}),
-            "id" => rebuilt["id"] = json!("msg_changed"),
             "status" => rebuilt["status"] = json!("in_progress"),
             "role" => rebuilt["role"] = json!("user"),
-            "annotations" => {
-                raw[0]["content"][0]["annotations"] = json!([{"type":"future_annotation"}])
-            }
-            "logprobs" => raw[0]["content"][0]["logprobs"] = json!([{"token":"synthetic"}]),
-            "unknown" => raw.push(json!({"type":"future_item","opaque":"synthetic"})),
-            "multiple_reasoning" => raw.extend([
-                json!({"type":"reasoning","summary":[]}),
-                json!({"type":"reasoning","summary":[]}),
-            ]),
             "assistant_tail" => tail = canonical("new assistant fragment"),
             _ => unreachable!(),
         }

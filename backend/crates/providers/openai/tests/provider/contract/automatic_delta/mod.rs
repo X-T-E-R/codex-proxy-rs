@@ -4,6 +4,7 @@ use super::*;
 use tokio::{sync::mpsc, task::JoinSet};
 
 mod diagnostics;
+mod native_authority;
 mod trusted;
 
 struct Upstream {
@@ -351,7 +352,7 @@ async fn large_full_history_uses_small_actual_frame_before_oauth_limit() {
 }
 
 #[tokio::test]
-async fn changed_prefix_parameters_and_unknown_fields_start_full_chains() {
+async fn generation_options_continue_while_unknown_properties_and_compaction_rebuild() {
     let mut upstream = Upstream::start(vec![], false).await;
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
@@ -381,8 +382,16 @@ async fn changed_prefix_parameters_and_unknown_fields_start_full_chains() {
         .await;
         let (connection, sent) = upstream.frame().await;
         assert_eq!(connection, 1);
-        assert!(sent.get("previous_response_id").is_none());
-        assert_eq!(sent["input"], json!(input));
+        if matches!(turn, 1 | 2) {
+            assert_eq!(
+                sent["previous_response_id"],
+                format!("resp_auto_{}", turn - 1)
+            );
+            assert_eq!(sent["input"], json!([input.last().unwrap()]));
+        } else {
+            assert!(sent.get("previous_response_id").is_none());
+            assert_eq!(sent["input"], json!(input));
+        }
         input.push(json!({"role":"user","content":format!("turn {turn}")}));
     }
     upstream.stop().await;

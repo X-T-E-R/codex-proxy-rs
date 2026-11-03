@@ -1,273 +1,333 @@
-//! 从原生完成项生成确定的客户端回填模板，校验工具关联与新增尾项
+//! 按新增轮边界认领客户端回填，原生输出拥有历史，显式业务冲突要求重建
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
-#[derive(Clone, Copy)]
-enum Style {
-    Responses,
-    Typed,
+pub(super) struct Claim {
+    pub(super) tail: Vec<Value>,
 }
 
-enum Part {
-    Text(String),
-    Think(String, Option<Value>),
-}
-
-/// 模板只用于认领最近原生输出，不改变发给上游的原生内容或顺序
+/// 身份、旧 input、live lease 与最新 completed owner 已由调用方核实
+/// user / tool-result 是新增轮边界，不按客户端字段模板推测 item 数量
 pub(super) fn boundary(
     output: &[Value],
     current: &[Value],
     previous_input: &[Value],
-) -> Result<(usize, &'static str), &'static str> {
-    let mut matched = None;
-    for (style, name) in [(Style::Responses, "responses"), (Style::Typed, "typed")] {
-        let Some(template) = project(output, style) else {
-            continue;
-        };
-        if template.is_empty() || !current.starts_with(&template) {
-            continue;
-        }
-        if matched.is_some_and(|(count, _)| count != template.len()) {
-            return Err("ambiguous_projection");
-        }
-        matched = Some((template.len(), name));
+    native_calls: &[String],
+) -> Result<Claim, &'static str> {
+    let count = current
+        .iter()
+        .position(|item| is_message(item, "user") || item["type"] == "function_call_output")
+        .ok_or("turn_boundary_missing")?;
+    if count > super::MAX_OUTPUT_ITEMS {
+        return Err("output_claim_limit");
     }
-    let (count, name) = matched.ok_or("projection_mismatch")?;
-    if !tail_valid(output, &current[count..], previous_input) {
-        return Err("tool_tail_invalid");
-    }
-    Ok((count, name))
-}
-
-fn function_call(item: &Value) -> Option<(&str, &str, &str)> {
-    let object = item.as_object()?;
-    if item["type"] != "function_call"
-        || object.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "type" | "id" | "status" | "call_id" | "name" | "arguments"
-            )
-        })
+    let rebuilt = &current[..count];
+    let native = View::read(output).ok_or("output_conflict")?;
+    let client = View::read(rebuilt).ok_or("output_conflict")?;
+    // 文本分段、message 合并和已知 reasoning 的缺省不改变原生内容
+    // 有意删除与正常缺省完全相同时，由现有 fork/session 合同建立新基线
+    if !text_equal(&native.text, &client.text)
+        || (!client.summary.is_empty() && !text_equal(&native.summary, &client.summary))
+        || (!client.reasoning.is_empty() && !text_equal(&native.reasoning, &client.reasoning))
+        || !is_subsequence(&native.encrypted, &client.encrypted)
+        || !is_subsequence(&native.opaque, &client.opaque)
+        || native.calls.len() != client.calls.len()
+        || !explicit_fields_match(output, rebuilt)
     {
-        return None;
+        return Err("output_conflict");
     }
-    let call = item["call_id"].as_str().filter(|s| !s.is_empty())?;
-    let name = item["name"].as_str().filter(|s| !s.is_empty())?;
-    let arguments = item["arguments"].as_str().filter(|s| !s.is_empty())?;
-    serde_json::from_str::<Value>(arguments).ok()?.as_object()?;
-    Some((call, name, arguments))
-}
-
-fn projectable(output: &[Value]) -> bool {
-    let mut anchor = false;
-    let mut reasoning = false;
-    let mut calls = HashSet::new();
-    for item in output {
-        if item
-            .get("status")
-            .is_some_and(|status| !status.is_null() && status != "completed")
-        {
-            return false;
-        }
-        match item["type"].as_str() {
-            Some("message") => {
-                if item["role"] != "assistant" {
-                    return false;
-                }
-                let Some(content) = item["content"].as_array() else {
-                    return false;
-                };
-                for part in content {
-                    let Some(text) = part["text"].as_str() else {
-                        return false;
-                    };
-                    if part["type"] != "output_text"
-                        || ["annotations", "logprobs"].iter().any(|key| {
-                            part.get(key).is_some_and(|value| {
-                                !value.is_null()
-                                    && value.as_array().is_none_or(|array| !array.is_empty())
-                            })
-                        })
-                    {
-                        return false;
-                    }
-                    anchor |= !text.is_empty();
-                }
-            }
-            Some("reasoning") => {
-                if reasoning {
-                    return false;
-                }
-                reasoning = true;
-                if item["summary"].as_array().is_none_or(|summary| {
-                    summary
-                        .iter()
-                        .any(|part| part["type"] != "summary_text" || !part["text"].is_string())
-                }) {
-                    return false;
-                }
-            }
-            Some("function_call") => {
-                let Some((call, _, _)) = function_call(item) else {
-                    return false;
-                };
-                if !calls.insert(call) {
-                    return false;
-                }
-                anchor = true;
-            }
-            _ => return false,
-        }
-    }
-    anchor
-}
-
-fn project(output: &[Value], style: Style) -> Option<Vec<Value>> {
-    if !projectable(output) {
-        return None;
-    }
-    let mut parts = Vec::new();
-    let mut calls = Vec::new();
-    let mut barrier = false;
-    for item in output {
-        match item["type"].as_str()? {
-            "function_call" => {
-                let (call, name, arguments) = function_call(item)?;
-                calls.push(json!({"type":"function_call","call_id":call,"name":name,"arguments":arguments}));
-                barrier = true;
-            }
-            "message" => {
-                for part in item["content"].as_array()? {
-                    let text = part["text"].as_str()?;
-                    if text.is_empty() {
-                        continue;
-                    }
-                    if let Some(Part::Text(previous)) = parts.last_mut()
-                        && (matches!(style, Style::Typed) || !barrier)
-                    {
-                        previous.push_str(text);
-                    } else {
-                        parts.push(Part::Text(text.to_owned()));
-                    }
-                    barrier = false;
-                }
-            }
-            "reasoning" => {
-                let encrypted = item.get("encrypted_content").cloned();
-                if matches!(style, Style::Typed)
-                    && encrypted
-                        .as_ref()
-                        .and_then(Value::as_str)
-                        .is_none_or(|s| !s.trim_matches('"').starts_with("gAAA"))
-                {
-                    continue;
-                }
-                let summary = item["summary"]
-                    .as_array()?
-                    .iter()
-                    .map(|part| part["text"].as_str())
-                    .collect::<Option<String>>()?;
-                parts.push(Part::Think(summary, encrypted));
-                barrier = false;
-            }
-            _ => return None,
-        }
-    }
-    if matches!(style, Style::Typed) {
-        let text: String = parts
-            .iter()
-            .filter_map(|part| match part {
-                Part::Text(text) => Some(text.as_str()),
-                Part::Think(..) => None,
-            })
-            .collect();
-        let has_text = parts.iter().any(|part| matches!(part, Part::Text(_)));
-        parts.retain(|part| matches!(part, Part::Think(..)));
-        if has_text {
-            parts.push(Part::Text(text));
-        }
-    }
-    let mut result = Vec::new();
-    let mut pending = Vec::new();
-    for part in parts {
-        match part {
-            Part::Think(text, encrypted) => {
-                flush(&mut result, &mut pending, style);
-                let mut item = json!({"type":"reasoning","summary":if text.is_empty() { vec![] } else { vec![json!({"type":"summary_text","text":text})] }});
-                if let Some(encrypted) = encrypted {
-                    item["encrypted_content"] = encrypted;
-                }
-                result.push(item);
-            }
-            Part::Text(text) => {
-                let mut item = json!({"type":"output_text","text":text});
-                if matches!(style, Style::Responses) {
-                    item["annotations"] = json!([]);
-                }
-                pending.push(item);
-            }
-        }
-    }
-    flush(&mut result, &mut pending, style);
-    result.extend(calls);
-    Some(result)
-}
-
-fn flush(result: &mut Vec<Value>, pending: &mut Vec<Value>, style: Style) {
-    if !pending.is_empty() {
-        let mut message =
-            json!({"type":"message","role":"assistant","content":std::mem::take(pending)});
-        if matches!(style, Style::Typed) {
-            message["status"] = json!("completed");
-        }
-        result.push(message);
-    }
-}
-
-fn tail_valid<'a>(output: &'a [Value], tail: &'a [Value], previous_input: &'a [Value]) -> bool {
-    if tail.is_empty() {
-        return false;
-    }
-    let mut outstanding: HashSet<_> = output
+    let mut aliases = HashMap::new();
+    let native_ids: HashSet<_> = native.calls.iter().map(|call| call.0).collect();
+    let historical: HashSet<_> = previous_input
         .iter()
         .filter(|item| item["type"] == "function_call")
         .filter_map(|item| item["call_id"].as_str())
+        .chain(native_calls.iter().map(String::as_str))
         .collect();
-    if outstanding.is_empty() && (tail[0]["type"] != "message" || tail[0]["role"] != "user") {
-        return false;
+    let mut signatures = HashMap::new();
+    for call in &native.calls {
+        *signatures.entry((call.1, call.2)).or_insert(0_usize) += 1;
     }
-    let mut seen = outstanding.clone();
-    seen.extend(
-        previous_input
-            .iter()
-            .filter(|item| item["type"] == "function_call")
-            .filter_map(|item| item["call_id"].as_str()),
-    );
+    for (old, new) in native.calls.iter().zip(&client.calls) {
+        if old.1 != new.1
+            || old.2 != new.2
+            || (old.0 != new.0
+                && (native_ids.contains(new.0)
+                    || historical.contains(new.0)
+                    || signatures[&(old.1, old.2)] != 1))
+            || aliases.insert(new.0, old.0).is_some()
+        {
+            return Err("tool_conflict");
+        }
+    }
+    let mut tail = current[count..].to_vec();
+    if !map_tail(&mut tail, aliases, historical, native_ids) {
+        return Err("tool_tail_invalid");
+    }
+    Ok(Claim { tail })
+}
+
+fn is_message(item: &Value, role: &str) -> bool {
+    item["role"] == role && item.get("type").is_none_or(|kind| kind == "message")
+}
+
+#[derive(Default)]
+struct View<'a> {
+    text: Vec<&'a str>,
+    summary: Vec<&'a str>,
+    reasoning: Vec<&'a str>,
+    encrypted: Vec<&'a Value>,
+    opaque: Vec<&'a Value>,
+    calls: Vec<(&'a str, &'a str, &'a str)>,
+}
+
+impl<'a> View<'a> {
+    fn read(items: &'a [Value]) -> Option<Self> {
+        let mut view = Self::default();
+        let mut calls = HashSet::new();
+        for item in items {
+            if item
+                .get("status")
+                .is_some_and(|status| !status.is_null() && status != "completed")
+            {
+                return None;
+            }
+            if is_message(item, "assistant") {
+                text_parts(
+                    &item["content"],
+                    &["output_text", "input_text", "text"],
+                    &mut view.text,
+                    &mut view.opaque,
+                )?;
+            } else {
+                match item["type"].as_str()? {
+                    "reasoning" => {
+                        if let Some(summary) = item.get("summary") {
+                            text_parts(
+                                summary,
+                                &["summary_text"],
+                                &mut view.summary,
+                                &mut view.opaque,
+                            )?;
+                        }
+                        if let Some(content) = item.get("content") {
+                            text_parts(
+                                content,
+                                &["reasoning_text"],
+                                &mut view.reasoning,
+                                &mut view.opaque,
+                            )?;
+                        }
+                        if let Some(encrypted) =
+                            item.get("encrypted_content").filter(|v| !v.is_null())
+                        {
+                            view.encrypted.push(encrypted);
+                        }
+                    }
+                    "function_call" => {
+                        let call = function_call(item)?;
+                        if !calls.insert(call.0) {
+                            return None;
+                        }
+                        view.calls.push(call);
+                    }
+                    "message" => return None,
+                    _ => view.opaque.push(item),
+                }
+            }
+        }
+        Some(view)
+    }
+}
+
+fn function_call(item: &Value) -> Option<(&str, &str, &str)> {
+    Some((
+        item["call_id"].as_str().filter(|id| !id.is_empty())?,
+        item["name"].as_str().filter(|name| !name.is_empty())?,
+        item["arguments"].as_str()?,
+    ))
+}
+
+fn text_parts<'a>(
+    value: &'a Value,
+    kinds: &[&str],
+    text: &mut Vec<&'a str>,
+    opaque: &mut Vec<&'a Value>,
+) -> Option<()> {
+    if let Some(value) = value.as_str() {
+        text.push(value);
+    } else {
+        for part in value.as_array()? {
+            if kinds.contains(&part["type"].as_str()?) {
+                text.push(part["text"].as_str()?);
+            } else {
+                opaque.push(part);
+            }
+        }
+    }
+    Some(())
+}
+
+fn text_equal(left: &[&str], right: &[&str]) -> bool {
+    left.iter()
+        .flat_map(|text| text.bytes())
+        .eq(right.iter().flat_map(|text| text.bytes()))
+}
+
+fn is_subsequence(native: &[&Value], rebuilt: &[&Value]) -> bool {
+    let mut native = native.iter();
+    rebuilt.iter().all(|value| native.any(|old| old == value))
+}
+
+/// 缺省展示字段由原生项拥有；客户端显式提交的未知字段、签名和非空标注不能与原生冲突
+fn explicit_fields_match(native: &[Value], rebuilt: &[Value]) -> bool {
+    let mut native_kinds: HashMap<&str, Vec<&Value>> = HashMap::new();
+    let mut client_counts = HashMap::new();
+    for item in native {
+        native_kinds
+            .entry(item["type"].as_str().unwrap_or("message"))
+            .or_default()
+            .push(item);
+    }
+    for item in rebuilt {
+        *client_counts
+            .entry(item["type"].as_str().unwrap_or("message"))
+            .or_insert(0_usize) += 1;
+    }
+    let mut positions = HashMap::new();
+    rebuilt.iter().all(|item| {
+        let known: &[&str] = if is_message(item, "assistant") {
+            &["type", "role", "id", "status", "content"]
+        } else {
+            match item["type"].as_str() {
+                Some("reasoning") => &[
+                    "type",
+                    "id",
+                    "status",
+                    "summary",
+                    "content",
+                    "encrypted_content",
+                ],
+                Some("function_call") => &["type", "id", "status", "call_id", "name", "arguments"],
+                _ => return native.contains(item),
+            }
+        };
+        let kind = item["type"].as_str().unwrap_or("message");
+        let candidates = native_kinds
+            .get(kind)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let position = positions.entry(kind).or_insert(0_usize);
+        let candidates = if candidates.len() == client_counts[&kind] {
+            &candidates[*position..*position + 1]
+        } else {
+            candidates
+        };
+        *position += 1;
+        if !fields_present_match(item, candidates, known) {
+            return false;
+        }
+        for key in ["content", "summary"] {
+            if let Some(parts) = item.get(key).and_then(Value::as_array) {
+                let native_parts: Vec<_> = candidates
+                    .iter()
+                    .filter_map(|old| old.get(key).and_then(Value::as_array))
+                    .flatten()
+                    .collect();
+                for (index, part) in parts.iter().enumerate() {
+                    let candidates = if native_parts.len() == parts.len() {
+                        &native_parts[index..index + 1]
+                    } else {
+                        &native_parts
+                    };
+                    let kind = part["type"].as_str();
+                    if matches!(
+                        kind,
+                        Some(
+                            "output_text"
+                                | "input_text"
+                                | "text"
+                                | "summary_text"
+                                | "reasoning_text"
+                        )
+                    ) {
+                        if !fields_present_match(part, candidates, &["type", "text"]) {
+                            return false;
+                        }
+                    } else if !candidates.contains(&part) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    })
+}
+
+fn fields_present_match(item: &Value, native: &[&Value], known: &[&str]) -> bool {
+    let Some(object) = item.as_object() else {
+        return false;
+    };
+    let fields: Vec<_> = object
+        .iter()
+        .filter(|(key, value)| {
+            !known.contains(&key.as_str())
+                && !(matches!(key.as_str(), "annotations" | "logprobs")
+                    && (value.is_null() || value.as_array().is_some_and(Vec::is_empty)))
+        })
+        .collect();
+    fields.is_empty()
+        || (!native.is_empty()
+            && native.iter().all(|old| {
+                fields
+                    .iter()
+                    .all(|(key, value)| old.get(*key) == Some(*value))
+            }))
+}
+
+fn map_tail(
+    tail: &mut [Value],
+    aliases: HashMap<&str, &str>,
+    historical: HashSet<&str>,
+    native_ids: HashSet<&str>,
+) -> bool {
+    let mut seen: HashSet<String> = historical
+        .into_iter()
+        .chain(native_ids)
+        .chain(aliases.keys().copied())
+        .map(str::to_owned)
+        .collect();
+    let mut outstanding: HashMap<String, String> = aliases
+        .into_iter()
+        .map(|(alias, native)| (alias.to_owned(), native.to_owned()))
+        .collect();
+    let mut resolving_previous = !outstanding.is_empty();
     for item in tail {
         match item["type"].as_str() {
             Some("function_call_output") => {
                 let Some(call) = item["call_id"].as_str() else {
                     return false;
                 };
-                if !outstanding.remove(call) {
+                let Some(native) = outstanding.remove(call) else {
                     return false;
+                };
+                if native != call {
+                    item["call_id"] = Value::String(native);
                 }
+                resolving_previous &= !outstanding.is_empty();
             }
-            Some("function_call") => {
+            Some("function_call") if !resolving_previous => {
                 let Some((call, _, _)) = function_call(item) else {
                     return false;
                 };
-                if !outstanding.is_empty() || !seen.insert(call) {
+                if !seen.insert(call.to_owned()) {
                     return false;
                 }
-                outstanding.insert(call);
+                outstanding.insert(call.to_owned(), call.to_owned());
             }
-            Some("message")
-                if outstanding.is_empty()
-                    && matches!(item["role"].as_str(), Some("user" | "assistant")) => {}
-            Some("reasoning") if outstanding.is_empty() => {}
+            _ if outstanding.is_empty() => {}
             _ => return false,
         }
     }

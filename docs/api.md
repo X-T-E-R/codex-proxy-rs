@@ -376,17 +376,20 @@ OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选
 客户端可跳过预热继续正式请求，外部插件 adapter 按各自的协议能力处理
 
 没有显式 `previous_response_id` 时，客户端可继续提交完整历史。Provider 在同一 Client Key、会话、
-已选账号及凭据版本、出口、opening identity 和存活上游 WS 上，先比较上一轮客户端 input 与真实 completed output，
-匹配后只发送新增 input。严格比较失败时，可由原生输出生成有限的确定回填模板：已知文本分块、单个 reasoning summary
-及 function call 的 canonical 表示仅用于认领上轮并确定唯一尾项边界，历史仍以上轮保存的原生 output 为准。
-工具 `call_id/name/arguments` 和结果关联必须匹配；原生快照保留 ID、状态、未知字段、密文及顺序。
-恢复发送仍遵循上述 Codex reasoning 输入兼容规则，API Key 上游保持原条件。
-未知 item、非空 annotations/logprobs、多 reasoning 等未支持重建继续 full
+已选账号及凭据版本、出口、opening identity 和存活上游 WS 上，核实旧客户端 input 和最新完成归属后，
+默认以保存的原生 output 续接，只发送新增 input。严格 raw 匹配是快路径；普通重建按首个新增 user／tool-result
+确定轮边界，支持消息和文本分段、ID/status 重建、reasoning summary 分块或展示缺省，无需命中特定客户端模板。
+原生历史始终保留未知项、标注、密文和工具相对顺序；客户端显式提交的业务正文、未知字段或签名冲突仍完整重建。
+工具 name 和 arguments 原字符串保持一致，结果必须完整且不重复；重新生成的 call ID 只有在调用签名唯一、
+顺序及结果关联明确时才映射为原生 call ID，映射同时用于实际发送和完整恢复。
+恢复发送仍遵循上述 Codex reasoning 输入兼容规则，API Key 上游保持原条件
 
-已知模板与有效新增尾项表示续接意图；客户端要替换最近输出时，应使旧 input 或投影失配，或使用新会话／分叉身份建立新基线。
-参数、历史、归属不匹配或超出内存预算时发送当前 full。已认领的续接在同一身份和既有可重放资格下使用完整原生 full，
-恢复体达到 WS 大小门禁时沿普通新链的 HTTP/SSE 路径，不会将 suffix 发到新连接；
-显式 `previous_response_id` 的 connection-local 续接仍沿用原恢复错误合同
+每轮 instructions、tools、tool_choice、reasoning、输出格式、档位和缓存路由设置使用当前请求值，
+不会仅因这些生成参数变化而重发历史；模型、存储/截断策略或未知顶层属性变化保守建立新链。
+旧 input 内的 system/developer 改写仍是历史编辑，与顶层 instructions 的逐轮替换分开处理。
+历史编辑、压缩、分叉、归属不匹配或超出内存预算时发送当前 full；客户端要有意删除与普通展示缺省完全相同的输出，
+应使用新会话／分叉身份建立新基线。已认领续接的安全恢复使用完整原生 full，达到 WS 大小门禁时沿 HTTP/SSE 路径；
+suffix 不发新连接，显式 connection-local 续接仍沿用原恢复错误合同
 
 Codex OAuth backend 的候选上游为 WS 时，按最终规范化及自动裁剪后的实际 `response.create` 大小执行门禁：
 达到 15 MiB 的普通新链在发送前恢复完整请求并选择 HTTP/SSE；HTTP 和 WS 入站均适用，下游交付协议不变。

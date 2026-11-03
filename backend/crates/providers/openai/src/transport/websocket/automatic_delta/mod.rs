@@ -293,18 +293,32 @@ impl AutomaticDeltaState {
                     .all(|(old, new)| {
                         serde_json::from_str::<Value>(old).ok().as_ref() == Some(new)
                     });
-            if !same {
+            let mapped_tail = tail != &input[end..];
+            if !same || mapped_tail {
                 previous.budget.release(previous.response_id.len());
+                // 工具结果的 call_id 映射也进入原生恢复视图，client full 始终保持原值
+                let mapped: Vec<Box<str>> = if mapped_tail {
+                    tail.iter()
+                        .map(|item| item.to_string().into_boxed_str())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let extra = mapped.iter().map(|item| item.len()).sum::<usize>();
+                let mut output = Vec::with_capacity(previous.output.len() + mapped.len());
+                output.append(&mut previous.output);
+                output.extend(mapped);
                 if !previous.budget.reserve(
-                    std::mem::size_of::<NativePatch>().saturating_add(
-                        previous.output.capacity() * std::mem::size_of::<Box<str>>(),
+                    extra.saturating_add(
+                        std::mem::size_of::<NativePatch>()
+                            .saturating_add(output.capacity() * std::mem::size_of::<Box<str>>()),
                     ),
                 ) {
                     return AutomaticDeltaPreparation::full("budget_exhausted");
                 }
                 patches.push(Arc::new(NativePatch {
-                    client_range: start..end,
-                    output: previous.output,
+                    client_range: start..if mapped_tail { input.len() } else { end },
+                    output,
                     _budget: previous.budget,
                 }));
             }
@@ -484,7 +498,7 @@ fn compare(
     else {
         return AutomaticDeltaPreparation::full("invalid_baseline");
     };
-    if properties(&previous_body) != properties(body) {
+    if continuation_properties(&previous_body) != continuation_properties(body) {
         return AutomaticDeltaPreparation::full("properties_changed");
     }
     let Some(previous_input) = previous_body.get("input").and_then(Value::as_array) else {
@@ -531,9 +545,18 @@ fn compare(
         }
         failure
     };
-    let (count, template) = if let Some(failure) = strict_failure {
-        match projection::boundary(&output, current, previous_input) {
-            Ok((count, template)) => (count, Some(template)),
+    let (tail, template) = if let Some(failure) = strict_failure {
+        let native_calls: Vec<String> = previous
+            .history
+            .patches
+            .iter()
+            .flat_map(|patch| &patch.output)
+            .filter_map(|item| serde_json::from_str::<Value>(item).ok())
+            .filter(|item| item["type"] == "function_call")
+            .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
+            .collect();
+        match projection::boundary(&output, current, previous_input, &native_calls) {
+            Ok(claim) => (claim.tail, Some("turn_boundary")),
             Err(reason) => {
                 let mut prepared = AutomaticDeltaPreparation::prefix_failure(failure);
                 // 原四类诊断保持；受信拒绝单独记录原因
@@ -542,10 +565,10 @@ fn compare(
             }
         }
     } else {
-        (output.len(), None)
+        (current[output.len()..].to_vec(), None)
     };
     AutomaticDeltaPreparation {
-        delta: Some((previous.response_id.to_string(), current[count..].to_vec())),
+        delta: Some((previous.response_id.to_string(), tail)),
         reason: if template.is_some() {
             "trusted_delta"
         } else {
@@ -572,6 +595,34 @@ fn properties(body: &Map<String, Value>) -> Map<String, Value> {
         .entry("type")
         .or_insert_with(|| Value::String("response.create".to_owned()));
     properties
+}
+
+/// previous_response_id 引用历史，不继承本轮生成配置；这些参数仍由当前帧完整发送
+/// model、store、截断/压缩及未知属性变化仍保守建立新链，恢复令牌另用完整参数校验
+fn continuation_properties(body: &Map<String, Value>) -> Map<String, Value> {
+    let mut result = properties(body);
+    for key in [
+        "instructions",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "text",
+        "include",
+        "service_tier",
+        "prompt_cache_key",
+        "metadata",
+        "max_output_tokens",
+        "max_tool_calls",
+        "temperature",
+        "top_p",
+        "user",
+        "safety_identifier",
+        "prompt_cache_retention",
+    ] {
+        result.shift_remove(key);
+    }
+    result
 }
 
 fn items_match(previous: &Value, current: &Value, codex: bool) -> bool {
