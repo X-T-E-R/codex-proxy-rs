@@ -496,9 +496,9 @@ PG 提交后先持久化 batch 单次意图；已有意图或结果未知时保�
 ### 在现役 watchdog 上安装版本化恢复器
 
 `recovery-helper-install.py` 适用于已安装 Task36 单部署 watchdog、当前仍健康运行且 `restart=no` 的站点。
-它保留应用容器和原 `site-recovery.py`，在同目录写入 root 所有、`0600` 的 `site-recovery-confirmed-v1.py`，再原子替换 `binding.json`。
+它保留应用容器、原 `site-recovery.py` 和原 watchdog，在同目录写入 root 所有、`0600` 的 `site-recovery-confirmed-v1.py` 与 `site-recovery-entry-v1.py`，再原子替换 `binding.json`。
 安装只对正式 helper 做一次正常认证/PING，不连接 PG、不终结请求、不释放槽，也不重放部署或恢复 run。
-新 host 仅在未来真实退出代际由原 watchdog 调用
+新 binding 由原 watchdog 调用版本化单次入口，再进入 host；两份工件分别由输入中的 `hostSha256`、`entrySha256` 校验
 
 站点动作须单独批准。在 root 所有、不可被组或其他用户写入的 staging 目录保留以下相对路径，普通文件权限设为 `0600`：
 
@@ -506,11 +506,12 @@ PG 提交后先持久化 batch 单次意图；已有意图或结果未知时保�
 recovery-helper-install.py
 recovery-helper-install-988.json
 site-recovery.py
+site-recovery-entry-v1.py
 task40-prod-upgrade/remote.py
 ```
 
-输入 [recovery-helper-install-988.json](recovery-helper-install-988.json) 固定现役 988 的容器 ID/StartedAt、应用 digest、bac2 helper revision/digest 和 host SHA-256，初始 `accepted=false`。
-`site-recovery.py` 必须是该输入所核的原始字节，不转换换行；helper 镜像必须已由单独批准的精确 digest 拉取准备好，安装器不 pull。
+输入 [recovery-helper-install-988.json](recovery-helper-install-988.json) 固定现役 988 的容器 ID/StartedAt、应用 digest、bac2 helper revision/digest、host 和单次入口 SHA-256，初始 `accepted=false`。
+两份恢复脚本必须是该输入所核的原始字节，不转换换行；helper 镜像必须已由单独批准的精确 digest 拉取准备好，安装器不 pull。
 不要把站点配置或真实凭据放入输入
 
 1. **取得 fresh proposal**。在 Linux root 下执行；`inspect` 只读站点文件、容器/镜像与 timer 状态，运行 host 的 `--describe`，不运行 Redis helper，也不创建维护闸
@@ -542,7 +543,7 @@ task40-prod-upgrade/remote.py
      --manifest "$STAGE/accepted.json"
    ```
 
-   完成结果为 `installed`；只读观察应为 `bindingState=confirmed`、`baselineMatches=true`、`maintenance=absent`、`evidenceMatches=true`、`versionedHostMatches=true`，`helperContainersPresent=[]`。
+   完成结果为 `installed`；只读观察应为 `bindingState=confirmed`、`baselineMatches=true`、`maintenance=absent`、`evidenceMatches=true`、`versionedHostMatches=true`、`versionedEntryMatches=true`，`helperContainersPresent=[]`。
    安装不修改 systemd unit、timer 或 Docker restart policy；timer 只读检查沿用既有部署合同
 
 3. **故障先观察，再受检收束**。同一 operation ID 不能再次 install；超时、丢 ACK 或原子写结果未知时，保留本操作 maintenance 和 `helper-installs/<operationId>/`，使用上面的 `observe`。
@@ -562,8 +563,23 @@ task40-prod-upgrade/remote.py
    结果为 `settled`，随后用 `observe` 核对所选 `bindingState` 与 maintenance 已解除。
    代际、pin、权限或完整性漂移，foreign owner、认证意图已有但 cidfile 身份未确认、仍存在的认证容器、`evidenceMatches=false` 或遗留 `.helper-install.tmp` 都须停止写操作并保留现场，交操作员核查，不能删除意图、临时文件或更换 operation ID 绕过
 
-保留 staging、操作目录内的 accepted 输入、原/新 binding 与新 host 副本，供独立观察和恢复；原 host 与全部完成 run 原样保留。
-后续 Task40 部署消费新绑定时，manifest 的 `recoveryHelper` 必须与新 binding 的 source/image/contract 相同，不能继续声明旧 476 helper
+保留 staging、操作目录内的 accepted 输入、原/新 binding、host 与单次入口副本，供独立观察和恢复；原 host、原 watchdog 与全部完成 run 原样保留。
+恢复旧绑定只原子恢复原 binding 精确字节，两份版本化新工件保留作证，不再处于调用路径。
+后续 Task40 部署消费新绑定时，manifest 的 `recoveryHelper` 必须与新 binding 的 source/image/contract 相同；载体还会核 `recoveryEntry` 的入口摘要、能力和实际 host 路径
+
+未来真实退出时，单次入口先创建维护闸并持久化 `<receipt>.entry-v1.json`，再调用 host。
+非零、传输超时、PG 确认后到 batch intent 之间进程丢失，都会留下维护闸与原 claim；下一 watchdog tick 在维护闸处返回，不再执行恢复命令。
+只有 host 响应与同代 `phase=complete` receipt 的请求集合、batch 完成状态和释放计数一致，入口才解除自己创建的闸，交回原 watchdog 的代际/维护/start-intent 检查；已有 complete claim 仅只读复用结果。
+Task40 调用入口时保留其原 run 专属维护 owner，入口不会解除调用者的闸
+
+故障现场可对原 receipt 只读观察，不调用 PG/Redis 或 host：
+
+```bash
+python3 -B /opt/codex-proxy-rs/.runtime/restart-recovery/site-recovery-entry-v1.py observe \
+  --receipt '/opt/codex-proxy-rs/.runtime/restart-recovery/runs/<原代际>/recovery.json'
+```
+
+输出仅含原 owner、claim/receipt phase 和 batch outcome。未来恢复 unknown 留给操作员按原代际核查；安装器的 `settle` 只适用于其父签仍健康运行的原安装代际，不接管未来退出恢复，也不删除旧 claim 后重试
 
 ## 本地开发
 

@@ -59,6 +59,7 @@ class InstallTest(unittest.TestCase):
         (self.gate / 'runs/completed.json').write_bytes(b'{"phase":"complete","keep":"exact bytes"}\n')
         self.m = {'contract': install.CONTRACT, 'operationId': 'helper-install-' + 'a' * 32,
                   'helper': install.HELPER, 'hostSha256': install.digest((DEPLOY / 'site-recovery.py').read_bytes()),
+                  'entrySha256': install.digest((DEPLOY / install.ENTRY).read_bytes()),
                   'accepted': False, 'baseline': self.b}
         self.calls = []
         self.auth_calls = 0
@@ -76,10 +77,13 @@ class InstallTest(unittest.TestCase):
         self.host = self.base / 'candidate-host.py'
         self.host.write_bytes((DEPLOY / 'site-recovery.py').read_bytes())
         self.host.chmod(0o600)
-        self.operation = install.Installation(self.m, self.host)
+        self.entry = self.base / 'candidate-entry.py'
+        self.entry.write_bytes((DEPLOY / install.ENTRY).read_bytes())
+        self.entry.chmod(0o600)
+        self.operation = install.Installation(self.m, self.host, self.entry)
         self.m = self.operation.inspect()['proposal']
         self.m['accepted'] = True
-        self.operation = install.Installation(self.m, self.host)
+        self.operation = install.Installation(self.m, self.host, self.entry)
 
     def image(self, image, source):
         self.calls.append(('image', image, source))
@@ -138,9 +142,13 @@ class InstallTest(unittest.TestCase):
         binding = json.loads((self.gate / 'binding.json').read_bytes())
         install.remote.recovery_binding(binding, install.HELPER)
         self.assertEqual(binding['runtime'], self.before['runtime'])
-        self.assertEqual(binding['recoveryCommand'][3], self.before['recoveryCommand'][3])
+        argv = binding['recoveryCommand']
+        self.assertEqual(argv[argv.index('--pg-command-json') + 1], self.before['recoveryCommand'][3])
+        self.assertEqual(argv[:4], ['python3', str(self.gate / install.ENTRY), '--recovery-host', str(self.gate / install.HOST)])
         self.host.unlink()
+        self.entry.unlink()
         self.assertEqual(self.operation.observe()['bindingState'], 'confirmed')
+        self.assertTrue(self.operation.observe()['versionedEntryMatches'])
         with self.assertRaisesRegex(RuntimeError, 'already_claimed'):
             self.operation.install()
         self.assertEqual(self.operation.settle('previous')['phase'], 'settled')

@@ -22,6 +22,8 @@ HELPER = {'source': 'bac2c8e0f4d7eae551d8eb194f79d285eede140b',
           'image': 'ghcr.io/x-t-e-r/codex-proxy-rs@sha256:6809441bf0cef500485abd2767f63ddab388ee2f65cae5dd721e3883422742d7',
           'contract': 'cpr-recovery-confirmed/1'}
 HOST = 'site-recovery-confirmed-v1.py'
+ENTRY = 'site-recovery-entry-v1.py'
+ENTRY_CAPABILITY = {'contract': 'cpr-recovery-entry/1', 'hostContract': HELPER['contract'], 'singleAttempt': True}
 OWNER_FIELDS = ('id', 'project', 'service', 'revision')
 GENERATION_FIELDS = ('id', 'imageId', 'pid', 'revision', 'startedAt', 'project', 'service',
                      'composeFiles', 'workingDir', 'configuration')
@@ -77,7 +79,8 @@ def manifest(value, accepted=False):
     require(isinstance(value, dict) and value.get('contract') == CONTRACT and
             re.fullmatch(r'helper-install-[0-9a-f]{32}', value.get('operationId', '')) and
             value.get('helper') == HELPER and
-            re.fullmatch('[0-9a-f]{64}', value.get('hostSha256', '')), 'exact_install_input_required')
+            all(re.fullmatch('[0-9a-f]{64}', value.get(key, '')) for key in ('hostSha256', 'entrySha256')),
+            'exact_install_input_required')
     remote.baseline_identity(value.get('baseline'))
     if accepted:
         require(value.get('accepted') is True and
@@ -88,7 +91,8 @@ def manifest(value, accepted=False):
 
 
 class Installation:
-    def __init__(self, value, host=HERE / 'site-recovery.py'):
+    def __init__(self, value, host=HERE / 'site-recovery.py', entry=HERE / ENTRY):
+        self.entry = entry
         self.m = manifest(value)
         self.gate = BASE / '.runtime/restart-recovery'
         self.root = self.gate / 'helper-installs' / value['operationId']
@@ -175,6 +179,16 @@ class Installation:
                 'host_capability_drift')
         return module
 
+    def entry_payload(self):
+        payload = self.root / 'entry.confirmed.py'
+        if not payload.exists():
+            payload = self.entry
+        source = read(payload)
+        require(digest(source) == self.m['entrySha256'], 'entry_integrity_drift')
+        require(json.loads(remote.command(['python3', str(payload), '--describe'], timeout=15)) == ENTRY_CAPABILITY,
+                'entry_capability_drift')
+        return source
+
     def build_binding(self, before, module):
         argv = before['recoveryCommand']
         module.command(argv[3])
@@ -184,8 +198,10 @@ class Installation:
         if '--pull=never' not in redis:
             redis.insert(2, '--pull=never')
         after = dict(before, helperSource=HELPER['source'], helperImage=HELPER['image'],
-                     helperContract=HELPER['contract'])
-        after['recoveryCommand'] = ['python3', str(self.gate / HOST), '--pg-command-json', argv[3],
+                     helperContract=HELPER['contract'], recoveryEntry={
+                         'contract': ENTRY_CAPABILITY['contract'], 'sha256': self.m['entrySha256']})
+        after['recoveryCommand'] = ['python3', str(self.gate / ENTRY), '--recovery-host', str(self.gate / HOST),
+                                    '--pg-command-json', argv[3],
                                     '--redis-helper-command-json', json.dumps(redis),
                                     '--helper-source', HELPER['source'], '--helper-image', HELPER['image']]
         return after, redis
@@ -210,6 +226,7 @@ class Installation:
             before = json.loads(read(self.gate / 'binding.json'))
             self.previous(before, current)
             self.candidate()
+            self.entry_payload()
             previous = self.integrity()
             proposal = dict(self.m, accepted=False, previous=previous)
             return {'phase': 'proposal', 'capturedAt': remote.now(), 'runtime': current, 'proposal': proposal}
@@ -224,8 +241,8 @@ class Installation:
         with self.locked():
             require(self.maintenance() is None, 'foreign_or_unknown_maintenance')
             require(not self.root.exists(), 'operation_already_claimed_observe_only')
-            require(not (self.gate / HOST).exists() and not (self.gate / HOST).is_symlink(),
-                    'versioned_host_exists_observe_only')
+            require(all(not (self.gate / name).exists() and not (self.gate / name).is_symlink()
+                        for name in (HOST, ENTRY)), 'versioned_host_exists_observe_only')
             current = self.runtime()
             hashes = self.integrity()
             require(hashes == self.m['previous'], 'fresh_previous_integrity_drift')
@@ -233,6 +250,7 @@ class Installation:
             before = json.loads(original)
             self.previous(before, current)
             module = self.candidate()
+            entry = self.entry_payload()
             after, redis = self.build_binding(before, module)
             remote.image(HELPER['image'], HELPER['source'])
             remote.image(remote.HELPER_IMAGE, remote.HELPER_SOURCE)
@@ -247,6 +265,7 @@ class Installation:
             create(self.root / 'binding.before.json', original)
             create(self.root / 'binding.confirmed.json', encoded(after))
             create(self.root / 'host.confirmed.py', read(self.host))
+            create(self.root / 'entry.confirmed.py', entry)
             create(self.root / 'intent.json', encoded({'at': remote.now(), 'singleAttempt': True,
                                                       'runtime': current, 'pid': os.getpid()}))
             try:
@@ -266,6 +285,7 @@ class Installation:
                 replace(self.gate / HOST, payload)
                 require(stat.S_IMODE(secure(self.gate / HOST).st_mode) == 0o600 and
                         digest(read(self.gate / HOST)) == self.m['hostSha256'], 'installed_host_integrity_drift')
+                replace(self.gate / ENTRY, self.entry_payload())
                 self.unchanged(current, hashes)
                 require(read(self.gate / 'binding.json') == original and self.maintenance() == self.marker,
                         'gate_or_binding_drift')
@@ -289,6 +309,7 @@ class Installation:
         before = read(self.root / 'binding.before.json')
         require(digest(before) == self.m['previous']['bindingSha256'], 'previous_backup_integrity_drift')
         module = self.candidate()
+        self.entry_payload()
         after, _ = self.build_binding(json.loads(before), module)
         require(read(self.root / 'binding.confirmed.json') == encoded(after), 'confirmed_backup_integrity_drift')
         return before, encoded(after), module
@@ -316,6 +337,8 @@ class Installation:
             require(digest(read(self.gate / HOST)) == self.m['hostSha256'] and
                     stat.S_IMODE(secure(self.gate / HOST).st_mode) == 0o600,
                     'installed_host_integrity_drift')
+            require(digest(read(self.gate / ENTRY)) == self.m['entrySha256'] and
+                    stat.S_IMODE(secure(self.gate / ENTRY).st_mode) == 0o600, 'installed_entry_integrity_drift')
             require(json.loads(read(self.root / 'authenticated.json')) == module.CAPABILITY,
                     'authenticated_capability_unproven')
             remote.recovery_binding(binding, HELPER)
@@ -381,12 +404,18 @@ class Installation:
                     secure(self.gate / HOST).st_mode) == 0o600
             except (OSError, RuntimeError):
                 pass
+            entry_matches = False
+            try:
+                entry_matches = digest(read(self.gate / ENTRY)) == self.m['entrySha256'] and stat.S_IMODE(
+                    secure(self.gate / ENTRY).st_mode) == 0o600
+            except (OSError, RuntimeError):
+                pass
             # 只输出标识与状态，不导出恢复 argv、配置或业务 receipt
             return {'phase': 'observed', 'operationId': self.m['operationId'],
                     'bindingState': binding_state, 'evidenceMatches': evidence_ok, 'baselineMatches': baseline_ok,
                     'runtime': baseline, 'maintenance': 'absent' if maintenance is None else
                     'owned' if maintenance == self.marker else 'foreign',
-                    'versionedHostMatches': host_matches,
+                    'versionedHostMatches': host_matches, 'versionedEntryMatches': entry_matches,
                     'temporaryFiles': self.temporary_files(),
                     'helperContainerId': self.helper_id(), 'helperContainersPresent': self.helper_containers(),
                     'lastResult': result}

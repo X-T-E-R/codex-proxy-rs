@@ -13,5 +13,6 @@
     "image": "ghcr.io/x-t-e-r/codex-proxy-rs@sha256:6809441bf0cef500485abd2767f63ddab388ee2f65cae5dd721e3883422742d7",
     "contract": "cpr-recovery-confirmed/1"
   },
-  "hostSha256": "e454ae18e65c57c96b9c9fdbe3fd2c274cdf01d30237c15970984623f4d1cb56"
+  "hostSha256": "e454ae18e65c57c96b9c9fdbe3fd2c274cdf01d30237c15970984623f4d1cb56",
+  "entrySha256": "f51f9afff54d78131eada855d34f6325a39bca6702a7527e39f573a70003548e"
 }

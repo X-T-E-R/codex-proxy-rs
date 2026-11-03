@@ -154,9 +154,23 @@ def helper_argv(argv, image):
 
 def recovery_binding(binding, helper=None):
     host = 'site-recovery-confirmed-v1.py' if helper is not None else 'site-recovery.py'
+    gate = BASE / '.runtime/restart-recovery'
+    entry = binding.get('recoveryEntry')
+    prefix = ['python3', str(gate / host)]
+    if entry is not None:
+        require(helper is not None and isinstance(entry, dict) and set(entry) == {'contract', 'sha256'} and
+                entry.get('contract') == 'cpr-recovery-entry/1' and
+                re.fullmatch('[0-9a-f]{64}', entry.get('sha256', '')), 'recovery_entry_binding_drift')
+        path = gate / 'site-recovery-entry-v1.py'
+        require(not path.is_symlink() and path.is_file() and path.stat().st_mode & 0o777 == 0o600 and
+                path.stat().st_uid == os.geteuid() and hashlib.sha256(path.read_bytes()).hexdigest() == entry['sha256'],
+                'recovery_entry_integrity_drift')
+        described = json.loads(command(['python3', str(path), '--describe'], timeout=15))
+        require(described == {'contract': entry['contract'], 'hostContract': helper['contract'], 'singleAttempt': True},
+                'recovery_entry_capability_drift')
+        prefix = ['python3', str(path), '--recovery-host', str(gate / host)]
     require(binding.get('singleDeployment') is True and isinstance(binding.get('recoveryCommand'), list) and
-            binding['recoveryCommand'][:2] == ['python3', str(BASE / '.runtime/restart-recovery' / host)],
-            'recovery_helper_binding_drift')
+            binding['recoveryCommand'][:len(prefix)] == prefix, 'recovery_helper_binding_drift')
     if helper is None:
         require(binding.get('helperSource') == HELPER_SOURCE and binding.get('helperImage') == HELPER_IMAGE and
                 'helperContract' not in binding, 'recovery_helper_binding_drift')
@@ -173,7 +187,7 @@ def recovery_binding(binding, helper=None):
     redis_argv = json.loads(argv[argv.index(flag) + 1])
     require(helper_argv(redis_argv, helper['image']), 'recovery_helper_command_drift')
     image(helper['image'], helper['source'])
-    described = json.loads(command(argv[:2] + ['--describe'], timeout=15))
+    described = json.loads(command(['python3', str(gate / host), '--describe'], timeout=15))
     require(described.get('contract') == helper['contract'], 'recovery_host_capability_drift')
 
 
