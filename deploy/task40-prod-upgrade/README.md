@@ -56,6 +56,8 @@ schema53 只接受 `admissionMode: "healthy"`。准备阶段可以记录现役�
 
    此时才持生命周期锁、写 maintenance、停止精确旧代际并完成其 PG 请求终结/Redis CAS 槽恢复，再 pin 候选并单服务重建。候选自身 Migrator 校验有效索引并登记53；放行要求精确 `schema53 + valid`、fresh 健康、完整保全和 watchdog 绑定重写。原准备、清理收据与 `supervisor-<operation>.json` 分阶段保存
 
+每次 schema53 GO 会先写 `pendingOperation` 并把该动作绑定到 supervisor/worker；前一阶段待启动、执行或发布收据时，下一 GO 会被阻断。supervisor 在同一全局锁内先保存独立阶段收据、再更新 `supervisor.json` 摘要，最后清除 pending。收据的 `localLocks` 记录发布时 worker 已退出、controller 仍持锁；当前锁状态由 fresh verify 核实。pending 留存时先观察收据及原进程，不重复启动
+
 `55000` 为产品前提不符，`55P03` 为忙或锁超时，`57014` 为语句超时；失败后先 inspect 再决定新的授权。进程/传输失败、缺少最终单份JSON均记 unknown，每个动作仅声明并下发一次
 
 ## 同 schema52：一次授权切换

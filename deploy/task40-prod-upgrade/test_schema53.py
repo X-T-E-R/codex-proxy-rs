@@ -299,14 +299,15 @@ class ProductCarrierTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             remote.atomic(run / 'controller.json', {'accepted': accepted(), 'remoteRoot': '/unused',
-                                                   'operation': 'prepare', 'schema53Artifacts': str(schema53.BUNDLE)})
+                                                   'operation': 'prepare', 'pendingOperation': 'prepare',
+                                                   'schema53Artifacts': str(schema53.BUNDLE)})
             ctx = MagicMock()
             with patch.object(controller, 'action_lock', return_value=ctx), \
                  patch.object(controller, 'provision'), patch.object(controller, 'pull_exact'), \
                  patch.object(controller, 'start_remote_preparation', side_effect=RuntimeError('unknown')) as start, \
                  patch.object(controller, 'observe', return_value={'phase': 'schema53_prepared'}):
-                controller.work(run)
-                controller.work(run)
+                controller.work(run, 'prepare')
+                controller.work(run, 'prepare')
             self.assertEqual(start.call_count, 1)
             self.assertTrue(controller.read(run / 'controller.json')['schemaMayHaveStarted'])
 
@@ -340,7 +341,8 @@ class ProductCarrierTest(unittest.TestCase):
             prepared = {'phase': 'schema53_prepared'}
             deployed = {'phase': 'deployed'}
             remote.atomic(run / 'controller.json', {'accepted': accepted(), 'remoteRoot': '/unused',
-                                                   'operation': 'prepare', 'schema53Artifacts': str(schema53.BUNDLE)})
+                                                   'operation': 'prepare', 'pendingOperation': 'prepare',
+                                                   'schema53Artifacts': str(schema53.BUNDLE)})
             with patch.object(controller, 'action_lock', return_value=MagicMock()), \
                  patch.object(controller, 'provision') as provision, patch.object(controller, 'pull_exact') as pull, \
                  patch.object(controller, 'start_remote_preparation', return_value={}) as prepare, \
@@ -351,12 +353,12 @@ class ProductCarrierTest(unittest.TestCase):
                  patch.object(controller, 'spawn_supervisor', return_value={}), \
                  patch.object(controller.subprocess, 'Popen') as child:
                 child.return_value.returncode = 0
-                controller.work(run)
-                controller.supervise(run)
+                controller.work(run, 'prepare')
+                controller.supervise(run, 'prepare')
                 original = (run / 'supervisor-prepare.json').read_bytes()
                 controller.continue_schema53(run, 'activate')
-                controller.work(run)
-                controller.supervise(run)
+                controller.work(run, 'activate')
+                controller.supervise(run, 'activate')
                 with self.assertRaisesRegex(RuntimeError, 'already_activated_or_fenced'):
                     controller.continue_schema53(run, 'activate')
             value = controller.read(run / 'controller.json')
@@ -370,7 +372,7 @@ class ProductCarrierTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
             remote.atomic(run / 'controller.json', {'accepted': accepted(), 'operation': 'prepare',
-                                                   'phase': 'finished'})
+                                                   'pendingOperation': 'prepare', 'phase': 'finished'})
             @contextmanager
             def lock(*args):
                 yield
@@ -380,7 +382,7 @@ class ProductCarrierTest(unittest.TestCase):
             with patch.object(controller, 'action_lock', side_effect=lock), \
                  patch.object(controller.subprocess, 'Popen') as child:
                 child.return_value.returncode = 0
-                controller.supervise(run)
+                controller.supervise(run, 'prepare')
             self.assertEqual(controller.read(run / 'supervisor-prepare.json')['phase'], 'finished')
             self.assertFalse((run / 'supervisor-activate.json').exists())
             self.assertEqual(controller.read(run / 'controller.json')['phase'], 'activate_authorized')

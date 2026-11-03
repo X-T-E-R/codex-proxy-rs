@@ -274,13 +274,24 @@ def action_lock(path, seconds=420):
             msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def work(run_dir):
+def bound_operation(j, operation):
+    if j['accepted']['schema'] == 53:
+        remote.require(operation in ('prepare', 'activate', 'cleanup') and
+                       j.get('operation') == operation and j.get('pendingOperation') == operation,
+                       'schema53_authorized_operation_binding_required')
+    else:
+        remote.require(operation in (None, 'launch'), 'schema52_launch_operation_required')
+    return operation or j.get('operation', 'launch')
+
+
+def work(run_dir, operation=None):
     with action_lock(run_dir / 'worker.lock'):
         jpath = run_dir / 'controller.json'
         j = read(jpath)
+        # 旧/重复进程不准改写另一授权阶段的 journal，更不准重新下发
+        operation = bound_operation(j, operation)
         try:
             remote.require(not (run_dir / 'recovery-requested').exists(), 'locally_fenced')
-            operation = j.get('operation', 'launch')
             if operation in ('launch', 'prepare'):
                 remote.require(not j.get('provisionIntent'), 'provision_already_claimed_no_reissue')
                 j['phase'] = 'provision_intent'; j['provisionIntent'] = True; save(jpath, j)
@@ -320,19 +331,25 @@ def work(run_dir):
             save(jpath, j)
 
 
-def supervise(run_dir):
+def supervise(run_dir, operation=None):
     with action_lock(HERE / 'controller-active.lock'):
-        child = subprocess.Popen([sys.executable, '-B', str(HERE / 'controller.py'), 'worker', '--run-dir', str(run_dir)],
+        operation = bound_operation(read(run_dir / 'controller.json'), operation)
+        child = subprocess.Popen([sys.executable, '-B', str(HERE / 'controller.py'), 'worker', '--run-dir', str(run_dir),
+                                  '--operation', operation],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         child.wait()
-        # 释放全局锁前固定本阶段，避免新 GO 先改 operation 而错写阶段收据
         j = read(run_dir / 'controller.json')
-    # supervisor 与 worker 均已退出持锁范围；不自动重发远端动作
-    value = {'phase': j['phase'], 'workerExit': child.returncode,
-             'localLocks': 'unheld', 'capturedAt': remote.now()}
-    save(run_dir / 'supervisor.json', value)
-    if j['accepted']['schema'] == 53:
-        save(run_dir / ('supervisor-' + j['operation'] + '.json'), value)
+        bound_operation(j, operation)
+        value = {'phase': j['phase'], 'operation': operation, 'workerExit': child.returncode,
+                 'localLocks': {'controller': 'held_during_publication', 'worker': 'process_exited'},
+                 'capturedAt': remote.now()}
+        # 发布也属于同一阶段：先保独立收据，再更新摘要，最后开放下一授权
+        if j['accepted']['schema'] == 53:
+            save(run_dir / ('supervisor-' + operation + '.json'), value)
+        save(run_dir / 'supervisor.json', value)
+        if j['accepted']['schema'] == 53 and j['phase'] in ('finished', 'worker_exit'):
+            j.pop('pendingOperation')
+            save(run_dir / 'controller.json', j)
 
 
 def recover_local(run_dir):
@@ -389,11 +406,13 @@ def takeover(run_dir):
                     'launchAckUnknown': j.get('takeoverAckUnknown', False)}
 
 
-def spawn_supervisor(run_dir):
-    child = subprocess.Popen([sys.executable, '-B', str(HERE / 'controller.py'), 'supervise', '--run-dir', str(run_dir)],
+def spawn_supervisor(run_dir, operation):
+    child = subprocess.Popen([sys.executable, '-B', str(HERE / 'controller.py'), 'supervise', '--run-dir', str(run_dir),
+                              '--operation', operation],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
-    return {'phase': 'detached_supervisor_started', 'pid': child.pid, 'runDirectory': str(run_dir)}
+    return {'phase': 'detached_supervisor_started', 'pid': child.pid, 'runDirectory': str(run_dir),
+            'operation': operation}
 
 
 def continue_schema53(run_dir, operation):
@@ -404,6 +423,8 @@ def continue_schema53(run_dir, operation):
             remote.require(j['accepted']['schema'] == 53 and j.get('schemaMayHaveStarted') and
                            not j.get('remoteMayHaveStarted') and not j.get('launchIntent') and
                            not (run_dir / 'recovery-requested').exists(), 'schema53_run_already_activated_or_fenced')
+            remote.require(not j.get('pendingOperation') and j.get('phase') in ('finished', 'worker_exit'),
+                           'schema53_previous_operation_unsettled')
             authorization = operation + 'Authorized'
             remote.require(not j.get(authorization), 'schema53_operation_already_authorized_no_reissue')
             if operation == 'activate':
@@ -412,11 +433,11 @@ def continue_schema53(run_dir, operation):
                                'schema53_preparation_unverified_no_activation')
             else:
                 remote.require(not j.get('schema53CleanupIntent'), 'schema53_cleanup_already_claimed_no_reissue')
-            j['operation'] = operation
+            j['operation'] = j['pendingOperation'] = operation
             j[authorization] = True
             j['phase'] = operation + '_authorized'
             save(run_dir / 'controller.json', j)
-            return spawn_supervisor(run_dir)
+            return spawn_supervisor(run_dir, operation)
 
 
 def main():
@@ -425,6 +446,7 @@ def main():
                                      'supervise', 'worker', 'status', 'recover-local', 'takeover'])
     p.add_argument('--accepted', type=Path)
     p.add_argument('--run-dir', type=Path)
+    p.add_argument('--operation', choices=['launch', 'prepare', 'activate', 'cleanup'])
     p.add_argument('--GO', action='store_true')
     p.add_argument('--mode', choices=['healthy', 'disk_logging_recovery'], default='healthy')
     p.add_argument('--artifacts', type=Path, default=HERE / 'schema53-contract')
@@ -447,17 +469,19 @@ def main():
         j = {'runId': run_dir.name, 'phase': 'prepared', 'accepted': m, 'operation': a.action,
              'remoteRoot': '/opt/codex-proxy-rs/.runtime/deployments/' + run_dir.name,
              'startedAt': remote.now(), 'providerProbes': 0, 'channelMutations': 0}
+        if m['schema'] == 53:
+            j['pendingOperation'] = a.action
         if a.artifacts:
             j['schema53Artifacts'] = str(a.artifacts.resolve())
         save(run_dir / 'controller.json', j)
         subprocess.run(['icacls', str(run_dir), '/inheritance:r', '/grant:r', os.getlogin() + ':(OI)(CI)F'],
                        capture_output=True, check=True)
-        print(json.dumps(spawn_supervisor(run_dir)))
+        print(json.dumps(spawn_supervisor(run_dir, a.action)))
         return
     remote.require(a.run_dir and a.run_dir.resolve().parent == HERE and
                    a.run_dir.name.startswith('task40-') and (a.run_dir / 'controller.json').exists(), 'owned_run_required')
-    if a.action == 'supervise': supervise(a.run_dir)
-    elif a.action == 'worker': work(a.run_dir)
+    if a.action == 'supervise': supervise(a.run_dir, a.operation)
+    elif a.action == 'worker': work(a.run_dir, a.operation)
     elif a.action == 'recover-local':
         remote.require(a.GO, 'explicit_GO_for_local_fence_required')
         print(json.dumps(recover_local(a.run_dir)))
