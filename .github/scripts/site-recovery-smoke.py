@@ -18,7 +18,19 @@ os.environ['PGPASSWORD'] = os.environ['CI_POSTGRES_PASSWORD']
 os.environ['REDISCLI_AUTH'] = os.environ['CI_REDIS_PASSWORD']
 PG = COMPOSE + ['exec', '-T', '-e', 'PGPASSWORD', 'postgres', 'psql', '-U', 'codex_proxy', '-d', 'codex_proxy']
 REDIS = COMPOSE + ['exec', '-T', '-e', 'REDISCLI_AUTH', 'redis', 'redis-cli', '--raw']
-HELPER = COMPOSE + ['run', '--rm', '-T', '--no-deps', 'codex-proxy-rs', '/app/bin/codex-proxy-rs', 'site-recovery-redis']
+HELPER_IMAGE = recovery.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', os.environ['CPR_IMAGE']])
+HELPER_SOURCE = recovery.run(['docker', 'image', 'inspect', '--format',
+    '{{index .Config.Labels "org.opencontainers.image.revision"}}', HELPER_IMAGE])
+
+
+def helper(*environment):
+    return ['docker', 'run', '--rm', '-i', '--network', os.environ['COMPOSE_PROJECT_NAME'] + '_default',
+        '--mount', 'type=bind,src=' + str(ROOT / 'deploy/config.yaml') + ',dst=/app/deploy/config.yaml,readonly',
+        '-e', 'CPR_REDIS_URL=redis://redis:6379/', *environment,
+        HELPER_IMAGE, '/app/bin/codex-proxy-rs', 'site-recovery-redis']
+
+
+HELPER = helper()
 checks = []
 
 
@@ -44,6 +56,7 @@ old = recovery.run(['docker', 'inspect', '--format', '{{.Id}}', old])
 recovery.run(['docker', 'update', '--restart=no', old])
 with tempfile.TemporaryDirectory() as directory:
     args = SimpleNamespace(old_container=old, pg=PG, redis=HELPER,
+        helper_image=HELPER_IMAGE, helper_source=HELPER_SOURCE,
         receipt=str(Path(directory) / 'receipt.json'), apply=True)
     recovery.guard(args)
     recovery.run(['docker', 'start', old])
@@ -62,11 +75,15 @@ with tempfile.TemporaryDirectory() as directory:
 
     writer = subprocess.Popen(PG + ['-X', '-q', '-A', '-t'], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    writer.stdin.write("select 'writer-ready'; select pg_sleep(3);\n")
-    writer.stdin.close()
-    assert writer.stdout.readline().strip() == 'writer-ready'
-    refused(lambda: recovery.execute(args))
-    writer.wait(timeout=10)
+    try:
+        # 保持已确认的数据库会话直到检查结束，不让容器启动耗时穿过固定 sleep
+        writer.stdin.write("select 'writer-ready';\n")
+        writer.stdin.flush()
+        assert writer.stdout.readline().strip() == 'writer-ready'
+        refused(lambda: recovery.execute(args))
+    finally:
+        writer.stdin.close()
+        writer.wait(timeout=10)
     assert writer.returncode == 0
     checks.append('actual other PG client refused')
 
@@ -107,8 +124,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     # 只继承认证变量名，值不在 argv 或 receipt 中；错误认证先于任何 PG 终结
     os.environ['CPR_REDIS_PASSWORD'] = 'synthetic-intentionally-wrong'
-    args.redis = COMPOSE + ['run', '--rm', '-T', '--no-deps', '-e', 'CPR_REDIS_PASSWORD',
-        'codex-proxy-rs', '/app/bin/codex-proxy-rs', 'site-recovery-redis']
+    args.redis = helper('-e', 'CPR_REDIS_PASSWORD')
     recovery.command(json.dumps(args.redis), helper=True)
     refused(lambda: recovery.execute(args))
     assert sql("select count(*) from model_requests where id like 'req_ci_recovery_%' and outcome='running';") == '2'
@@ -131,8 +147,8 @@ with tempfile.TemporaryDirectory() as directory:
     sql("update model_request_leases set lease_expires_at=lease_expires_at-interval '1 second' where request_id='req_ci_recovery_unsent';")
     checks.append('changed unexpired lease refuses completion and Redis release')
 
-    # 模拟 PG 已提交、Redis 尚未执行的进程中断，再以同一 owner/receipt 继续
-    with patch.object(recovery, 'release', side_effect=RuntimeError('synthetic stage interruption')):
+    # PG 已提交但 batch 意图尚未声明时中断，原 receipt 仍可精确续作
+    with patch.object(recovery, 'replace_receipt', side_effect=RuntimeError('synthetic interruption before batch intent')):
         refused(lambda: recovery.execute(args))
     assert sql("select count(*) from model_requests where id like 'req_ci_recovery_%' and outcome='incomplete' and error_kind='process_interrupted';") == '2'
     assert sql("select count(*) from model_request_leases where request_id like 'req_ci_recovery_%';") == '0'
@@ -155,7 +171,7 @@ with tempfile.TemporaryDirectory() as directory:
     # stdout 是 watchdog 消费的单 JSON；CLI argv 不包含认证值
     cli = subprocess.run(['python', 'deploy/site-recovery.py', '--old-container', old,
         '--pg-command-json', json.dumps(PG), '--redis-helper-command-json', json.dumps(HELPER),
-        '--receipt', args.receipt, '--ack-single-deployment', '--apply'],
+        '--helper-image', HELPER_IMAGE, '--helper-source', HELPER_SOURCE, '--receipt', args.receipt, '--ack-single-deployment', '--apply'],
         text=True, capture_output=True, timeout=120)
     assert cli.returncode == 0, cli.stderr
     assert json.loads(cli.stdout)['phase'] == 'complete'
@@ -166,5 +182,33 @@ with tempfile.TemporaryDirectory() as directory:
     assert before_migrations == sql('select jsonb_agg(jsonb_build_array(version,success) order by version) from _sqlx_migrations;')
     assert before_send == sql("select jsonb_agg(jsonb_build_array(id,attempt_count,upstream_send_state) order by id) from model_requests where id like 'req_ci_recovery_%';")
     checks.append('migration ledger and real not-sent/sent attempt facts unchanged')
+
+    # 使用独立请求证明真实 batch 已成功但 ACK 丢失时不能重新释放或发布 complete
+    unknown_request = 'req_ci_recovery_ack'
+    sql("""insert into model_requests(id,client_api_key_ref,operation,client_transport,outcome,started_at,request_observation_json)
+      select 'req_ci_recovery_ack',client_api_key_ref,operation,client_transport,'running',started_at,request_observation_json
+      from model_requests where id='req_ci_recovery_unsent';
+      insert into model_request_leases values('req_ci_recovery_ack',now()+interval '1 hour');""")
+    redis('ZADD', active, '9000000000000', unknown_request)
+    for key in accounts:
+        redis('ZADD', key, '9000000000000', 'owner|ack|1')
+        redis('HSET', key + ':detail:ack', 'facts', json.dumps({'request_id': unknown_request, 'client_key_id': client}))
+    args.receipt = str(Path(directory) / 'lost-ack.json')
+    actual_release = recovery.release
+    batches = []
+    def lost_ack(*params):
+        batches.append(actual_release(*params))
+        raise RuntimeError('synthetic acknowledgement loss after actual batch success')
+    with patch.object(recovery, 'release', side_effect=lost_ack):
+        refused(lambda: recovery.execute(args))
+    assert batches == [{'accountSlots': 2, 'clientSlots': 1}]
+    assert json.loads(Path(args.receipt).read_text())['batch']['outcome'] == 'unknown'
+    with patch.object(recovery, 'release') as retry:
+        refused(lambda: recovery.execute(args))
+        retry.assert_not_called()
+    assert sql("select outcome from model_requests where id='req_ci_recovery_ack';") == 'incomplete'
+    assert redis('ZRANGE', active, '0', '-1') == other
+    assert sql('select count(*) from client_api_key_charge_events;') == before_ledger
+    checks.append('actual batch succeeded then ACK lost: durable unknown, no same-receipt batch reissue')
 
 print(json.dumps({'checks': checks, 'count': len(checks)}, indent=2))

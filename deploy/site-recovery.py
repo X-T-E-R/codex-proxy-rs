@@ -3,7 +3,7 @@
 
 调用方必须全程持有站点生命周期锁、维护闸和单部署写入授权。
 PG 使用现有 peer/服务认证的 psql argv；Redis 使用同镜像 site-recovery-redis 子命令的正常配置认证。
-默认 prepare；只有 --apply 写入。每个旧容器 run 使用独立持久 receipt，失败后用原 receipt 重入。
+默认 prepare；只有 --apply 写入。每个旧容器 run 使用独立持久 receipt，已声明 batch 只能观察，不自动重发。
 """
 import argparse
 import csv
@@ -15,7 +15,12 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
+CONTRACT = 'cpr-recovery-confirmed/1'
+CAPABILITY = {'contract': CONTRACT, 'maxRequests': 5000, 'maxInputBytes': 2 * 1024 * 1024,
+    'maxMatchedKeysPerPool': 10000, 'maxMembersPerSet': 5000,
+    'maxScanPagesPerPool': 1024, 'timeoutMillis': 10000, 'transportTimeoutSeconds': 15}
 NAMESPACE = 'codex-proxy-rs'
 SNAPSHOT = """select coalesce(jsonb_agg(jsonb_build_object(
 'id',r.id,'client',r.client_api_key_ref,'started',r.started_at::text,
@@ -69,8 +74,8 @@ PROJECTION = ('{"Id":{{json .Id}},"Running":{{json .State.Running}},'
     '"Project":{{json (index .Config.Labels "com.docker.compose.project")}}}')
 
 
-def run(argv, data=None):
-    result = subprocess.run(argv, input=data, text=True, capture_output=True, timeout=30)
+def run(argv, data=None, timeout=30):
+    result = subprocess.run(argv, input=data, text=True, capture_output=True, timeout=timeout)
     if result.returncode:
         raise RuntimeError('command failed; raw stderr intentionally not exported')
     return result.stdout.strip()
@@ -98,7 +103,10 @@ def pg(args, sql):
 
 
 def redis(args, request):
-    return json.loads(run(args.redis, json.dumps(request)))
+    data = json.dumps(request)
+    if len(data.encode()) > CAPABILITY['maxInputBytes']:
+        raise ValueError('recovery input exceeds bound')
+    return json.loads(run(args.redis, data, timeout=CAPABILITY['transportTimeoutSeconds']))
 
 
 def guard(args):
@@ -172,33 +180,45 @@ def sync_directory(path):
 
 def release(args, rows, completed):
     approved = {row['id']: row['client'] for row in rows if row['id'] in completed}
-    counts = {'accountSlots': 0, 'clientSlots': 0}
     if not approved:
-        return counts
-    for reserved in (False, True):
-        cursor, scanned = '0', 0
-        while True:
-            cursor, keys = redis(args, {'kind': 'scan', 'cursor': int(cursor), 'reserved': reserved})
-            for key in keys:
-                counts['accountSlots'] += int(redis(args, {'kind': 'releaseAccount', 'key': key, 'requests': approved}))
-            scanned += len(keys)
-            if scanned > 10000:
-                raise RuntimeError('recovery key scan exceeds bound')
-            if str(cursor) == '0':
-                break
-    grouped = {}
-    for request, client in approved.items():
-        grouped.setdefault(client, []).append(request)
-    for client, requests in grouped.items():
-        counts['clientSlots'] += int(redis(args, {'kind': 'releaseClient', 'client': client, 'requests': requests}))
+        return {'accountSlots': 0, 'clientSlots': 0}
+    result = redis(args, {'kind': 'releaseConfirmed', 'requests': approved,
+        'maxScanPagesPerPool': CAPABILITY['maxScanPagesPerPool'], 'timeoutMillis': CAPABILITY['timeoutMillis']})
+    counts = result.get('released', {})
+    if (result.get('contract') != CONTRACT or set(counts) != {'accountSlots', 'clientSlots'}
+            or not all(type(value) is int and value >= 0 for value in counts.values())):
+        raise RuntimeError('recovery batch response unproven')
     return counts
+
+
+def admit_helper(args):
+    if (not re.fullmatch(r'(?:ghcr\.io/x-t-e-r/codex-proxy-rs@)?sha256:[0-9a-f]{64}', args.helper_image)
+            or not re.fullmatch('[0-9a-f]{40}', args.helper_source)
+            or args.redis[:2] != ['docker', 'run'] or args.redis.count(args.helper_image) != 1
+            or args.redis[-3:] != [args.helper_image, '/app/bin/codex-proxy-rs', 'site-recovery-redis']):
+        raise ValueError('exact helper source/image and docker run required')
+    source = run(['docker', 'image', 'inspect', '--format',
+        '{{index .Config.Labels "org.opencontainers.image.revision"}}', args.helper_image])
+    if source != args.helper_source:
+        raise RuntimeError('helper image revision drift')
+
+
+def replace_receipt(path, receipt):
+    temporary = path.with_suffix(path.suffix + '.tmp')
+    save(temporary, receipt, exclusive=True)
+    os.replace(temporary, path)
+    sync_directory(path.parent)
 
 
 def execute(args):
     path = Path(args.receipt)
     identity = guard(args)
-    # 在 PG 写入前先验证正常 Redis 认证路径；错误认证必须不触发终结
-    redis(args, {'kind': 'scan', 'cursor': 0, 'reserved': False})
+    admit_helper(args)
+    # 能力响应同时证明正常认证；旧 helper 必须在 PG 写入前拒绝，不回落逐条路线
+    auth_started = time.monotonic()
+    if redis(args, {'kind': 'authenticate'}) != CAPABILITY:
+        raise RuntimeError('exact recovery batch capability required')
+    timings = {'authenticateMillis': round((time.monotonic() - auth_started) * 1000)}
     if path.exists():
         if path.is_symlink():
             raise RuntimeError('receipt must not be a symlink')
@@ -206,6 +226,10 @@ def execute(args):
         if receipt['owner'] != identity:
             raise RuntimeError('receipt belongs to another container run')
         rows = validate_rows(receipt['requests'])
+        if receipt.get('phase') == 'complete':
+            return {'phase': 'complete', 'requests': len(receipt['completed']), **receipt['released']}
+        if receipt.get('batch') or path.with_suffix(path.suffix + '.tmp').exists():
+            raise RuntimeError('recovery batch already claimed; observe original receipt, do not reissue')
     else:
         rows = validate_rows(json.loads(pg(args, SNAPSHOT)))
         receipt = {'owner': identity, 'requests': rows, 'phase': 'prepared'}
@@ -217,6 +241,7 @@ def execute(args):
     if not args.apply:
         return {'phase': 'prepared', 'requests': len(rows)}
     guard(args)
+    pg_started = time.monotonic()
     result = pg(args, apply_sql(rows))
     arrays = [line for line in result.splitlines() if line.strip().startswith('[')]
     if len(arrays) != 1:
@@ -224,22 +249,36 @@ def execute(args):
     completed = set(json.loads(arrays[0]))
     if completed != {row['id'] for row in rows}:
         raise RuntimeError('request identity or lease changed; manual reconciliation required')
+    timings['pgMillis'] = round((time.monotonic() - pg_started) * 1000)
     guard(args)
-    counts = release(args, rows, completed)
-    receipt.update(phase='complete', completed=sorted(completed), released=counts)
-    temporary = path.with_suffix(path.suffix+'.tmp')
-    save(temporary, receipt)
-    os.replace(temporary, path)
-    sync_directory(path.parent)
+    # PG 已提交，先持久化单次 batch 意图；崩溃/丢 ACK 只能观察原收据，不自动重发
+    receipt['batch'] = {'contract': CONTRACT, 'outcome': 'intent'}
+    replace_receipt(path, receipt)
+    batch_started = time.monotonic()
+    try:
+        counts = release(args, rows, completed)
+    except Exception:
+        receipt['batch']['outcome'] = 'unknown'
+        replace_receipt(path, receipt)
+        raise
+    timings['batchMillis'] = round((time.monotonic() - batch_started) * 1000)
+    receipt['batch']['outcome'] = 'completed'
+    receipt.update(phase='complete', completed=sorted(completed), released=counts, timings=timings)
+    replace_receipt(path, receipt)
     # 此处 complete 仅指 manifest 内的可证明请求；无 detail/关联不明的槽仍保 TTL
     return {'phase': 'complete', 'requests': len(completed), **counts}
 
 
 def main():
+    if sys.argv[1:] == ['--describe']:
+        print(json.dumps(CAPABILITY))
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--old-container', required=True)
     parser.add_argument('--pg-command-json', required=True)
     parser.add_argument('--redis-helper-command-json', required=True)
+    parser.add_argument('--helper-image', required=True)
+    parser.add_argument('--helper-source', required=True)
     parser.add_argument('--receipt', required=True)
     parser.add_argument('--ack-single-deployment', action='store_true', required=True)
     parser.add_argument('--apply', action='store_true')

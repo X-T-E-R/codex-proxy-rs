@@ -66,6 +66,9 @@ def verify(candidate, source, output):
                REDISCLI_AUTH=uuid.uuid4().hex + uuid.uuid4().hex[:16])
     with tempfile.TemporaryDirectory(prefix=project) as directory:
         directory = Path(directory)
+        # 固定旧 helper 必须搭配其原 host，不把候选 batch 合同加到旧部署入口
+        recovery_host = directory / 'site-recovery.py'
+        recovery_host.write_text(run(['git', 'show', HELPER_SOURCE + ':deploy/site-recovery.py']), encoding='utf-8')
         deploy = directory / 'deploy'
         deploy.mkdir()
         config = (ROOT / 'deploy/config.example.yaml').read_text(encoding='utf-8')
@@ -163,7 +166,7 @@ def verify(candidate, source, output):
                       '-e', 'CPR_REDIS_URL=redis://redis:6379/',
                       '-e', 'CPR_DATABASE_URL=postgres://codex_proxy@must-not-connect.invalid:5432/codex_proxy',
                       HELPER_IMAGE, '/app/bin/codex-proxy-rs', 'site-recovery-redis']
-            value = json.loads(run([os.sys.executable, str(ROOT / 'deploy/site-recovery.py'), '--old-container', full,
+            value = json.loads(run([os.sys.executable, str(recovery_host), '--old-container', full,
                                    '--pg-command-json', json.dumps(pg), '--redis-helper-command-json', json.dumps(helper),
                                    '--receipt', str(directory / (label + '-recovery.json')), '--ack-single-deployment', '--apply'],
                                   timeout=1800, env=env))

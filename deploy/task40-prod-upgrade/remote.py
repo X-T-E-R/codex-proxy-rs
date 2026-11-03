@@ -119,7 +119,47 @@ def manifest(m):
                 isinstance(evidence.get('evidenceRef'), str) and evidence['evidenceRef'].strip() and
                 isinstance(evidence.get('healthFailures'), list) and evidence['healthFailures'],
                 'exact_disk_incident_and_parent_evidence_required')
+    if 'recoveryHelper' in m:
+        recovery_helper(m['recoveryHelper'])
     return m
+
+
+def recovery_helper(value):
+    require(isinstance(value, dict) and set(value) == {'source', 'image', 'contract'} and
+            re.fullmatch('[0-9a-f]{40}', value.get('source', '')) and
+            re.fullmatch(IMAGE_RE, value.get('image', '')) and
+            value.get('contract') == 'cpr-recovery-confirmed/1' and
+            value['source'] != HELPER_SOURCE and value['image'] != HELPER_IMAGE,
+            'exact_batch_helper_admission_required')
+    return value
+
+
+def recovery_binding(binding, helper=None):
+    host = 'site-recovery-confirmed-v1.py' if helper is not None else 'site-recovery.py'
+    require(binding.get('singleDeployment') is True and isinstance(binding.get('recoveryCommand'), list) and
+            binding['recoveryCommand'][:2] == ['python3', str(BASE / '.runtime/restart-recovery' / host)],
+            'recovery_helper_binding_drift')
+    if helper is None:
+        require(binding.get('helperSource') == HELPER_SOURCE and binding.get('helperImage') == HELPER_IMAGE and
+                'helperContract' not in binding, 'recovery_helper_binding_drift')
+        return
+    helper = recovery_helper(helper)
+    require(binding.get('helperSource') == helper['source'] and binding.get('helperImage') == helper['image'] and
+            binding.get('helperContract') == helper['contract'], 'recovery_helper_binding_drift')
+    argv = binding['recoveryCommand']
+    for flag, expected in (('--helper-source', helper['source']), ('--helper-image', helper['image'])):
+        require(argv.count(flag) == 1 and argv.index(flag) + 1 < len(argv) and
+                argv[argv.index(flag) + 1] == expected, 'recovery_helper_command_drift')
+    flag = '--redis-helper-command-json'
+    require(argv.count(flag) == 1 and argv.index(flag) + 1 < len(argv), 'recovery_helper_command_drift')
+    redis_argv = json.loads(argv[argv.index(flag) + 1])
+    require(isinstance(redis_argv, list) and redis_argv[:2] == ['docker', 'run'] and
+            redis_argv.count(helper['image']) == 1 and
+            redis_argv[-3:] == [helper['image'], '/app/bin/codex-proxy-rs', 'site-recovery-redis'],
+            'recovery_helper_command_drift')
+    image(helper['image'], helper['source'])
+    described = json.loads(command(argv[:2] + ['--describe'], timeout=15))
+    require(described.get('contract') == helper['contract'], 'recovery_host_capability_drift')
 
 
 def pin(path):
@@ -743,11 +783,7 @@ class Deployment:
         old = container()
         bound_runtime(old, self.b)
         require(binding['runtime'] == {k: old[k] for k in ('id', 'project', 'service', 'revision')}, 'restart_binding_runtime_drift')
-        require(binding.get('singleDeployment') is True and binding.get('helperSource') == HELPER_SOURCE and
-                binding.get('helperImage') == HELPER_IMAGE and
-                isinstance(binding.get('recoveryCommand'), list) and
-                binding['recoveryCommand'][:2] == ['python3', str(BASE / '.runtime/restart-recovery/site-recovery.py')],
-                'recovery_helper_binding_drift')
+        recovery_binding(binding, self.m.get('recoveryHelper'))
         require(command(['systemctl', 'is-enabled', 'cpr-restart-recovery.timer']).decode().strip() == 'enabled' and
                 command(['systemctl', 'is-active', 'cpr-restart-recovery.timer']).decode().strip() == 'active',
                 'recovery_watchdog_not_active')
@@ -1129,10 +1165,7 @@ class Deployment:
             maintenance_owner = maintenance.read_text() if maintenance.exists() else None
             require(maintenance_owner in (None, self.root.name), 'takeover_maintenance_owner_drift')
             self.binding = json.loads((self.gate / 'binding.json').read_text())
-            require(self.binding.get('helperSource') == HELPER_SOURCE and
-                    self.binding.get('helperImage') == HELPER_IMAGE and self.binding.get('singleDeployment') is True and
-                    self.binding.get('recoveryCommand', [])[:2] ==
-                    ['python3', str(self.gate / 'site-recovery.py')], 'takeover_helper_drift')
+            recovery_binding(self.binding, self.m.get('recoveryHelper'))
             require(command(['docker', 'inspect', '--format', '{{json .HostConfig.RestartPolicy.Name}}', SERVICE]).decode().strip().strip('"') == 'no',
                     'takeover_restart_policy_drift')
             require(opaque_env_digest(BASE / '.env') == self.result['envOpaqueDigest'], 'takeover_env_opaque_drift')
@@ -1304,10 +1337,10 @@ def baseline(mode='healthy'):
     gate = BASE / '.runtime/restart-recovery'
     require(not (gate / 'maintenance').exists(), 'restart_maintenance_occupied')
     binding = json.loads((gate / 'binding.json').read_text())
-    require(binding['runtime'] == {k: old[k] for k in ('id', 'project', 'service', 'revision')} and
-            binding.get('helperSource') == HELPER_SOURCE and binding.get('helperImage') == HELPER_IMAGE and
-            binding.get('singleDeployment') is True and binding.get('recoveryCommand', [])[:2] ==
-            ['python3', str(gate / 'site-recovery.py')], 'restart_binding_drift')
+    require(binding['runtime'] == {k: old[k] for k in ('id', 'project', 'service', 'revision')}, 'restart_binding_drift')
+    helper = ({'source': binding.get('helperSource'), 'image': binding.get('helperImage'),
+               'contract': binding.get('helperContract')} if 'helperContract' in binding else None)
+    recovery_binding(binding, helper)
     require(command(['systemctl', 'is-active', 'cpr-restart-recovery.timer']).decode().strip() == 'active' and
             command(['systemctl', 'is-enabled', 'cpr-restart-recovery.timer']).decode().strip() == 'enabled',
             'watchdog_inactive')

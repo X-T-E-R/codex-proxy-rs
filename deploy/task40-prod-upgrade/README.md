@@ -84,7 +84,13 @@ python -B deploy/task40-prod-upgrade/controller.py launch --accepted <父签sche
 
 ## 切换失败与接管
 
-恢复始终绑定退出容器的完整 ID 和 StartedAt。固定 helper 为 source `476d24c16764a0a535fabd975a3df18d2192df0a`、image `f8c705a4da6687ea39902bb09e020772a4083d2dae12c1d0cd507952bf88944e`：binding 调用 host `site-recovery.py`，PG 使用现有认证 psql，镜像只执行 `site-recovery-redis`。该 Redis-only 入口不运行旧1–52 Migrator，可在已登记53时恢复请求和槽；成功重绑后的 watchdog 仍沿同一入口恢复并 start 原容器
+恢复始终绑定退出容器的完整 ID 和 StartedAt。未声明 `recoveryHelper` 的原合同仍固定使用 source `476d24c16764a0a535fabd975a3df18d2192df0a`、image `f8c705a4da6687ea39902bb09e020772a4083d2dae12c1d0cd507952bf88944e`，须保留其原 host 与 binding，不能就地替换已完成 run 的工件。
+
+新 host 从候选 `deploy/site-recovery.py` 独立安装为 `.runtime/restart-recovery/site-recovery-confirmed-v1.py`，保留原 `site-recovery.py`。binding 的 `recoveryCommand` 必须使用这个新路径，安装与绑定变更另需父级站点授权。
+
+新批次 host/helper 须在父签 manifest 中显式增加 `recoveryHelper: {"source": "<新helper完整提交>", "image": "<新helper完整digest URL>", "contract": "cpr-recovery-confirmed/1"}`。站点 binding 同时绑定 `helperSource`、`helperImage`、`helperContract`；其 `recoveryCommand` 追加同一精确 `--helper-source`、`--helper-image`，`--redis-helper-command-json` 中也必须是该镜像的 `docker run ... site-recovery-redis`。仅有新 host 或仅有新镜像均不能准入。
+
+切换前检查 binding 与父签输入、镜像 revision/RepoDigest 以及 host `--describe` 能力；停止后 host 再在 PG 写入前以正常 Store 认证核完整能力，拒绝旧 helper，不回落逐条路线。非空恢复 manifest 仅启动两个 helper 容器：认证一次、PG 精确确认后有界释放一次。预算、CAS 和 batch unknown 规则见[单部署 pre-start 恢复](../README.md#单部署-pre-start-恢复)。PG 使用既有认证 psql，Redis-only helper 不运行 Migrator、HTTP 或 Worker；成功重绑后的 watchdog 仍沿已准入的同一入口恢复并 start 原容器
 
 候选失败且命令结果已确认时，先停候选、恢复候选**自身**退出代际，再回退。schema53 run 此时执行产品原文 `revert.sql`：完整核对 ledger/checksum，仅撤53登记，保留 valid 索引及业务数据；确认 `schema52 + valid` 后才启动 `baseline.image`。旧52镜像不能直接在仍登记53的库上启动
 

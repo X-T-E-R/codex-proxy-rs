@@ -465,9 +465,20 @@ Compose 的 `stop_grace_period` 为 75 秒，覆盖默认 30 秒后台收尾及�
 
 启动器提供旧容器完整 ID、按该次 `StartedAt`/`FinishedAt` 分配的持久 receipt 路径，
 以及 `--pg-command-json` 和 `--redis-helper-command-json` 两个 JSON argv 数组。
-PG 使用既有 `psql` peer/服务认证；Redis 使用同一配置和候选镜像运行
-`codex-proxy-rs site-recovery-redis`，例如 Compose 的 `run --rm -T --no-deps`，而不是 `exec` 已停容器。
+PG 使用既有 `psql` peer/服务认证；Redis argv 必须通过 `docker run` 调用
+`codex-proxy-rs site-recovery-redis`，而不是 `exec` 已停容器。
+`--helper-image` 绑定不可变镜像，`--helper-source` 绑定其完整 revision；正式部署使用完整 digest URL，本地隔离验证也可使用精确 image ID。
 认证值只能来自服务配置或继承环境，不放入 argv、receipt 或输出
+
+host 先调用一次 `authenticate`，验证正常 Store 认证与 `cpr-recovery-confirmed/1` 完整能力；
+PG 精确确认后仅调用一次 `releaseConfirmed` 批次，批次复用同一连接并顺序执行既有单 key Lua。
+旧 `scan`、`releaseAccount`、`releaseClient` typed 命令保持兼容；新 host 不回落逐条调用。
+`python deploy/site-recovery.py --describe` 只输出 host 能力，不连接数据库
+
+批次输入上限为 2 MiB / 5,000 请求，每池最多 10,000 个匹配 key / 1,024 次 SCAN（含空页），单 active set 最多 5,000 成员。
+先完整验证输入并完成两池有界发现，再开始释放；发现阶段超出页数或 key 上限时不释放槽。
+每次 helper 调用的 Redis 连接建立与操作共用 10 秒预算，host 每次容器调用传输预算为 15 秒。
+超时可能发生在部分释放之后，须按原 receipt 观察，不以 CAS 幂等性为由重发批次
 
 传 `--ack-single-deployment` 确认站点前提，先不带 `--apply` 准备 manifest；
 再次以相同 receipt 加 `--apply` 后，只按 ID、Key、开始时间和租约 expiry 的精确 CAS 终结 manifest 中的运行请求，
@@ -475,7 +486,8 @@ PG 使用既有 `psql` peer/服务认证；Redis 使用同一配置和候选镜�
 无法关联的槽保留原 TTL。此入口不重放请求，也不把送达未知的请求改成未发送
 
 仅退出码 0 且 stdout 单个 JSON 的 `phase` 为 `complete` 时，启动器才可再次检查旧代际并启动。
-认证、其它数据库 client、运行中容器或 CAS 失配都会拒绝；PG 提交后中断时保留同一 receipt 续作，
+认证、其它数据库 client、运行中容器或 CAS 失配都会拒绝。
+PG 提交后先持久化 batch 单次意图；已有意图或结果未知时保持维护闸，观察原进程与同一 receipt，由启动器受检接管，不再次执行 batch。
 不要删 receipt 后重新准备。`complete` 表示该 manifest 已处理，不表示所有无归属 Redis 槽已清空
 
 ## 本地开发

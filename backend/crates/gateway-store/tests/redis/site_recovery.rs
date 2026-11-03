@@ -155,3 +155,150 @@ async fn site_recovery_connects_with_normal_config_and_refuses_wrong_credentials
         .unwrap_err();
     assert!(!format!("{error:?} {error}").contains("wrong_recovery_password"));
 }
+
+#[tokio::test]
+async fn confirmed_batch_validates_before_release_and_bounds_empty_scan_pages() {
+    let Some(url) = crate::support::test_env("CPR_TEST_REDIS_URL") else {
+        return;
+    };
+    let mut connection = redis::Client::open(url)
+        .unwrap()
+        .get_connection_manager()
+        .await
+        .unwrap();
+    let repository = SiteRecoveryRedis::new(connection.clone());
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    let request = format!("req_{unique}");
+    let client = format!("key_{unique}");
+    let tag = hex::encode(Sha256::digest(unique.as_bytes()));
+    let client_tag = hex::encode(Sha256::digest(client.as_bytes()));
+    let client_active = format!("codex-proxy-rs:client:{{{client_tag}}}:active");
+    let mut cleanup = vec![client_active.clone()];
+    for scope in ["account", "account-reserved"] {
+        let key = format!("codex-proxy-rs:lease:{scope}:{{{tag}}}:active");
+        for (lease, rid, cid) in [
+            ("approved", request.as_str(), client.as_str()),
+            ("foreign", "req_foreign", client.as_str()),
+            ("wrong_client", request.as_str(), "other_client"),
+        ] {
+            let detail = format!("{key}:detail:{lease}");
+            let _: () = redis::pipe()
+                .cmd("ZADD")
+                .arg(&key)
+                .arg(9_000_000_000_000_i64)
+                .arg(format!("owner|{lease}|1"))
+                .ignore()
+                .cmd("HSET")
+                .arg(&detail)
+                .arg("facts")
+                .arg(json!({"request_id":rid,"client_key_id":cid}).to_string())
+                .ignore()
+                .query_async(&mut connection)
+                .await
+                .unwrap();
+            cleanup.push(detail);
+        }
+        cleanup.push(key);
+    }
+    let _: () = redis::cmd("ZADD")
+        .arg(&client_active)
+        .arg(9_000_000_000_000_i64)
+        .arg(&request)
+        .arg(9_000_000_000_000_i64)
+        .arg("req_foreign")
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    // 稀疏 keyspace 迫使扫描跨越空页，页预算独立于命中数
+    let mut noise = redis::pipe();
+    for n in 0..600 {
+        let key = format!("recovery-noise:{unique}:{n}");
+        noise.cmd("SET").arg(&key).arg("unrelated").ignore();
+        cleanup.push(key);
+    }
+    let _: () = noise.query_async(&mut connection).await.unwrap();
+    let mut command = json!({"kind":"releaseConfirmed","requests":{(request.clone()):client},
+        "maxScanPagesPerPool":1024,"timeoutMillis":10000});
+    for invalid in [
+        json!({"kind":"releaseConfirmed","requests":{(request.clone()):client,"req_invalid":"bad client"},"maxScanPagesPerPool":1024,"timeoutMillis":10000}),
+        json!({"kind":"releaseConfirmed","requests":{},"maxScanPagesPerPool":1024,"timeoutMillis":10000}),
+        json!({"kind":"releaseConfirmed","requests":{(request.clone()):client},"maxScanPagesPerPool":0,"timeoutMillis":10000}),
+    ] {
+        assert!(
+            repository
+                .execute(invalid.to_string().as_bytes())
+                .await
+                .is_err()
+        );
+    }
+    command["maxScanPagesPerPool"] = json!(1);
+    let error = repository
+        .execute(command.to_string().as_bytes())
+        .await
+        .unwrap_err();
+    assert!(format!("{error}").contains("page budget"));
+    let before: u64 = redis::cmd("ZCARD")
+        .arg(&client_active)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(before, 2, "校验/发现预算失败不得开始释放");
+    for key in cleanup
+        .iter()
+        .filter(|key| key.ends_with("}:active") && *key != &client_active)
+    {
+        let count: u64 = redis::cmd("ZCARD")
+            .arg(key)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+    command["maxScanPagesPerPool"] = json!(1024);
+    let response: serde_json::Value = serde_json::from_str(
+        &repository
+            .execute(command.to_string().as_bytes())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        response["released"],
+        json!({"accountSlots":2,"clientSlots":1})
+    );
+    assert!(
+        response["scanPages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n.as_u64().unwrap() > 1)
+    );
+    let remaining: Vec<String> = redis::cmd("ZRANGE")
+        .arg(&client_active)
+        .arg(0)
+        .arg(-1)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec!["req_foreign"]);
+    for key in cleanup
+        .iter()
+        .filter(|key| key.ends_with("}:active") && *key != &client_active)
+    {
+        let remaining: Vec<String> = redis::cmd("ZRANGE")
+            .arg(key)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&"owner|foreign|1".to_owned()));
+        assert!(remaining.contains(&"owner|wrong_client|1".to_owned()));
+    }
+    let _: () = redis::cmd("DEL")
+        .arg(cleanup)
+        .query_async(&mut connection)
+        .await
+        .unwrap();
+}
