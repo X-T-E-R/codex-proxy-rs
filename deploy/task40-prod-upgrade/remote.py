@@ -134,6 +134,24 @@ def recovery_helper(value):
     return value
 
 
+def helper_argv(argv, image):
+    if (not isinstance(argv, list) or not all(isinstance(value, str) and value for value in argv)
+            or argv[:2] != ['docker', 'run'] or argv.count(image) != 1
+            or argv[-3:] != [image, '/app/bin/codex-proxy-rs', 'site-recovery-redis']):
+        return False
+    # 只接受站点使用的固定 option 形态，前缀不能藏入另一个 IMAGE 操作数
+    options = iter(argv[2:-3])
+    for option in options:
+        if option in ('--rm', '-i', '--pull=never', '--read-only'):
+            continue
+        if option not in ('--network', '--mount', '-e', '--env', '--name', '--cidfile', '--cap-drop', '--security-opt'):
+            return False
+        value = next(options, None)
+        if value is None or value.startswith('-'):
+            return False
+    return True
+
+
 def recovery_binding(binding, helper=None):
     host = 'site-recovery-confirmed-v1.py' if helper is not None else 'site-recovery.py'
     require(binding.get('singleDeployment') is True and isinstance(binding.get('recoveryCommand'), list) and
@@ -153,10 +171,7 @@ def recovery_binding(binding, helper=None):
     flag = '--redis-helper-command-json'
     require(argv.count(flag) == 1 and argv.index(flag) + 1 < len(argv), 'recovery_helper_command_drift')
     redis_argv = json.loads(argv[argv.index(flag) + 1])
-    require(isinstance(redis_argv, list) and redis_argv[:2] == ['docker', 'run'] and
-            redis_argv.count(helper['image']) == 1 and
-            redis_argv[-3:] == [helper['image'], '/app/bin/codex-proxy-rs', 'site-recovery-redis'],
-            'recovery_helper_command_drift')
+    require(helper_argv(redis_argv, helper['image']), 'recovery_helper_command_drift')
     image(helper['image'], helper['source'])
     described = json.loads(command(argv[:2] + ['--describe'], timeout=15))
     require(described.get('contract') == helper['contract'], 'recovery_host_capability_drift')

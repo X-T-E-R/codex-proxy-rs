@@ -470,6 +470,9 @@ PG 使用既有 `psql` peer/服务认证；Redis argv 必须通过 `docker run` 
 `--helper-image` 绑定不可变镜像，`--helper-source` 绑定其完整 revision；正式部署使用完整 digest URL，本地隔离验证也可使用精确 image ID。
 认证值只能来自服务配置或继承环境，不放入 argv、receipt 或输出
 
+新 host 只接受固定 argv：`docker run [options] IMAGE /app/bin/codex-proxy-rs site-recovery-redis`。
+options 可用 `--rm`、`-i`、`--pull=never`、`--read-only`，以及分开传值的 `--network`、`--mount`、`-e`/`--env`、`--name`、`--cidfile`、`--cap-drop`、`--security-opt`；不能在所签 IMAGE 前放另一个镜像或其它位置参数
+
 host 先调用一次 `authenticate`，验证正常 Store 认证与 `cpr-recovery-confirmed/1` 完整能力；
 PG 精确确认后仅调用一次 `releaseConfirmed` 批次，批次复用同一连接并顺序执行既有单 key Lua。
 旧 `scan`、`releaseAccount`、`releaseClient` typed 命令保持兼容；新 host 不回落逐条调用。

@@ -12,7 +12,7 @@ class BatchHelperAdmissionTests(unittest.TestCase):
     def test_batch_binding_is_explicit_and_drift_refuses_before_stop(self):
         helper = {'source': 'd' * 40, 'image': 'ghcr.io/x-t-e-r/codex-proxy-rs@sha256:' + 'e' * 64,
                   'contract': 'cpr-recovery-confirmed/1'}
-        for fault in (None, 'missing_acceptance', 'source', 'image', 'contract', 'argv_image', 'misplaced_image', 'host', 'unknown'):
+        for fault in (None, 'missing_acceptance', 'source', 'image', 'contract', 'argv_image', 'misplaced_image', 'leading_image', 'host', 'unknown'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as tmp, MockSite(tmp) as site:
                 accepted = manifest()
                 if fault != 'missing_acceptance':
@@ -28,6 +28,8 @@ class BatchHelperAdmissionTests(unittest.TestCase):
                     site.binding['recoveryCommand'][-1] = json.dumps(['docker', 'run', remote.HELPER_IMAGE, '/app/bin/codex-proxy-rs', 'site-recovery-redis'])
                 elif fault == 'misplaced_image':
                     site.binding['recoveryCommand'][-1] = json.dumps(['docker', 'run', '--name', helper['image'], remote.HELPER_IMAGE, '/app/bin/codex-proxy-rs', 'site-recovery-redis'])
+                elif fault == 'leading_image':
+                    site.binding['recoveryCommand'][-1] = json.dumps(['docker', 'run', remote.HELPER_IMAGE, helper['image'], '/app/bin/codex-proxy-rs', 'site-recovery-redis'])
                 (site.gate / 'binding.json').write_text(json.dumps(site.binding))
                 def command(argv, **kwargs):
                     if argv[-1] == '--describe':

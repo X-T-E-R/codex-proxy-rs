@@ -191,11 +191,28 @@ def release(args, rows, completed):
     return counts
 
 
+def helper_argv(argv, image):
+    if (not isinstance(argv, list) or not all(isinstance(value, str) and value for value in argv)
+            or argv[:2] != ['docker', 'run'] or argv.count(image) != 1
+            or argv[-3:] != [image, '/app/bin/codex-proxy-rs', 'site-recovery-redis']):
+        return False
+    # 只接受站点使用的固定 option 形态，前缀不能藏入另一个 IMAGE 操作数
+    options = iter(argv[2:-3])
+    for option in options:
+        if option in ('--rm', '-i', '--pull=never', '--read-only'):
+            continue
+        if option not in ('--network', '--mount', '-e', '--env', '--name', '--cidfile', '--cap-drop', '--security-opt'):
+            return False
+        value = next(options, None)
+        if value is None or value.startswith('-'):
+            return False
+    return True
+
+
 def admit_helper(args):
     if (not re.fullmatch(r'(?:ghcr\.io/x-t-e-r/codex-proxy-rs@)?sha256:[0-9a-f]{64}', args.helper_image)
             or not re.fullmatch('[0-9a-f]{40}', args.helper_source)
-            or args.redis[:2] != ['docker', 'run'] or args.redis.count(args.helper_image) != 1
-            or args.redis[-3:] != [args.helper_image, '/app/bin/codex-proxy-rs', 'site-recovery-redis']):
+            or not helper_argv(args.redis, args.helper_image)):
         raise ValueError('exact helper source/image and docker run required')
     source = run(['docker', 'image', 'inspect', '--format',
         '{{index .Config.Labels "org.opencontainers.image.revision"}}', args.helper_image])

@@ -138,16 +138,26 @@ class HelperAdmissionTests(unittest.TestCase):
     def test_exact_helper_image_must_be_invoked_and_revision_must_match(self):
         image = 'ghcr.io/x-t-e-r/codex-proxy-rs@sha256:' + 'd' * 64
         source = 'e' * 40
-        argv = ['docker', 'run', '--rm', '-i', image, '/app/bin/codex-proxy-rs', 'site-recovery-redis']
-        for fault in (None, 'revision', 'mutable', 'misplaced_image', 'wrong_entry'):
+        argv = ['docker', 'run', '--rm', '-i', '--pull=never', '--network', 'host',
+            '--mount', 'type=bind,src=/fixture/config.yaml,dst=/app/deploy/config.yaml,readonly',
+            '-e', 'CPR_REDIS_PASSWORD', '--name', 'fixture-helper', '--cidfile', '/fixture/helper.cid',
+            '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges=true',
+            image, '/app/bin/codex-proxy-rs', 'site-recovery-redis']
+        for fault in (None, 'revision', 'mutable', 'misplaced_image', 'leading_image', 'wrong_entry', 'unknown_option', 'missing_value'):
             with self.subTest(fault=fault):
                 args = SimpleNamespace(helper_image=image, helper_source=source, redis=list(argv))
                 if fault == 'mutable':
                     args.helper_image = 'mutable:latest'
                 elif fault == 'misplaced_image':
                     args.redis = ['docker', 'run', '--name', image, 'unadmitted:latest', *argv[-2:]]
+                elif fault == 'leading_image':
+                    args.redis.insert(2, 'unadmitted:latest')
                 elif fault == 'wrong_entry':
                     args.redis[-2] = '/different/helper'
+                elif fault == 'unknown_option':
+                    args.redis.insert(2, '--privileged')
+                elif fault == 'missing_value':
+                    args.redis.insert(-3, '--network')
                 with patch.object(recovery, 'run', return_value='f' * 40 if fault == 'revision' else source):
                     if fault is None:
                         recovery.admit_helper(args)
