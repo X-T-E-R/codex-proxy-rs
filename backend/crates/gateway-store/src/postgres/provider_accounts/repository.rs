@@ -124,7 +124,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         let rows = sqlx::query(
             "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
-                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
+                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, allowed_models, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
                     quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
@@ -153,7 +153,7 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         let rows = sqlx::query(
             "select coalesce(proxy_enabled, true) as outbound_proxy_enabled, coalesce(max_websocket_connections, 0) as outbound_proxy_max_websocket_connections, auto_location, detected_location_json, location_country, location_region, location_city, location_timezone, outbound_proxy_id, outbound_proxy_url, id, provider_kind, name, notes, email, upstream_user_id,
                     upstream_account_id, plan_type, authentication_kind, credential_revision, has_refresh_token,
-                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, credential_state,
+                    access_token_expires_at, next_refresh_at, enabled, concurrency_limit, weight, model_access_json, allowed_models, credential_state,
                     credential_observed_at, quota_access_state, quota_evidence,
                     quota_access_observed_at, quota_reset_at,
                     quota_observed_at, last_error_reason, last_error_message, created_at, updated_at
@@ -526,6 +526,7 @@ impl ProviderAccountAdminRepository for PgProviderAccountRepository {
                 command.weight,
                 command.model_access.as_ref(),
                 command.outbound_proxy.as_ref(),
+                command.feature_opt_outs.as_ref(),
             )
             .await?;
             if let Some(group_ids) = &command.group_ids {
@@ -881,6 +882,7 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     weight: Option<AccountWeight>,
     model_access: Option<&gateway_core::account::AccountModelAccess>,
     outbound_proxy: Option<&gateway_admin::model::proxies::AccountProxySelection>,
+    feature_opt_outs: Option<&gateway_core::account::AccountFeatureOptOuts>,
 ) -> StoreResult<()> {
     let (proxy_id, proxy) = match outbound_proxy {
         Some(selection) => {
@@ -893,7 +895,28 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
          set enabled = coalesce($2, enabled), concurrency_limit = case when $9 then $3 else concurrency_limit end, weight = coalesce($4, weight), updated_at = greatest(now(), updated_at),
              outbound_proxy_url = case when $5 then $6 else outbound_proxy_url end,
              outbound_proxy_id = case when $5 then $7 else outbound_proxy_id end,
-             model_access_json = coalesce($8, model_access_json)
+             model_access_json = coalesce($8, model_access_json),
+             allowed_models = case when $10 then (
+               select case when merged = '{}'::text[] then null else merged end
+               from (
+                 select coalesce((
+                   select array_agg(token order by token)
+                   from (
+                     select distinct token
+                     from (
+                       select unnest(coalesce(provider_accounts.allowed_models, '{}'::text[])) as token
+                       union all
+                       select unnest(coalesce($12::text[], '{}'::text[])) as token
+                     ) raw
+                     where btrim(token) <> ''
+                       and (
+                         token <> all(coalesce($11::text[], '{}'::text[]))
+                         or token = any(coalesce($12::text[], '{}'::text[]))
+                       )
+                   ) filtered
+                 ), '{}'::text[]) as merged
+               ) folded
+             ) else allowed_models end
          where id = any($1::text[])
          returning id",
     )
@@ -906,6 +929,14 @@ pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     .bind(proxy_id)
     .bind(model_access.map(sqlx::types::Json))
     .bind(concurrency_limit.is_some())
+    .bind(feature_opt_outs.is_some())
+    .bind(
+        gateway_core::account::AccountOptionalFeature::ALL
+            .into_iter()
+            .map(|feature| feature.as_str().to_owned())
+            .collect::<Vec<_>>(),
+    )
+    .bind(feature_opt_outs.map(gateway_core::account::AccountFeatureOptOuts::tokens))
     .fetch_all(&mut **transaction)
     .await
     .map_err(|source| postgres_unavailable("set provider accounts state in admin transaction", source))?
@@ -1079,6 +1110,7 @@ pub(super) async fn import_provider_accounts_in_transaction(
             Some(settings.weight),
             settings.model_access.as_ref(),
             None,
+            settings.feature_opt_outs.as_ref(),
         )
         .await?;
         replace_account_group_assignments_in_transaction(
@@ -1144,6 +1176,7 @@ pub(super) async fn rotate_provider_account_admin_in_transaction(
             Some(settings.weight),
             settings.model_access.as_ref(),
             settings.outbound_proxy.as_ref(),
+            settings.feature_opt_outs.as_ref(),
         )
         .await?;
         replace_account_group_assignments_in_transaction(transaction, ids, &settings.group_ids)

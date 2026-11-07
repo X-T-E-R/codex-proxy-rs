@@ -613,6 +613,9 @@ impl AccountStore for PgAdminAccountStore {
         if command.notes.is_some() {
             changed_fields.push("notes".to_owned());
         }
+        if command.feature_opt_outs.is_some() {
+            changed_fields.push("feature_opt_outs".to_owned());
+        }
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
@@ -624,6 +627,7 @@ impl AccountStore for PgAdminAccountStore {
                 model_access: command.model_access,
                 group_ids: Some(command.group_ids),
                 outbound_proxy: command.outbound_proxy,
+                feature_opt_outs: command.feature_opt_outs,
                 audit: mutation_audit(
                     context,
                     MutationAuditOperation::ProviderAccountUpdate,
@@ -775,6 +779,9 @@ impl AccountStore for PgAdminAccountStore {
         if command.outbound_proxy.is_some() {
             changed_fields.push("outbound_proxy".to_owned());
         }
+        if command.feature_opt_outs.is_some() {
+            changed_fields.push("feature_opt_outs".to_owned());
+        }
         let config_revision = self
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
@@ -786,6 +793,7 @@ impl AccountStore for PgAdminAccountStore {
                 model_access: command.model_access,
                 group_ids: command.group_ids,
                 outbound_proxy: command.outbound_proxy,
+                feature_opt_outs: command.feature_opt_outs,
                 audit: mutation_audit(
                     context,
                     MutationAuditOperation::ProviderAccountBatchUpdate,

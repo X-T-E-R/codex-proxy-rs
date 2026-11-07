@@ -1,6 +1,7 @@
 //! Cyber 入口拒绝、跨 Provider 覆盖、热开关和未知送达的执行回归
 
 use super::*;
+use gateway_core::account::{AccountFeatureOptOuts, AccountOptionalFeature};
 use gateway_core::provider_ports::{
     CyberSessionKey, CyberSessionPort, CyberSessionRequest, CyberSessionStoreError,
 };
@@ -75,6 +76,7 @@ struct PolicyProvider {
     kind: &'static str,
     mode: AtomicUsize,
     calls: AtomicUsize,
+    chosen: Mutex<Vec<String>>,
 }
 
 #[async_trait]
@@ -95,16 +97,17 @@ impl Provider for PolicyProvider {
         request: ProviderRequest,
         _: AttemptContext,
     ) -> Result<ProviderStream, ProviderError> {
-        let count = self.calls.fetch_add(1, Ordering::SeqCst);
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let scope = request.candidate().account_scope();
+        let account_id = ["acct_start", "acct_other"]
+            .into_iter()
+            .find(|id| scope.allows(&ProviderAccountId::new(*id).unwrap()))
+            .unwrap_or("acct_start");
+        self.chosen.lock().unwrap().push(account_id.to_owned());
         let metadata = ProviderCallMetadata::new(
             request.candidate().provider().clone(),
             request.candidate().upstream_model().unwrap().clone(),
-            ProviderAccountId::new(if count.is_multiple_of(2) {
-                "acct_start"
-            } else {
-                "acct_other"
-            })
-            .unwrap(),
+            ProviderAccountId::new(account_id).unwrap(),
             UpstreamTransport::new("websocket").unwrap(),
         );
         let events = match self.mode.load(Ordering::SeqCst) {
@@ -142,15 +145,22 @@ impl Provider for PolicyProvider {
 }
 
 fn snapshot(kind: &'static str, enabled: bool) -> RuntimeSnapshot {
+    snapshot_with(kind, enabled, &[])
+}
+
+fn snapshot_with(kind: &'static str, enabled: bool, opted_out: &[&str]) -> RuntimeSnapshot {
     let provider = ProviderKind::new(kind).unwrap();
     let directory = Arc::new(RuntimeAccountDirectory::new(
         ["acct_start", "acct_other"]
             .into_iter()
             .map(|id| {
-                (
-                    ProviderAccountId::new(id).unwrap(),
-                    RuntimeAccount::new(provider.clone(), BTreeSet::new()),
-                )
+                let mut account = RuntimeAccount::new(provider.clone(), BTreeSet::new());
+                if opted_out.contains(&id) {
+                    account = account.with_feature_opt_outs(AccountFeatureOptOuts::new([
+                        AccountOptionalFeature::CyberSessionBlock,
+                    ]));
+                }
+                (ProviderAccountId::new(id).unwrap(), account)
             })
             .collect(),
     ));
@@ -226,6 +236,7 @@ fn cyber_refusal_blocks_new_attempts_across_transports_and_provider_routes() {
                     kind,
                     mode: AtomicUsize::new(0),
                     calls: AtomicUsize::new(0),
+                    chosen: Mutex::new(Vec::new()),
                 });
                 let service = DefaultExecutionService::new(
                     handle,
@@ -314,6 +325,7 @@ fn cyber_disabled_success_does_not_clear_marker_and_expiry_reopens_the_session()
             kind: "openai",
             mode: AtomicUsize::new(0),
             calls: AtomicUsize::new(0),
+            chosen: Mutex::new(Vec::new()),
         });
         let service = DefaultExecutionService::new(
             handle.clone(),
@@ -405,6 +417,7 @@ fn ambiguous_non_policy_failure_does_not_poison_the_session_or_replay() {
             kind: "openai",
             mode: AtomicUsize::new(2),
             calls: AtomicUsize::new(0),
+            chosen: Mutex::new(Vec::new()),
         });
         let service = DefaultExecutionService::new(
             RuntimeSnapshotHandle::new(snapshot("openai", true)),
@@ -430,5 +443,145 @@ fn ambiguous_non_policy_failure_does_not_poison_the_session_or_replay() {
             assert_eq!(provider.calls.load(Ordering::SeqCst), expected);
         }
         assert_eq!(markers.records.load(Ordering::SeqCst), 0);
+    });
+}
+
+struct PinnedAccount {
+    kind: &'static str,
+    account: &'static str,
+}
+
+impl NativeContinuationPort for PinnedAccount {
+    fn resolve<'a>(
+        &'a self,
+        client: &'a ClientApiKeyId,
+        previous: &'a PreviousResponseId,
+    ) -> BoxFuture<'a, Result<Option<NativeContinuationPin>, NativeContinuationStoreError>> {
+        Box::pin(async move {
+            Ok(Some(NativeContinuationPin::new(
+                previous.clone(),
+                previous.clone(),
+                client.clone(),
+                ProviderKind::new(self.kind).unwrap(),
+                ProviderAccountId::new(self.account).unwrap(),
+            )))
+        })
+    }
+    fn record<'a>(
+        &'a self,
+        _: NativeContinuationPin,
+    ) -> BoxFuture<'a, Result<(), NativeContinuationStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[test]
+fn explicit_cyber_opt_out_keeps_neighbors_across_transports_and_restores_inherit() {
+    block_on(async {
+        for kind in ["openai", "xai"] {
+            for transport in [
+                ClientTransport::HttpJson,
+                ClientTransport::HttpSse,
+                ClientTransport::WebSocket,
+            ] {
+                let handle = RuntimeSnapshotHandle::new(snapshot_with(kind, true, &["acct_other"]));
+                let markers = Arc::new(Markers::default());
+                let provider = Arc::new(PolicyProvider {
+                    kind,
+                    mode: AtomicUsize::new(0),
+                    calls: AtomicUsize::new(0),
+                    chosen: Mutex::new(Vec::new()),
+                });
+                let service = DefaultExecutionService::new(
+                    handle.clone(),
+                    Arc::new(TrackingExecutionStore::default()),
+                    ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).unwrap(),
+                    Arc::new(Admissions::default()),
+                    Arc::new(PinnedAccount {
+                        kind,
+                        account: "acct_start",
+                    }),
+                    Arc::new(RecordingClientApiKeyUsage::default()),
+                    Arc::new(crate::RecordingDiagnostics::default()),
+                )
+                .with_cyber_sessions(markers.clone());
+                let mut first = service
+                    .start(protected_request(
+                        &service,
+                        transport,
+                        "child-a",
+                        "sk_start_test",
+                    ))
+                    .await
+                    .unwrap();
+                handle.publish(snapshot_with(kind, true, &["acct_start", "acct_other"]));
+                assert!(first.session.collect_uncommitted().await.is_err());
+                assert_eq!(provider.chosen.lock().unwrap().as_slice(), ["acct_start"]);
+                assert_eq!(markers.records.load(Ordering::SeqCst), 1);
+                handle.publish(snapshot_with(kind, true, &["acct_other"]));
+
+                let mut opted_out = service
+                    .start(protected_request(
+                        &service,
+                        transport,
+                        "child-a",
+                        "sk_start_test",
+                    ))
+                    .await
+                    .unwrap();
+                assert!(opted_out.session.collect_uncommitted().await.is_err());
+                assert_eq!(
+                    provider.chosen.lock().unwrap().as_slice(),
+                    ["acct_start", "acct_other"]
+                );
+                assert_eq!(
+                    markers.records.load(Ordering::SeqCst),
+                    1,
+                    "an opted-out account must not write another marker"
+                );
+
+                let mut neighbor = service
+                    .start(protected_request(
+                        &service,
+                        transport,
+                        "child-b",
+                        "sk_start_test",
+                    ))
+                    .await
+                    .unwrap();
+                assert!(neighbor.session.collect_uncommitted().await.is_err());
+                assert_eq!(
+                    provider.chosen.lock().unwrap().as_slice(),
+                    ["acct_start", "acct_other", "acct_start"]
+                );
+                assert_eq!(markers.records.load(Ordering::SeqCst), 2);
+
+                handle.publish(snapshot(kind, true));
+                let restored = service
+                    .start(protected_request(
+                        &service,
+                        transport,
+                        "child-a",
+                        "sk_start_test",
+                    ))
+                    .await
+                    .err()
+                    .unwrap();
+                assert_eq!(restored.kind(), GatewayErrorKind::PolicyDenied);
+                assert_eq!(provider.calls.load(Ordering::SeqCst), 3);
+
+                handle.publish(snapshot_with(kind, true, &["acct_other"]));
+                let mut pinned = protected_request(&service, transport, "child-a", "sk_start_test");
+                pinned.metadata.previous_response_id =
+                    Some(PreviousResponseId::new("resp_previous"));
+                let pinned_error = service.start(pinned).await.err().unwrap();
+                assert_eq!(pinned_error.kind(), GatewayErrorKind::PolicyDenied);
+                assert_eq!(
+                    provider.calls.load(Ordering::SeqCst),
+                    3,
+                    "a pinned inheriting account stays blocked while its neighbor is opted out"
+                );
+            }
+        }
     });
 }

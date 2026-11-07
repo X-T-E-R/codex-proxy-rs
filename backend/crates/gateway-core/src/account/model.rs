@@ -803,6 +803,7 @@ pub struct ProviderAccount {
     has_refresh_token: bool,
     outbound_proxy: Option<super::OutboundProxy>,
     request_location: Option<super::RequestLocation>,
+    feature_opt_outs: super::AccountFeatureOptOuts,
 }
 
 impl ProviderAccount {
@@ -841,7 +842,19 @@ impl ProviderAccount {
             has_refresh_token: false,
             outbound_proxy: None,
             request_location: None,
+            feature_opt_outs: super::AccountFeatureOptOuts::empty(),
         }
+    }
+
+    #[must_use]
+    pub fn with_feature_opt_outs(mut self, feature_opt_outs: super::AccountFeatureOptOuts) -> Self {
+        self.feature_opt_outs = feature_opt_outs;
+        self
+    }
+
+    #[must_use]
+    pub const fn feature_opt_outs(&self) -> &super::AccountFeatureOptOuts {
+        &self.feature_opt_outs
     }
 
     #[must_use]

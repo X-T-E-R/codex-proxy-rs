@@ -360,6 +360,7 @@ async fn disabled_proxy_projects_direct_while_preserving_bindings_and_credential
                         model_access: None,
                         group_ids: None,
                         outbound_proxy: Some(AccountProxySelection::Saved(saved.id.clone())),
+                        feature_opt_outs: None,
                     },
                     &context(),
                 )
@@ -399,6 +400,7 @@ fn update(account_id: &str, selection: AccountProxySelection) -> UpdateAccount {
         weight: AccountWeight::DEFAULT,
         group_ids: vec![],
         outbound_proxy: Some(selection),
+        feature_opt_outs: None,
     }
 }
 
@@ -1172,6 +1174,7 @@ async fn legacy_urls_join_one_catalog_entry_and_invalid_batch_rolls_back() {
                     outbound_proxy: Some(AccountProxySelection::Url(
                         OutboundProxy::parse("http://127.0.0.1:9090").unwrap()
                     )),
+                    feature_opt_outs: None,
                 },
                 &context()
             )

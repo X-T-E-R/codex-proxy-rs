@@ -139,6 +139,7 @@ pub(super) fn account_view(
         updated_at_display: time.datetime(&account.updated_at),
         quota,
         usage,
+        disabled_optional_features: account.feature_opt_outs.tokens(),
     }
 }
 

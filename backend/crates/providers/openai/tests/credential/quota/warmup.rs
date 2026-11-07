@@ -142,3 +142,45 @@ async fn warmup_skips_expired_credential() {
     assert_eq!(summary.warmed_up, 0);
     assert_eq!(summary.failed, 0);
 }
+
+#[tokio::test]
+async fn warmup_skips_explicit_opt_out_and_still_warms_the_neighbor() {
+    let server = MockServer::start().await;
+    let sse = concat!(
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_warmup_neighbor\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/codex/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_warmup_opt_out").await;
+    create_account(&store, "acct_warmup_neighbor").await;
+    store.set_feature_opt_outs(
+        "acct_warmup_opt_out",
+        gateway_core::account::AccountFeatureOptOuts::new([
+            gateway_core::account::AccountOptionalFeature::AccountWarmup,
+        ]),
+    );
+    let service = quota_service_with_base_url(
+        &store,
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client"),
+        server.uri(),
+    );
+
+    let summary = service.execute_warmup("test-model").await.expect("warmup");
+
+    assert_eq!(summary.warmed_up, 1);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.skipped_active, 0);
+    assert_eq!(summary.skipped_exhausted, 0);
+    assert!(store.quota_json("acct_warmup_opt_out").is_none());
+    assert_eq!(store.credential_loads(), 1);
+}

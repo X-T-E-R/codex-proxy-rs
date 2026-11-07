@@ -1959,6 +1959,7 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         last_error_message: None,
         created_at: now,
         updated_at: now,
+        feature_opt_outs: Default::default(),
     }
 }
 

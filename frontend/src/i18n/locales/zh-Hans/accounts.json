@@ -245,6 +245,14 @@
       "invalidConcurrency": "并发限制必须留空，或为 1 到 {value} 的整数",
       "weightMustBeIntegerFromTo": "权重必须是 1 到 100 的整数"
     },
+    "optionalFeatures": {
+      "label": "可选功能",
+      "help": "默认继承全局开关。关闭后仅这个账号不再进入该行为；其它账号、当前冷却和已有屏蔽记录保持不变。",
+      "inherit": "继承全局",
+      "off": "关闭",
+      "preserve": "不修改",
+      "configure": "按账号设置"
+    },
     "actions": {
       "deleteAccount": "删除账号",
       "moreActions": "更多操作",

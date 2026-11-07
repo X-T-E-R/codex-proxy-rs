@@ -436,6 +436,74 @@ mod batch_update {
             .is_err()
         );
     }
+
+    #[test]
+    fn optional_feature_opt_out_is_inherited_when_omitted_and_rejected_when_unknown() {
+        let preserved: BatchUpdateAccountsRequest = serde_json::from_value(json!({
+            "accountIds": ["acct_test"],
+            "enabled": true
+        }))
+        .expect("omit features");
+        preserved.validate().expect("valid preserve");
+        assert!(preserved.disabled_optional_features.is_none());
+
+        let cleared: BatchUpdateAccountsRequest = serde_json::from_value(json!({
+            "accountIds": ["acct_test"],
+            "disabledOptionalFeatures": []
+        }))
+        .expect("restore inherit");
+        cleared.validate().expect("empty list is a setting");
+        assert_eq!(cleared.disabled_optional_features, Some(Vec::new()));
+
+        let disabled: UpdateAccountRequest = serde_json::from_value(json!({
+            "accountId": "acct_test",
+            "enabled": true,
+            "concurrencyLimit": null,
+            "weight": 1,
+            "groupIds": [],
+            "disabledOptionalFeatures": ["cyber_session_block", "capacity_freeze"]
+        }))
+        .expect("explicit off");
+        disabled.validate().expect("known features");
+        assert_eq!(
+            disabled.disabled_optional_features.as_deref(),
+            Some(
+                [
+                    "cyber_session_block".to_owned(),
+                    "capacity_freeze".to_owned()
+                ]
+                .as_slice()
+            )
+        );
+
+        let unknown: BatchUpdateAccountsRequest = serde_json::from_value(json!({
+            "accountIds": ["acct_test"],
+            "disabledOptionalFeatures": ["gpt-4o"]
+        }))
+        .expect("deserialize unknown token");
+        assert_eq!(
+            unknown
+                .validate()
+                .expect_err("reject unknown token")
+                .field(),
+            "disabledOptionalFeatures"
+        );
+        let duplicate: BatchUpdateAccountsRequest = serde_json::from_value(json!({
+            "accountIds": ["acct_test"],
+            "disabledOptionalFeatures": ["account_warmup", "account_warmup"]
+        }))
+        .expect("deserialize duplicate token");
+        assert_eq!(
+            duplicate
+                .validate()
+                .expect_err("reject duplicate token")
+                .field(),
+            "disabledOptionalFeatures"
+        );
+        let empty: BatchUpdateAccountsRequest =
+            serde_json::from_value(json!({"accountIds":["acct_test"]})).expect("empty mutation");
+        assert!(empty.validate().is_err());
+    }
 }
 
 #[test]

@@ -134,6 +134,11 @@ impl CoordinationExtensions {
     }
 
     #[must_use]
+    pub(super) fn continuation(&self) -> Option<&ContinuationBinding> {
+        self.continuation.as_ref()
+    }
+
+    #[must_use]
     pub(super) fn with_middleware(
         mut self,
         middleware: Option<super::middleware::FrozenMiddlewarePlan>,
@@ -623,6 +628,27 @@ where
 
     pub(super) const fn cyber_refusal_observed(&self) -> bool {
         self.cyber_refusal_observed
+    }
+
+    /// 显式关闭 cyber 的账号不记录标记，也不因此禁止重试；未知账号仍按全局保护处理
+    fn cyber_refusal_applies(
+        &self,
+        account_id: Option<&crate::account::ProviderAccountId>,
+    ) -> bool {
+        if !self
+            .plan
+            .account_selection_policy()
+            .protection()
+            .cyber_session_block_enabled
+        {
+            return false;
+        }
+        !account_id.is_some_and(|account_id| {
+            self.plan.account_scope().opts_out(
+                account_id,
+                crate::account::AccountOptionalFeature::CyberSessionBlock,
+            )
+        })
     }
 
     /// 读取下一条 canonical event；首条未提交事件会携带 commit 要求
@@ -1232,14 +1258,8 @@ where
             ProviderBoundary::Result(result) => match *result {
                 Ok(stream) => stream,
                 Err(mut error) => {
-                    self.cyber_refusal_observed |= error.is_cyber_policy_refusal();
-                    if self
-                        .plan
-                        .account_selection_policy()
-                        .protection()
-                        .cyber_session_block_enabled
-                        && error.is_cyber_policy_refusal()
-                    {
+                    if error.is_cyber_policy_refusal() && self.cyber_refusal_applies(None) {
+                        self.cyber_refusal_observed = true;
                         error = error.with_retry_prohibited();
                     }
                     attempt_trace.record_provider_failure(&error);
@@ -1615,14 +1635,12 @@ where
 
     /// 失败可重试时要求丢弃本 attempt；预算耗尽时可返回最后一批原始失败事件
     fn begin_stream_failure(&mut self, mut error: ProviderError) -> Result<(), EngineError> {
-        self.cyber_refusal_observed |= error.is_cyber_policy_refusal();
-        if self
-            .plan
-            .account_selection_policy()
-            .protection()
-            .cyber_session_block_enabled
-            && error.is_cyber_policy_refusal()
-        {
+        let serving_account = self
+            .current
+            .as_ref()
+            .map(|current| current.metadata.provider_account_id().clone());
+        if error.is_cyber_policy_refusal() && self.cyber_refusal_applies(serving_account.as_ref()) {
+            self.cyber_refusal_observed = true;
             error = error.with_retry_prohibited();
         }
         // 原始 wire 只活在 request-local 决策状态；clone、attempt 记录与持久化终态

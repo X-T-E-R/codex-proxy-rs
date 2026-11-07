@@ -70,6 +70,9 @@ pub struct BatchUpdateAccountsRequest {
     pub weight: Option<u64>,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Option<Vec<String>>,
+    /// 缺省保留每个账号已有显式关闭；空数组恢复全部继承
+    #[serde(default)]
+    pub disabled_optional_features: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,8 +127,12 @@ impl BatchUpdateAccountsRequest {
             && self.model_access.is_none()
             && self.outbound_proxy_id.is_none()
             && self.outbound_proxy_url.is_none()
+            && self.disabled_optional_features.is_none()
         {
             return Err(WireValidationError::new("accountSettings"));
+        }
+        if let Some(features) = &self.disabled_optional_features {
+            super::credentials::parse_disabled_optional_features(features)?;
         }
         Ok(())
     }
@@ -146,6 +153,11 @@ impl BatchUpdateAccountsRequest {
                 .group_ids
                 .as_deref()
                 .map(validate_wire_group_ids)
+                .transpose()?,
+            feature_opt_outs: self
+                .disabled_optional_features
+                .as_deref()
+                .map(super::credentials::parse_disabled_optional_features)
                 .transpose()?,
         })
     }
@@ -305,6 +317,8 @@ pub struct AccountView {
     pub updated_at_display: String,
     pub quota: AccountQuotaView,
     pub usage: AccountUsageView,
+    /// 显式关闭的可选功能；空数组表示全部继承全局
+    pub disabled_optional_features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

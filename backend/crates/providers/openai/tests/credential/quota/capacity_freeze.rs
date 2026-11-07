@@ -193,3 +193,47 @@ async fn in_flight_success_does_not_release_a_new_capacity_freeze() {
         Some(2)
     );
 }
+
+#[tokio::test]
+async fn explicit_opt_out_skips_capacity_freeze_and_leaves_the_neighbor_active() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_freeze_opt_out").await;
+    create_account(&store, "acct_freeze_neighbor").await;
+    let opted_out = store
+        .account("acct_freeze_opt_out")
+        .expect("opt-out account")
+        .with_feature_opt_outs(gateway_core::account::AccountFeatureOptOuts::new([
+            gateway_core::account::AccountOptionalFeature::CapacityFreeze,
+        ]));
+    let neighbor = store
+        .account("acct_freeze_neighbor")
+        .expect("neighbor account");
+    let (quota, cooldowns) = freeze_service(&store, freeze_policy(2)).await;
+
+    for _ in 0..3 {
+        quota
+            .apply_capacity_failure(&opted_out, SystemTime::now())
+            .await;
+    }
+    assert!(cooldowns.capacity_evidence(opted_out.id()).is_none());
+    assert!(
+        quota
+            .cooldown(opted_out.id())
+            .await
+            .expect("opt-out cooldown read")
+            .is_none()
+    );
+
+    for _ in 0..2 {
+        quota
+            .apply_capacity_failure(&neighbor, SystemTime::now())
+            .await;
+    }
+    assert!(
+        quota
+            .cooldown(neighbor.id())
+            .await
+            .expect("neighbor cooldown read")
+            .is_some()
+    );
+}

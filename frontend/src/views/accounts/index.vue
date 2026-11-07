@@ -183,6 +183,9 @@ const {
   proxyMode: batchProxyMode,
   proxyId: batchProxyId,
   selectedGroupIds: batchGroupIds,
+  disabledOptionalFeatures: batchDisabledOptionalFeatures,
+  provider: batchProvider,
+  authenticationKind: batchAuthenticationKind,
   saving: savingBatchEdit,
   open: openBatchEdit,
   save: saveBatchEdit,
@@ -207,6 +210,7 @@ const {
   proxyMode: editingProxyMode,
   proxyId: editingProxyId,
   selectedGroupIds: editingGroupIds,
+  disabledOptionalFeatures: editingDisabledOptionalFeatures,
   saving: savingAccountEdit,
   open: openAccountEdit,
   save: saveAccountEdit,
@@ -462,6 +466,7 @@ const {
       v-model:proxy-mode="editingProxyMode"
       v-model:proxy-id="editingProxyId"
       v-model:selected-group-ids="editingGroupIds"
+      v-model:disabled-optional-features="editingDisabledOptionalFeatures"
       :configuration-ready="configurationReady"
       :account="editingAccount"
       :groups="groups"
@@ -480,6 +485,9 @@ const {
       v-model:proxy-mode="batchProxyMode"
       v-model:proxy-id="batchProxyId"
       v-model:selected-group-ids="batchGroupIds"
+      v-model:disabled-optional-features="batchDisabledOptionalFeatures"
+      :provider="batchProvider"
+      :authentication-kind="batchAuthenticationKind"
       :catalog-account-id="batchCatalogAccountId"
       :selected-count="batchEditingCount"
       :groups="groups"

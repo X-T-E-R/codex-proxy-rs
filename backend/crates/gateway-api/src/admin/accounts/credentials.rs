@@ -29,6 +29,9 @@ pub struct AccountImportSettingsRequest {
     pub weight: u64,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Vec<String>,
+    /// 缺省保留已有显式关闭；空数组恢复全部继承
+    #[serde(default)]
+    pub disabled_optional_features: Option<Vec<String>>,
 }
 
 impl AccountImportSettingsRequest {
@@ -37,6 +40,9 @@ impl AccountImportSettingsRequest {
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
+        if let Some(features) = &self.disabled_optional_features {
+            parse_disabled_optional_features(features)?;
+        }
         Ok(())
     }
 
@@ -50,6 +56,11 @@ impl AccountImportSettingsRequest {
             weight: parse_account_weight(self.weight)?,
             model_access: self.model_access,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
+            feature_opt_outs: self
+                .disabled_optional_features
+                .as_deref()
+                .map(parse_disabled_optional_features)
+                .transpose()?,
         })
     }
 }
@@ -220,6 +231,9 @@ pub struct UpdateAccountRequest {
     pub weight: u64,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Vec<String>,
+    /// 缺省保留已有显式关闭；空数组恢复全部继承
+    #[serde(default)]
+    pub disabled_optional_features: Option<Vec<String>>,
 }
 
 impl UpdateAccountRequest {
@@ -232,6 +246,9 @@ impl UpdateAccountRequest {
         parse_concurrency_limit(self.concurrency_limit)?;
         parse_account_weight(self.weight)?;
         validate_wire_group_ids(&self.group_ids)?;
+        if let Some(features) = &self.disabled_optional_features {
+            parse_disabled_optional_features(features)?;
+        }
         Ok(())
     }
 
@@ -254,9 +271,21 @@ impl UpdateAccountRequest {
             weight: parse_account_weight(self.weight)?,
             model_access: self.model_access,
             group_ids: validate_wire_group_ids(&self.group_ids)?,
+            feature_opt_outs: self
+                .disabled_optional_features
+                .as_deref()
+                .map(parse_disabled_optional_features)
+                .transpose()?,
         };
         Ok((settings, connection))
     }
+}
+
+pub(super) fn parse_disabled_optional_features(
+    tokens: &[String],
+) -> Result<gateway_core::account::AccountFeatureOptOuts, WireValidationError> {
+    gateway_core::account::AccountFeatureOptOuts::from_wire_tokens(tokens)
+        .map_err(|()| WireValidationError::new("disabledOptionalFeatures"))
 }
 
 /// 编辑 OpenAI 账号的连接设置；OAuth 仅接受传输方式

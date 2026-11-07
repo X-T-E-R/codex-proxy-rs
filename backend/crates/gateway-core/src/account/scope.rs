@@ -1,6 +1,6 @@
 //! 请求认证时冻结的账号范围与目录，不依赖路由选择器
 
-use super::{FastMode, ProviderAccountId};
+use super::{AccountFeatureOptOuts, AccountOptionalFeature, FastMode, ProviderAccountId};
 use crate::identity::ProviderKind;
 use crate::validation::{IdentifierError, RoutingError};
 use std::{
@@ -48,6 +48,7 @@ pub struct RuntimeAccount {
     provider_kind: ProviderKind,
     group_ids: Arc<BTreeSet<AccountGroupId>>,
     model_access: super::AccountModelAccess,
+    feature_opt_outs: AccountFeatureOptOuts,
 }
 
 impl RuntimeAccount {
@@ -57,6 +58,7 @@ impl RuntimeAccount {
             provider_kind,
             group_ids: Arc::new(group_ids),
             model_access: super::AccountModelAccess::all(),
+            feature_opt_outs: AccountFeatureOptOuts::empty(),
         }
     }
 
@@ -64,6 +66,17 @@ impl RuntimeAccount {
     pub fn with_model_access(mut self, model_access: super::AccountModelAccess) -> Self {
         self.model_access = model_access;
         self
+    }
+
+    #[must_use]
+    pub fn with_feature_opt_outs(mut self, feature_opt_outs: AccountFeatureOptOuts) -> Self {
+        self.feature_opt_outs = feature_opt_outs;
+        self
+    }
+
+    #[must_use]
+    pub const fn feature_opt_outs(&self) -> &AccountFeatureOptOuts {
+        &self.feature_opt_outs
     }
 
     #[must_use]
@@ -114,6 +127,11 @@ impl RuntimeAccountDirectory {
     #[must_use]
     pub fn account(&self, account_id: &ProviderAccountId) -> Option<&RuntimeAccount> {
         self.accounts.get(account_id)
+    }
+
+    #[must_use]
+    pub fn iter(&self) -> impl Iterator<Item = (&ProviderAccountId, &RuntimeAccount)> {
+        self.accounts.iter()
     }
 
     #[must_use]
@@ -433,5 +451,39 @@ impl FrozenAccountScope {
     #[must_use]
     pub const fn directory(&self) -> &Arc<RuntimeAccountDirectory> {
         &self.directory
+    }
+
+    /// 当前授权范围内是否有账号显式关闭该功能
+    #[must_use]
+    pub fn any_opted_out(&self, feature: AccountOptionalFeature) -> bool {
+        self.directory
+            .iter()
+            .any(|(id, account)| self.allows(id) && account.feature_opt_outs().contains(feature))
+    }
+
+    /// 该账号是否在冻结目录里显式关闭该功能；目录中没有的账号按未关闭处理
+    #[must_use]
+    pub fn opts_out(
+        &self,
+        account_id: &ProviderAccountId,
+        feature: AccountOptionalFeature,
+    ) -> bool {
+        self.directory
+            .account(account_id)
+            .is_some_and(|account| account.feature_opt_outs().contains(feature))
+    }
+
+    /// 把仍继承该功能的范围内账号排除出本次选择，已显式关闭的账号保持可选
+    #[must_use]
+    pub fn excluding_accounts_inheriting(&self, feature: AccountOptionalFeature) -> Self {
+        let mut excluded = self.excluded_account_ids.as_ref().clone();
+        for (id, account) in self.directory.iter() {
+            if self.allows(id) && !account.feature_opt_outs().contains(feature) {
+                excluded.insert(id.clone());
+            }
+        }
+        let mut restricted = self.clone();
+        restricted.excluded_account_ids = Arc::new(excluded);
+        restricted
     }
 }

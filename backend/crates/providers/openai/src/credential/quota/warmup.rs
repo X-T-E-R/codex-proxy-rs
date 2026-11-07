@@ -84,6 +84,9 @@ impl CodexCredentialQuotaService {
                     account.credential_state(),
                     CredentialState::Unknown | CredentialState::Ready
                 )
+                && !account
+                    .feature_opt_outs()
+                    .contains(gateway_core::account::AccountOptionalFeature::AccountWarmup)
         });
         let mut summary = CodexWarmupSummary::default();
         if accounts.is_empty() {

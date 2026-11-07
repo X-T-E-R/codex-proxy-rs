@@ -27,6 +27,9 @@ export function useAccountBatchEditor(options: {
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
   const selectedGroupIds = ref<string[]>([])
+  const disabledOptionalFeatures = ref<string[] | undefined>()
+  const provider = shallowRef<string>()
+  const authenticationKind = shallowRef<string>()
   const saveAction = useAsyncAction()
   const saving = saveAction.loading
 
@@ -56,6 +59,9 @@ export function useAccountBatchEditor(options: {
     concurrencyLimit.value = sharedConcurrencyLimit(accounts)
     weight.value = sharedWeight(accounts)
     selectedGroupIds.value = sharedGroupIds(accounts)
+    disabledOptionalFeatures.value = undefined
+    provider.value = sharedValue(accounts.map(account => account.provider))
+    authenticationKind.value = sharedValue(accounts.map(account => account.authenticationKind))
     showBatchEditModal.value = true
   }
 
@@ -87,6 +93,9 @@ export function useAccountBatchEditor(options: {
         concurrencyLimit: editedFields.value.has('concurrencyLimit') ? scheduling.values.concurrencyLimit : undefined,
         weight: editedFields.value.has('weight') ? scheduling.values.weight : undefined,
         groupIds: editedFields.value.has('groupIds') ? [...new Set(selectedGroupIds.value)] : undefined,
+        disabledOptionalFeatures: disabledOptionalFeatures.value
+          ? [...disabledOptionalFeatures.value]
+          : undefined,
       })
       showBatchEditModal.value = false
       options.selectedIds.value = new Set()
@@ -130,10 +139,18 @@ export function useAccountBatchEditor(options: {
     proxyMode,
     proxyId,
     selectedGroupIds,
+    disabledOptionalFeatures,
+    provider,
+    authenticationKind,
     saving,
     open,
     save,
   }
+}
+
+function sharedValue(values: string[]) {
+  const first = values[0]
+  return values.every(value => value === first) ? first : undefined
 }
 
 function sharedConcurrencyLimit(accounts: Account[]) {

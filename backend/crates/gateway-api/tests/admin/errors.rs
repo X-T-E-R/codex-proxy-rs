@@ -539,6 +539,7 @@ mod provider {
                 last_error_message: None,
                 created_at: now,
                 updated_at: now,
+                feature_opt_outs: Default::default(),
             },
             projection: resolve_account_status(&facts, SystemTime::now()),
         }

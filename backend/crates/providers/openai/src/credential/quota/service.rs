@@ -127,6 +127,12 @@ impl CodexCredentialQuotaService {
     /// 调度侧立即屏蔽该账号，恢复由
     /// freeze-recovery worker 处理；本路径只依赖 Redis 可丢失事实
     pub async fn apply_capacity_failure(&self, account: &ProviderAccount, observed_at: SystemTime) {
+        if account
+            .feature_opt_outs()
+            .contains(gateway_core::account::AccountOptionalFeature::CapacityFreeze)
+        {
+            return;
+        }
         let policy = self.freeze_policy().await;
         if !policy.enabled() {
             return;

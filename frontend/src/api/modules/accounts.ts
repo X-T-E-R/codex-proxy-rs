@@ -166,6 +166,7 @@ export interface Account {
   quota: AccountQuota
   usage: AccountUsage
   groups: AccountGroupRef[]
+  disabledOptionalFeatures?: string[]
 }
 
 export interface AccountCapabilities {
@@ -423,6 +424,7 @@ interface AccountUpdateParam {
   weight: number
   modelAccess?: AccountModelAccess
   groupIds: string[]
+  disabledOptionalFeatures?: string[]
 }
 
 interface AccountBatchUpdateParam {
@@ -434,6 +436,7 @@ interface AccountBatchUpdateParam {
   weight?: number
   modelAccess?: AccountModelAccess
   groupIds?: string[]
+  disabledOptionalFeatures?: string[]
 }
 
 interface AccountDeleteParams {
@@ -448,6 +451,7 @@ export interface AccountImportSettings {
   weight: number
   modelAccess?: AccountModelAccess
   groupIds: string[]
+  disabledOptionalFeatures?: string[]
 }
 
 export interface AccountImportParam {

@@ -81,6 +81,18 @@ impl MemoryAccountStore {
             .expect("seed test OAuth credential");
     }
 
+    pub(crate) fn set_feature_opt_outs(
+        &self,
+        id: &str,
+        opt_outs: gateway_core::account::AccountFeatureOptOuts,
+    ) {
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts
+            .get_mut(&ProviderAccountId::new(id).expect("account id"))
+            .expect("seeded account");
+        stored.account = stored.account.clone().with_feature_opt_outs(opt_outs);
+    }
+
     pub(crate) fn set_oauth_transport(
         &self,
         id: &str,

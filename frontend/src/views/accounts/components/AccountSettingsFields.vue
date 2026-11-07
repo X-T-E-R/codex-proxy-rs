@@ -5,6 +5,7 @@ import { ZFormItem, ZInput, ZSwitch } from '@codex-proxy/ui'
 import { useI18n } from 'vue-i18n'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import AccountModelAccessField from './AccountModelAccessField.vue'
+import AccountOptionalFeaturesField from './AccountOptionalFeaturesField.vue'
 import AccountProxyField from './AccountProxyField.vue'
 
 withDefaults(defineProps<{
@@ -16,9 +17,12 @@ withDefaults(defineProps<{
   accountId?: string
   preserveProxy?: boolean
   preserveModelAccess?: boolean
+  preserveOptionalFeatures?: boolean
   showScheduling?: boolean
+  provider?: string
+  authenticationKind?: string
   proxyError?: string
-}>(), { preserveProxy: true, showScheduling: true })
+}>(), { preserveProxy: true, showScheduling: true, preserveOptionalFeatures: false })
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -29,6 +33,7 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const disabledOptionalFeatures = defineModel<string[] | undefined>('disabledOptionalFeatures', { required: true })
 </script>
 
 <template>
@@ -77,5 +82,12 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
       />
     </ZFormItem>
     <AccountProxyField v-model:mode="proxyMode" v-model:proxy-id="proxyId" :preserve="preserveProxy" :error="proxyError" :current-proxy-id="currentProxyId" :endpoint="endpoint" :account-id="accountId" :disabled="disabled" />
+    <AccountOptionalFeaturesField
+      v-model="disabledOptionalFeatures"
+      :provider="provider"
+      :authentication-kind="authenticationKind"
+      :preserve="preserveOptionalFeatures"
+      :disabled="disabled"
+    />
   </div>
 </template>

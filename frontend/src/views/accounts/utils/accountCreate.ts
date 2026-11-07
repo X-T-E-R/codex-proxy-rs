@@ -23,6 +23,7 @@ export interface AccountCreateForm {
   importTexts: Record<AccountImportInputMode, string>
   proxyMode: string
   proxyId: string
+  disabledOptionalFeatures?: string[]
 }
 
 export function emptyAccountCreateForm(): AccountCreateForm {
@@ -39,6 +40,7 @@ export function emptyAccountCreateForm(): AccountCreateForm {
     importTexts: { access_token: '', refresh_token: '', json: '' },
     proxyMode: 'direct',
     proxyId: '',
+    disabledOptionalFeatures: [],
   }
 }
 
@@ -71,6 +73,9 @@ export function accountImportSettings(form: AccountCreateForm) {
     ...scheduling.values,
     groupIds: [...new Set(form.groupIds)],
     notes: form.notes.trim() || undefined,
+    ...(form.disabledOptionalFeatures?.length
+      ? { disabledOptionalFeatures: [...form.disabledOptionalFeatures] }
+      : {}),
   }
 }
 

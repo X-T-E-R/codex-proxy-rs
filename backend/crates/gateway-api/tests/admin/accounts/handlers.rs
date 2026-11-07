@@ -201,6 +201,7 @@ fn account_page_item(
             last_error_message: None,
             created_at: now,
             updated_at: now,
+            feature_opt_outs: Default::default(),
         },
         capacity: AccountCapacity {
             used_slots: None,

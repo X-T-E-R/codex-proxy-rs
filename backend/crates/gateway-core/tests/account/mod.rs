@@ -1,5 +1,6 @@
 //! 账号领域测试入口，以及候选账号与调度输入构造辅助
 
+mod feature_opt_out;
 mod location;
 mod model_access;
 mod proxy;

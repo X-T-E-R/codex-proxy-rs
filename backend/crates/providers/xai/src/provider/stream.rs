@@ -216,7 +216,7 @@ pub(super) fn cold_compaction_http_sse_stream(
                 }
                 InferenceBoundary::Response(Err(error)) => {
                     if !invalid_encrypted_content_retried
-                        && is_invalid_encrypted_content_failure(&error, &context)
+                        && is_invalid_encrypted_content_failure(&error, &context, session.account_id())
                         && request.strip_invalid_encrypted_reasoning()
                     {
                         invalid_encrypted_content_retried = true;
@@ -227,7 +227,7 @@ pub(super) fn cold_compaction_http_sse_stream(
                         transport_credential_failure(&error, &upstream_model);
                     let error = map_continuation_failure(
                         &context,
-                        map_transport_error_for_context(error, &context),
+                        map_transport_error_for_context(error, &context, session.account_id()),
                     );
                     let error = recover_or_record_failure(
                         selector.as_ref(),
@@ -510,7 +510,7 @@ pub(super) fn cold_http_sse_stream(
                 InferenceBoundary::Response(Ok(response)) => break response,
                 InferenceBoundary::Response(Err(error)) => {
                     if !invalid_encrypted_content_retried
-                        && is_invalid_encrypted_content_failure(&error, &context)
+                        && is_invalid_encrypted_content_failure(&error, &context, session.account_id())
                         && request.strip_invalid_encrypted_reasoning()
                     {
                         invalid_encrypted_content_retried = true;
@@ -523,7 +523,7 @@ pub(super) fn cold_http_sse_stream(
                     let credential_failure = transport_credential_failure(&error, &upstream_model);
                     let error = map_continuation_failure(
                         &context,
-                        map_transport_error_for_context(error, &context),
+                        map_transport_error_for_context(error, &context, session.account_id()),
                     );
                     let error = recover_or_record_failure(
                         selector.as_ref(),

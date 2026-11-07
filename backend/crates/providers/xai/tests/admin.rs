@@ -767,6 +767,7 @@ fn account_record(account: &ProviderAccount) -> AccountRecord {
         last_error_message: account.last_error_message().map(str::to_owned),
         created_at: now,
         updated_at: now,
+        feature_opt_outs: Default::default(),
     }
 }
 

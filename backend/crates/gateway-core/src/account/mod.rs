@@ -2,7 +2,9 @@
 
 mod error;
 mod fast_mode;
+mod feature_opt_out;
 pub use fast_mode::FastMode;
+pub use feature_opt_out::{AccountFeatureOptOuts, AccountOptionalFeature};
 mod location;
 pub use location::{InvalidRequestLocation, RequestLocation};
 mod model;

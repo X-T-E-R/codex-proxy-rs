@@ -245,6 +245,14 @@
       "invalidConcurrency": "Leave the concurrency limit blank or enter an integer from 1 to {value}",
       "weightMustBeIntegerFromTo": "Weight must be an integer from 1 to 100"
     },
+    "optionalFeatures": {
+      "label": "Optional features",
+      "help": "Accounts inherit the global switch. Turning one off stops only this account from entering that behavior. Other accounts, current cooldowns, and existing block records stay as they are.",
+      "inherit": "Inherit",
+      "off": "Off",
+      "preserve": "Leave unchanged",
+      "configure": "Set for these accounts"
+    },
     "actions": {
       "deleteAccount": "Delete account",
       "moreActions": "More actions",

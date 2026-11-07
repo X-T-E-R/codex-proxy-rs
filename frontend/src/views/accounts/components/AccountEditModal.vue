@@ -42,6 +42,7 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const disabledOptionalFeatures = defineModel<string[] | undefined>('disabledOptionalFeatures', { required: true })
 </script>
 
 <template>
@@ -88,6 +89,7 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         v-model:selected-group-ids="selectedGroupIds"
         v-model:proxy-mode="proxyMode"
         v-model:proxy-id="proxyId"
+        v-model:disabled-optional-features="disabledOptionalFeatures"
         :groups="groups"
         :groups-loading="groupsLoading"
         :disabled="saving"
@@ -95,6 +97,8 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         :current-proxy-id="account.outboundProxyId"
         :endpoint="account.outboundProxyEndpoint"
         :account-id="account.id"
+        :provider="account.provider"
+        :authentication-kind="account.authenticationKind"
       />
 
       <ZFormItem :label="t('common.fields.notes')">

@@ -35,12 +35,15 @@ const form = defineModel<AccountCreateForm>({ required: true })
       v-model:selected-group-ids="form.groupIds"
       v-model:proxy-mode="form.proxyMode"
       v-model:proxy-id="form.proxyId"
+      v-model:disabled-optional-features="form.disabledOptionalFeatures"
       preserve-model-access
       :groups="groups"
       :groups-loading="groupsLoading"
       :preserve-proxy="false"
       :disabled="disabled"
       :proxy-error="proxyError"
+      :provider="form.source?.kind === 'provider' ? form.source.id : undefined"
+      :authentication-kind="form.mode === 'oauth' ? 'oauth' : 'api_key'"
     />
     <ZFormItem :label="t('common.fields.notes')">
       <ZTextarea

@@ -55,6 +55,8 @@ pub struct AccountImportSettings {
     pub weight: AccountWeight,
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
+    /// `None` 保留已有显式关闭；`Some` 按提交结果替换
+    pub feature_opt_outs: Option<gateway_core::account::AccountFeatureOptOuts>,
 }
 
 /// 账号列表排序字段
@@ -149,6 +151,7 @@ pub struct AccountRecord {
     pub last_error_message: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub feature_opt_outs: gateway_core::account::AccountFeatureOptOuts,
 }
 
 impl AccountRecord {
@@ -245,6 +248,8 @@ pub struct UpdateAccount {
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Vec<gateway_core::routing::AccountGroupId>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
+    /// `None` 保留已有显式关闭；`Some` 按提交结果替换
+    pub feature_opt_outs: Option<gateway_core::account::AccountFeatureOptOuts>,
 }
 
 /// 账号更新结果
@@ -264,6 +269,8 @@ pub struct BatchUpdateAccounts {
     pub model_access: Option<gateway_core::account::AccountModelAccess>,
     pub group_ids: Option<Vec<gateway_core::routing::AccountGroupId>>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
+    /// `None` 保留每个账号已有显式关闭；`Some` 按同一份结果替换
+    pub feature_opt_outs: Option<gateway_core::account::AccountFeatureOptOuts>,
 }
 
 /// 批量账号更新结果

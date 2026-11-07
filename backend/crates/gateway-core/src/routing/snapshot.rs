@@ -112,6 +112,7 @@ pub struct SnapshotProviderAccountFacts {
     account_id: ProviderAccountId,
     provider_kind: String,
     model_access: crate::account::AccountModelAccess,
+    feature_opt_outs: crate::account::AccountFeatureOptOuts,
 }
 
 impl SnapshotProviderAccountFacts {
@@ -121,6 +122,7 @@ impl SnapshotProviderAccountFacts {
             account_id,
             provider_kind: provider_kind.into(),
             model_access: crate::account::AccountModelAccess::all(),
+            feature_opt_outs: crate::account::AccountFeatureOptOuts::empty(),
         }
     }
 }
@@ -129,6 +131,15 @@ impl SnapshotProviderAccountFacts {
     #[must_use]
     pub fn with_model_access(mut self, model_access: crate::account::AccountModelAccess) -> Self {
         self.model_access = model_access;
+        self
+    }
+
+    #[must_use]
+    pub fn with_feature_opt_outs(
+        mut self,
+        feature_opt_outs: crate::account::AccountFeatureOptOuts,
+    ) -> Self {
+        self.feature_opt_outs = feature_opt_outs;
         self
     }
 }
@@ -477,7 +488,8 @@ async fn compile_runtime_snapshot(
             .insert(
                 account.account_id.clone(),
                 RuntimeAccount::new(provider_kind, BTreeSet::new())
-                    .with_model_access(account.model_access),
+                    .with_model_access(account.model_access)
+                    .with_feature_opt_outs(account.feature_opt_outs),
             )
             .is_some()
         {
@@ -503,7 +515,8 @@ async fn compile_runtime_snapshot(
             .get_mut(&account_id)
             .ok_or(RuntimeSnapshotCompileError::InvalidData)?;
         *account = RuntimeAccount::new(account.provider_kind().clone(), group_ids)
-            .with_model_access(account.model_access().clone());
+            .with_model_access(account.model_access().clone())
+            .with_feature_opt_outs(account.feature_opt_outs().clone());
     }
     let account_directory = Arc::new(RuntimeAccountDirectory::new(accounts));
 

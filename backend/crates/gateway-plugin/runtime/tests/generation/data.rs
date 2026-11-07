@@ -62,6 +62,7 @@ fn account() -> AccountRecord {
         last_error_message: Some("private diagnostic".into()),
         created_at: at,
         updated_at: at,
+        feature_opt_outs: Default::default(),
     }
 }
 

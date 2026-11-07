@@ -12,6 +12,8 @@ defineProps<{
   groups: AccountGroupRef[]
   groupsLoading: boolean
   saving: boolean
+  provider?: string
+  authenticationKind?: string
 }>()
 
 const emit = defineEmits<{
@@ -28,6 +30,7 @@ const weight = defineModel<string>('weight', { required: true })
 const proxyMode = defineModel<string>('proxyMode', { required: true })
 const proxyId = defineModel<string>('proxyId', { required: true })
 const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: true })
+const disabledOptionalFeatures = defineModel<string[] | undefined>('disabledOptionalFeatures', { required: true })
 </script>
 
 <template>
@@ -47,11 +50,15 @@ const selectedGroupIds = defineModel<string[]>('selectedGroupIds', { required: t
         v-model:selected-group-ids="selectedGroupIds"
         v-model:proxy-mode="proxyMode"
         v-model:proxy-id="proxyId"
+        v-model:disabled-optional-features="disabledOptionalFeatures"
         preserve-model-access
         :account-id="catalogAccountId"
         :groups="groups"
         :groups-loading="groupsLoading"
         :disabled="saving"
+        preserve-optional-features
+        :provider="provider"
+        :authentication-kind="authenticationKind"
       />
     </div>
 

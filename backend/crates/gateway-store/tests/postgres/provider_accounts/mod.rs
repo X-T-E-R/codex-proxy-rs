@@ -1186,6 +1186,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: Vec::new(),
+                feature_opt_outs: None,
             },
             &context,
         )
@@ -1267,6 +1268,7 @@ async fn account_proxy_edits_preserve_credentials_and_clear_egress_without_audit
         weight: gateway_core::account::AccountWeight::DEFAULT,
         group_ids: vec![],
         outbound_proxy: None,
+        feature_opt_outs: None,
     };
     store
         .update_account(command.clone(), &context)
@@ -1339,6 +1341,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
         group_ids: vec![],
         outbound_proxy: None,
         model_access: None,
+        feature_opt_outs: None,
     };
     store
         .update_account(command.clone(), &context)
@@ -1379,6 +1382,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
                 group_ids: Some(vec![]),
                 model_access: None,
                 outbound_proxy: None,
+                feature_opt_outs: None,
             },
             &context,
         )
@@ -1416,6 +1420,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: vec![],
                 model_access: None,
+                feature_opt_outs: None,
             }),
             outbound_proxy: None,
             audit: audit("audit_notes_reimport", "import", "acct_notes"),
@@ -1488,6 +1493,7 @@ async fn invalid_account_notes_roll_back_scheduling_revision_and_audit() {
                 group_ids: vec![],
                 outbound_proxy: None,
                 model_access: None,
+                feature_opt_outs: None,
             },
             &MutationContext {
                 actor: MutationActor::System,
@@ -1614,6 +1620,7 @@ async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
                 model_access: None,
                 group_ids: None,
                 outbound_proxy: None,
+                feature_opt_outs: None,
             },
             &MutationContext {
                 actor: MutationActor::System,
@@ -1738,6 +1745,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
                 concurrency_limit: Some(gateway_core::account::AccountConcurrencyLimit::new(7)),
                 weight: Some(gateway_core::account::AccountWeight::new(25).expect("weight")),
                 group_ids: Some(vec![AccountGroupId::new(GROUP_ID).expect("group ID")]),
+                feature_opt_outs: None,
             },
             &context,
         )
@@ -1778,6 +1786,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
                     AccountGroupId::new("grp_00000000000000000000000000000072")
                         .expect("missing group ID"),
                 ]),
+                feature_opt_outs: None,
             },
             &context,
         )
@@ -1976,6 +1985,7 @@ async fn authorization_create_returns_existing_account_id_when_identity_is_upser
                     concurrency_limit: None,
                     weight: gateway_core::account::AccountWeight::new(9).expect("weight"),
                     group_ids: Vec::new(),
+                    feature_opt_outs: None,
                 }),
                 pending: PendingAuthorizationMutation::new(
                     provider_kind.clone(),
@@ -2514,6 +2524,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
             weight: Some(gateway_core::account::AccountWeight::DEFAULT),
             group_ids: Some(Vec::new()),
             audit: audit("audit_account_disable", "disable", "acct_admin_a"),
+            feature_opt_outs: None,
         })
         .await
         .expect("disable provider account");
@@ -2581,6 +2592,7 @@ async fn credential_rotation_and_settings_share_one_transaction() {
         group_ids: vec![AccountGroupId::new(GROUP_ID).unwrap()],
         model_access: None,
         outbound_proxy: Some(AccountProxySelection::Direct),
+        feature_opt_outs: None,
     };
     let scope = ProviderAccountAdminScope {
         provider_kind: "openai".to_owned(),
@@ -3306,6 +3318,7 @@ async fn proxy_edit_preserves_an_inflight_token_refresh() {
                 outbound_proxy: Some(gateway_admin::model::proxies::AccountProxySelection::Url(
                     gateway_core::account::OutboundProxy::parse("http://127.0.0.1:18080").unwrap(),
                 )),
+                feature_opt_outs: None,
             },
             &MutationContext {
                 actor: MutationActor::System,
@@ -3360,6 +3373,7 @@ async fn account_import_settings_apply_atomically_to_new_and_existing_identities
         concurrency_limit: Some(AccountConcurrencyLimit::new(3).expect("concurrency")),
         weight: AccountWeight::new(7).expect("weight"),
         group_ids: vec![AccountGroupId::new(GROUP_ID).expect("group ID")],
+        feature_opt_outs: None,
     };
     let result = repository
         .import_provider_accounts(ImportProviderAccounts {
@@ -3492,6 +3506,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
         group_ids: None,
         outbound_proxy: None,
         model_access: Some(policy.clone()),
+        feature_opt_outs: None,
     };
     let context = MutationContext {
         actor: MutationActor::System,
@@ -3691,4 +3706,160 @@ async fn connection_configuration_update_preserves_credential_health() {
     }
     assert_eq!(after["credential_revision"], 2);
     database.close().await;
+}
+
+#[tokio::test]
+async fn optional_feature_opt_outs_round_trip_without_disturbing_neighbors_or_old_readers() {
+    let Some(database) = TestDatabase::create("optional_feature_opt_out").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let store = admin_account_store(&database.pool);
+    repository
+        .insert_provider_account(account("acct_feature_off", "feature-off-user"))
+        .await
+        .expect("seed opted-out account");
+    repository
+        .insert_provider_account(account("acct_feature_neighbor", "feature-neighbor-user"))
+        .await
+        .expect("seed neighbor");
+    sqlx::query("update provider_accounts set allowed_models = array['gpt-4o']::text[] where id = 'acct_feature_off'")
+        .execute(&database.pool)
+        .await
+        .expect("seed leftover model token");
+    let context = MutationContext {
+        actor: MutationActor::System,
+        request_id: "feature-opt-out".to_owned(),
+    };
+    store
+        .update_account(
+            UpdateAccount {
+                account_id: "acct_feature_off".to_owned(),
+                notes: Some("保留备注".to_owned()),
+                enabled: true,
+                concurrency_limit: None,
+                weight: gateway_core::account::AccountWeight::DEFAULT,
+                model_access: None,
+                group_ids: Vec::new(),
+                outbound_proxy: None,
+                feature_opt_outs: Some(gateway_core::account::AccountFeatureOptOuts::new([
+                    gateway_core::account::AccountOptionalFeature::CyberSessionBlock,
+                ])),
+            },
+            &context,
+        )
+        .await
+        .expect("store explicit off");
+    let loaded = repository
+        .load_provider_account("acct_feature_off")
+        .await
+        .expect("load")
+        .expect("account");
+    assert!(
+        loaded
+            .summary
+            .feature_opt_outs
+            .contains(gateway_core::account::AccountOptionalFeature::CyberSessionBlock)
+    );
+    assert_eq!(
+        allowed_model_tokens(&database.pool, "acct_feature_off").await,
+        vec!["cyber_session_block".to_owned(), "gpt-4o".to_owned()]
+    );
+
+    repository
+        .import_provider_accounts(ImportProviderAccounts {
+            scope: ProviderAccountAdminScope {
+                provider_kind: "openai".to_owned(),
+            },
+            accounts: vec![account("acct_feature_reimport", "feature-off-user")],
+            settings: None,
+            outbound_proxy: None,
+            audit: audit("audit_feature_reimport", "import", "acct_feature_off"),
+        })
+        .await
+        .expect("credential reimport");
+    assert_eq!(
+        allowed_model_tokens(&database.pool, "acct_feature_off").await,
+        vec!["cyber_session_block".to_owned(), "gpt-4o".to_owned()]
+    );
+
+    store
+        .batch_update_accounts(
+            BatchUpdateAccounts {
+                account_ids: vec![
+                    "acct_feature_off".to_owned(),
+                    "acct_feature_neighbor".to_owned(),
+                ],
+                enabled: Some(true),
+                concurrency_limit: None,
+                weight: None,
+                model_access: None,
+                group_ids: None,
+                outbound_proxy: None,
+                feature_opt_outs: None,
+            },
+            &context,
+        )
+        .await
+        .expect("preserve opt-out during scheduling update");
+    assert_eq!(
+        allowed_model_tokens(&database.pool, "acct_feature_off").await,
+        vec!["cyber_session_block".to_owned(), "gpt-4o".to_owned()]
+    );
+    assert!(
+        allowed_model_tokens(&database.pool, "acct_feature_neighbor")
+            .await
+            .is_empty()
+    );
+
+    store
+        .update_account(
+            UpdateAccount {
+                account_id: "acct_feature_off".to_owned(),
+                notes: None,
+                enabled: true,
+                concurrency_limit: None,
+                weight: gateway_core::account::AccountWeight::DEFAULT,
+                model_access: None,
+                group_ids: Vec::new(),
+                outbound_proxy: None,
+                feature_opt_outs: Some(gateway_core::account::AccountFeatureOptOuts::empty()),
+            },
+            &context,
+        )
+        .await
+        .expect("restore inherit");
+    let restored = repository
+        .load_provider_account("acct_feature_off")
+        .await
+        .expect("load restored")
+        .expect("account");
+    assert!(restored.summary.feature_opt_outs.is_empty());
+    assert_eq!(
+        allowed_model_tokens(&database.pool, "acct_feature_off").await,
+        vec!["gpt-4o".to_owned()]
+    );
+    assert_eq!(restored.summary.notes.as_deref(), Some("保留备注"));
+    let legacy: (String, bool, Option<String>) = sqlx::query_as(
+        "select id, enabled, notes from provider_accounts where id = 'acct_feature_off'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .expect("old column list still loads the account");
+    assert_eq!(legacy.0, "acct_feature_off");
+    assert!(legacy.1);
+    assert_eq!(legacy.2.as_deref(), Some("保留备注"));
+    database.close().await;
+}
+
+async fn allowed_model_tokens(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
+    let tokens: Option<Vec<String>> =
+        sqlx::query_scalar("select allowed_models from provider_accounts where id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read allowed_models");
+    let mut tokens = tokens.unwrap_or_default();
+    tokens.sort();
+    tokens
 }

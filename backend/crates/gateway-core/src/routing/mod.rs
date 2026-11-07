@@ -630,4 +630,21 @@ impl RoutingPlan {
     pub fn candidates(&self) -> &[ProviderCandidate] {
         &self.candidates
     }
+
+    /// 在已冻结的计划上收窄账号范围，候选与计划共用同一份目录
+    #[must_use]
+    pub fn with_account_scope(mut self, scope: Arc<FrozenAccountScope>) -> Self {
+        self.account_scope = Arc::clone(&scope);
+        let candidates = self
+            .candidates
+            .iter()
+            .cloned()
+            .map(|mut candidate| {
+                candidate.account_scope = Arc::clone(&scope);
+                candidate
+            })
+            .collect::<Vec<_>>();
+        self.candidates = Arc::from(candidates);
+        self
+    }
 }

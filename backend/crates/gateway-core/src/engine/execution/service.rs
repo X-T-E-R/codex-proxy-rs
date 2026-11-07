@@ -862,38 +862,60 @@ impl DefaultExecutionService {
             deadline_at: authorization.deadline_at,
         };
         let cyber_ttl = plan.account_selection_policy().protection().cyber_ttl();
-        if cyber_ttl.is_some()
+        let session_blocked = cyber_ttl.is_some()
             && super::cyber::is_blocked(
                 self.cyber_sessions.as_deref(),
                 &metadata.cyber_session.lookup_keys(client.policy.key_id()),
             )
-            .await
-        {
-            let error = super::cyber::blocked_error();
-            super::cyber::persist_local_block(
-                self.observations.as_ref(),
-                new_request,
-                error.clone(),
-            )
             .await;
-            if let Some(budget) = &self.budget {
-                settle_budget(
-                    budget.as_ref(),
-                    ClientBudgetCharge {
-                        key_id: client.policy.key_id().clone(),
-                        request_id: request_id.clone(),
-                        amount_usd: crate::metering::Decimal::ZERO,
-                        completed_at: SystemTime::now(),
-                    },
-                    self.diagnostics.as_ref(),
+        let mut plan = plan;
+        if session_blocked {
+            let cyber = crate::account::AccountOptionalFeature::CyberSessionBlock;
+            let pinned = extensions
+                .continuation()
+                .and_then(crate::engine::continuation::ContinuationBinding::pinned)
+                .map(|pin| pin.account().clone())
+                .or_else(|| authorization.required_account.clone());
+            let reject = {
+                let scope = plan.account_scope().as_ref();
+                let pinned_is_protected = pinned.as_ref().is_some_and(|account| {
+                    scope.allows(account) && !scope.opts_out(account, cyber)
+                });
+                pinned_is_protected || !scope.any_opted_out(cyber)
+            };
+            if reject {
+                let error = super::cyber::blocked_error();
+                super::cyber::persist_local_block(
+                    self.observations.as_ref(),
+                    new_request,
+                    error.clone(),
                 )
                 .await;
+                if let Some(budget) = &self.budget {
+                    settle_budget(
+                        budget.as_ref(),
+                        ClientBudgetCharge {
+                            key_id: client.policy.key_id().clone(),
+                            request_id: request_id.clone(),
+                            amount_usd: crate::metering::Decimal::ZERO,
+                            completed_at: SystemTime::now(),
+                        },
+                        self.diagnostics.as_ref(),
+                    )
+                    .await;
+                }
+                if let Some(active_request) = active_request {
+                    active_request.release();
+                }
+                admission.release().await;
+                return Err(error);
             }
-            if let Some(active_request) = active_request {
-                active_request.release();
-            }
-            admission.release().await;
-            return Err(error);
+            let narrowed = Arc::new(
+                plan.account_scope()
+                    .as_ref()
+                    .excluding_accounts_inheriting(cyber),
+            );
+            plan = plan.with_account_scope(narrowed);
         }
         let cyber_record = self
             .cyber_sessions

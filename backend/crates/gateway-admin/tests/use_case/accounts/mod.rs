@@ -1918,6 +1918,7 @@ async fn accounts_update_should_commit_then_release_disabled_account_and_publish
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: Vec::new(),
+                feature_opt_outs: None,
             },
         )
         .await
@@ -1957,6 +1958,7 @@ async fn accounts_update_should_not_notify_provider_when_store_commit_fails() {
                 concurrency_limit: None,
                 weight: gateway_core::account::AccountWeight::DEFAULT,
                 group_ids: Vec::new(),
+                feature_opt_outs: None,
             },
         )
         .await
@@ -2000,6 +2002,7 @@ async fn accounts_batch_update_should_commit_once_and_notify_each_provider() {
                 concurrency_limit: Some(None),
                 weight: Some(gateway_core::account::AccountWeight::DEFAULT),
                 group_ids: Some(Vec::new()),
+                feature_opt_outs: None,
             },
         )
         .await
@@ -3331,6 +3334,7 @@ pub(super) fn account_record(kind: &str) -> AccountRecord {
         last_error_message: None,
         created_at: now,
         updated_at: now,
+        feature_opt_outs: Default::default(),
     }
 }
 
@@ -3673,6 +3677,7 @@ pub(super) fn import_settings() -> gateway_admin::model::accounts::AccountImport
             gateway_core::routing::AccountGroupId::new("grp_00000000000000000000000000000091")
                 .expect("group ID"),
         ],
+        feature_opt_outs: None,
     }
 }
 

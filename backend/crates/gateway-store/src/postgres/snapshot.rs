@@ -43,6 +43,7 @@ pub struct SnapshotProviderAccountData {
     pub id: String,
     pub provider_kind: String,
     pub model_access: gateway_core::account::AccountModelAccess,
+    pub feature_opt_outs: gateway_core::account::AccountFeatureOptOuts,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +167,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                         .map(|id| {
                             SnapshotProviderAccountFacts::new(id, account.provider_kind)
                                 .with_model_access(account.model_access)
+                                .with_feature_opt_outs(account.feature_opt_outs)
                         })
                         .map_err(|_| SnapshotStoreError::unavailable())
                 })
@@ -370,18 +372,23 @@ async fn load_provider_accounts(
             String,
             String,
             sqlx::types::Json<gateway_core::account::AccountModelAccess>,
+            Option<Vec<String>>,
         ),
-    >("select id, provider_kind, model_access_json from provider_accounts order by id")
+    >("select id, provider_kind, model_access_json, allowed_models from provider_accounts order by id")
     .fetch_all(&mut **transaction)
     .await
     .map_err(|source| postgres_unavailable("load snapshot provider accounts", source))
     .map(|rows| {
         rows.into_iter()
             .map(
-                |(id, provider_kind, model_access)| SnapshotProviderAccountData {
+                |(id, provider_kind, model_access, allowed_models)| SnapshotProviderAccountData {
                     id,
                     provider_kind,
                     model_access: model_access.0,
+                    feature_opt_outs:
+                        gateway_core::account::AccountFeatureOptOuts::from_persisted_tokens(
+                            allowed_models.unwrap_or_default(),
+                        ),
                 },
             )
             .collect()

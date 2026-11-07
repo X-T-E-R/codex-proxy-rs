@@ -25,6 +25,7 @@ export function useAccountEditor(options: {
   const proxyMode = shallowRef('preserve')
   const proxyId = shallowRef('')
   const selectedGroupIds = ref<string[]>([])
+  const disabledOptionalFeatures = ref<string[]>([])
   const saveAction = useAsyncAction()
   const saving = saveAction.loading
   const apiKey = ref(emptyApiKeyAccountForm())
@@ -73,6 +74,7 @@ export function useAccountEditor(options: {
     weight.value = String(account.weight)
     modelAccess.value = { ...account.modelAccess, models: [...account.modelAccess.models] }
     selectedGroupIds.value = account.groups.map(group => group.id)
+    disabledOptionalFeatures.value = [...(account.disabledOptionalFeatures ?? [])]
     showEditModal.value = true
     if (isOpenAiApiKeyAccount(account) || isOpenAiOAuthAccount(account))
       void loadConfiguration(account.id)
@@ -119,6 +121,7 @@ export function useAccountEditor(options: {
         weight: scheduling.values.weight,
         modelAccess: modelAccess.value,
         groupIds: [...new Set(selectedGroupIds.value)],
+        disabledOptionalFeatures: [...disabledOptionalFeatures.value],
       }
       const connectionChanged = isApiKey && (
         apiKey.value.apiKey !== ''
@@ -166,6 +169,7 @@ export function useAccountEditor(options: {
     proxyMode,
     proxyId,
     selectedGroupIds,
+    disabledOptionalFeatures,
     saving,
     open,
     save,

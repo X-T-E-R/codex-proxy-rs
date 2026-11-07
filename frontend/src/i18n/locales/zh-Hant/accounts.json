@@ -245,6 +245,14 @@
       "invalidConcurrency": "併發限制必須留空，或爲 1 到 {value} 的整數",
       "weightMustBeIntegerFromTo": "權重必須是 1 到 100 的整數"
     },
+    "optionalFeatures": {
+      "label": "可選功能",
+      "help": "默認繼承全局開關。關閉後僅這個賬號不再進入該行為；其它賬號、當前冷卻和已有屏蔽記錄保持不變。",
+      "inherit": "繼承全局",
+      "off": "關閉",
+      "preserve": "不修改",
+      "configure": "按賬號設置"
+    },
     "actions": {
       "deleteAccount": "刪除賬號",
       "moreActions": "更多操作",
