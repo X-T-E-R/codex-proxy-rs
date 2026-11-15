@@ -28,7 +28,8 @@ fn openai_config_derives_identity_secret_from_runtime_data_dir() {
         .resolve_and_validate(Path::new("/srv/gateway/runtime-data"))
         .expect("valid OpenAI config");
 
-    assert!(format!("{config:?}").contains("/srv/gateway/runtime-data/identity_hmac_secret"));
+    let expected = Path::new("/srv/gateway/runtime-data").join("identity_hmac_secret");
+    assert!(format!("{config:?}").contains(&format!("{expected:?}")));
 }
 
 #[test]

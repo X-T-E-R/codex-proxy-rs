@@ -24,7 +24,7 @@ use gateway_core::provider_ports::{
     ProviderRefreshPolicy, ProviderRuntimePolicyPort, ProviderSchedulingLeaseRequest,
     ProviderSchedulingState, ProviderScopedCooldown, ProviderSessionAffinityKey,
     ProviderSessionAffinityPort, ProviderSessionExclusionPort, ProviderSessionExclusions,
-    ProviderStoreError,
+    ProviderStoreError, ProviderStoreErrorKind,
 };
 use gateway_core::routing::ProviderKind;
 use provider_openai::credential::{
@@ -935,6 +935,8 @@ pub(crate) fn account_policy() -> gateway_core::account::AccountSelectionPolicy 
 /// 内存 cooldown port，分别保存账号级与细分作用域，并遵守 revision fence。
 #[derive(Clone, Default)]
 pub(crate) struct MemoryCooldownPort {
+    pub(crate) scoped_reads: Arc<AtomicUsize>,
+    pub(crate) fail_scoped_reads: Arc<AtomicBool>,
     pub(crate) cooldowns: Arc<Mutex<BTreeMap<ProviderAccountId, ProviderCooldown>>>,
     scoped_cooldowns:
         Arc<Mutex<BTreeMap<(ProviderAccountId, ProviderCooldownScope), ProviderScopedCooldown>>>,
@@ -1023,6 +1025,13 @@ impl ProviderCooldownPort for MemoryCooldownPort {
         scope: &'a ProviderCooldownScope,
     ) -> BoxFuture<'a, Result<Option<ProviderScopedCooldown>, ProviderStoreError>> {
         Box::pin(async move {
+            self.scoped_reads.fetch_add(1, Ordering::SeqCst);
+            if self.fail_scoped_reads.load(Ordering::SeqCst) {
+                return Err(ProviderStoreError::new(
+                    ProviderStoreErrorKind::Unavailable,
+                    "read test scoped cooldown",
+                ));
+            }
             Ok(self
                 .scoped_cooldowns
                 .lock()

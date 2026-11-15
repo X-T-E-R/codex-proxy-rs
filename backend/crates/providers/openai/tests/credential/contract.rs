@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime};
 
 use futures::executor::block_on;
 use gateway_core::account::{
     AccountAttemptFeedback, AccountConcurrencyLimit, AccountErrorReason, AccountFeedbackStats,
-    AccountSelectionPolicy, AccountStateChange, AccountWeight, CredentialState, OpaqueProviderData,
-    ProviderAccount, ProviderAccountId, ProviderAccountStore as _, QuotaAccessChange,
-    QuotaAccessState, QuotaEvidence, QuotaObservation, QuotaState, QuotaWriteOutcome,
-    RotationStrategy,
+    AccountOverloadCooldownOverride, AccountSelectionPolicy, AccountStateChange, AccountWeight,
+    CredentialState, OpaqueProviderData, ProviderAccount, ProviderAccountId,
+    ProviderAccountStore as _, QuotaAccessChange, QuotaAccessState, QuotaEvidence,
+    QuotaObservation, QuotaState, QuotaWriteOutcome, RotationStrategy,
 };
 use gateway_core::engine::continuation::{
     ContinuationBinding, NativeContinuationPin, PreviousResponseId,
@@ -343,6 +344,77 @@ fn repository_round_trips_plaintext_runtime_secret() {
             .expose_secret(),
         "rt-at-primary"
     );
+}
+
+#[tokio::test]
+async fn overload_reads_are_opt_in_fail_open_and_bypassed_for_diagnostics() {
+    let enabled = Some((NonZeroU32::new(2).unwrap(), NonZeroU32::new(120).unwrap()));
+    for (global, override_policy, diagnostic, expected_reads) in [
+        (None, AccountOverloadCooldownOverride::Inherit, false, 0),
+        (enabled, AccountOverloadCooldownOverride::Disabled, false, 0),
+        (enabled, AccountOverloadCooldownOverride::Inherit, false, 2),
+        (
+            None,
+            AccountOverloadCooldownOverride::custom(1, 120).unwrap(),
+            false,
+            2,
+        ),
+        (enabled, AccountOverloadCooldownOverride::Inherit, true, 0),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        store
+            .seed_oauth_credential(ImportCodexOAuthCredential {
+                account_id: "acct_primary".to_owned(),
+                name: "primary".to_owned(),
+                secret: secret("at-test"),
+                verified_account: profile("chatgpt-primary"),
+                next_refresh_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+                enabled: true,
+            })
+            .await;
+        store.set_overload_cooldown_override("acct_primary", override_policy);
+        let cooldowns = Arc::new(MemoryCooldownPort::new());
+        cooldowns.fail_scoped_reads.store(true, Ordering::SeqCst);
+        let selector = selector_with_runtime(
+            &store,
+            Arc::new(TestLeaseCoordinator::default()),
+            Arc::new(MemorySessionAffinity::default()),
+            Arc::new(AccountFeedbackStats::default()),
+            cooldowns.clone(),
+        );
+        let id = ProviderAccountId::new("acct_primary").unwrap();
+        let account = if diagnostic {
+            AccountAttemptContext::diagnostic(BTreeSet::new(), id, None)
+        } else {
+            AccountAttemptContext::new(BTreeSet::new(), Some(id), None)
+                .with_account_scope(contract_account_scope())
+        };
+        let attempt = AttemptContext::new(
+            RequestAttemptContext::new(
+                ModelRequestId::new("req_cooldown").unwrap(),
+                ClientApiKeyId::new("key").unwrap(),
+            ),
+            NonZeroU32::new(1).unwrap(),
+            SystemTime::now() + Duration::from_secs(30),
+            account_policy().with_overload_cooldown(global),
+            account,
+            None,
+            CancellationToken::new(),
+        );
+        selector
+            .select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse(OFFICIAL_CODEX_BASE_URL).unwrap(),
+                attempt: &attempt,
+                session_affinity_key: None,
+            })
+            .await
+            .expect("optional cooldown read cannot fail inference");
+        assert_eq!(
+            cooldowns.scoped_reads.load(Ordering::SeqCst),
+            expected_reads
+        );
+    }
 }
 
 #[test]

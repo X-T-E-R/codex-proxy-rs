@@ -308,7 +308,7 @@ OpenAI 的 `self_serve_business_prolite` 等 Team 套餐显示为 `Business`；�
 账号出口与连接隔离见 [架构说明](architecture.md#账号出站代理)。
 
 `overloadCooldown` 为账号级过载冷号覆盖，更新与批量更新时必填，形状为 `{ mode, threshold?, seconds? }`：
-`mode: "inherit"` 跟随全局过载冷号设置；`"disabled"` 表示该账号不触发新的过载冷号，已有冷却按原到期时间解除；
+`mode: "inherit"` 跟随全局过载冷号设置；`"disabled"` 表示该账号不读取、不执行也不触发过载冷号；
 `"custom"` 使用自有阈值，此时 `threshold`（连续过载次数）与 `seconds`（冷号时长）均必填，取 1–4294967295 的整数，
 其余模式下两者必须为 `null`。账号视图返回当前保存的覆盖配置；生效规则见
 [运行设置](#8-运行设置)的过载冷号说明。
@@ -382,7 +382,7 @@ concurrent proxy mutations return 409. OAuth commits still reject a deleted, cha
 }
 ```
 
-账号处于过载冷却时，连接测试也会在发送上游请求前被拒绝，需等待冷却到期或显式恢复账号。
+连接测试绕过过载冷却，由真实上游响应确认指定账号状态。
 
 - `source` 为 `gateway`、`provider` 或 `upstream`：分别表示尚未进入 Provider、Provider 本地且未发送、
   已发送/可能已发送或已经捕获到上游事实。
@@ -705,12 +705,17 @@ openaiSearchCountry
 | `overloadCooldownThreshold` | `2` | 同一账号连续过载次数，正整数，最大 `4294967295` |
 | `overloadCooldownSeconds` | `120` | 冷号时长（秒），正整数，最大 `4294967295` |
 
-上游错误文本包含 `Our servers are currently overloaded. Please try again later.` 或
-`Selected model is at capacity.` 即累计一次；覆盖 HTTP 503、HTTP SSE 和 WebSocket 错误。
-两个关键词共享同一账号的计数，成功响应或其他错误清零。计数在各进程内独立维护，重启后重新计数；
-冷却到期时间保存在共享 Redis。冷号期间拒绝该账号的新推理、指定账号请求和连接测试，已有请求可继续完成，
-其成功不会提前解冻。关闭开关停止新触发，已有冷却按原期限结束。账号列表通过 `rate_limited` 展示冷却状态。
-单个账号可用 `overloadCooldown` 覆盖全局设置（见[账号](#5-账号)）；`disabled` 账号不累计也不触发新冷却。
+账号过载仅从 HTTP 429/503，或结构化服务端错误（如 `server_error` / `overloaded`）判定，
+显式 400 或成功状态不会因正文中出现过载文字而触发。标准账号过载 message
+`Our servers are currently overloaded. Please try again later.` 或结构化 overload code 才累计；
+不扫描 JSON 中其他字段的回显文本。`Selected model is at capacity.` 属于单模型容量不足，不触发账号冷号或驱逐连接。
+
+同一账号两次累计至少间隔 2 秒，同一并发尖峰只算一次；成功响应或其他错误清零。
+计数在进程内维护，重启后重新计数；冷却到期时间保存在共享 Redis。策略生效期间，冷号限制新推理和普通指定账号请求，
+显式管理员连接测试不受限。已有请求与健康 WebSocket 保留，其成功不会提前解冻。
+全局关闭且账号无 custom 覆盖，或账号为 `disabled` 时，不读取也不执行已有过载冷却；重新启用后仍未到期的条目继续生效。
+存储读取失败记录警告并放行，不中断推理。账号列表通过 `rate_limited` 展示存储中的冷却状态。
+单个账号可用 `overloadCooldown` 覆盖全局设置（见[账号](#5-账号)）。
 
 模型级请求策略由 `modelPolicies` 控制：按键精确匹配客户端请求的 public 模型名（与 `modelMappings`
 同键空间），在生成路由计划时冻结进候选，由 Provider 在发送前改写请求体；Images、Search 等 Provider

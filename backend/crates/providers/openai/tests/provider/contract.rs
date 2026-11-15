@@ -598,7 +598,7 @@ async fn overload_cooldown_is_opt_in_consecutive_and_account_scoped() {
     overload_response(
         &server,
         ResponseTemplate::new(503).set_body_json(json!({
-            "error": { "code": "server_is_overloaded", "message": "A different server failure" }
+            "error": { "type": "server_error", "message": "A different server failure" }
         })),
     )
     .await;
@@ -610,40 +610,225 @@ async fn overload_cooldown_is_opt_in_consecutive_and_account_scoped() {
             .await
             .is_err()
     );
-    overload_response(
-        &server,
-        ResponseTemplate::new(503).set_body_string(
-            "Upstream rejected the request: Selected model is at capacity. Retry later.",
-        ),
-    )
-    .await;
+    tokio::time::sleep(Duration::from_millis(2_050)).await;
+    overload_response(&server, overloaded_response()).await;
     let second = overload_request(&provider, account, policy)
         .await
         .expect_err("second upstream failure");
     assert_eq!(second.upstream_status(), Some(503), "{second:?}");
     let before = server.received_requests().await.expect("requests").len();
-    // 关闭新触发并不提前解除已有冷号；指定账号和诊断都不会再发送上游请求。
-    let blocked = overload_request(&provider, account, None)
+    // 生效策略下普通指定账号仍受冷却限制；关闭策略或显式诊断则可发送。
+    let blocked = overload_request(&provider, account, policy)
         .await
         .expect_err("cold account");
     assert_eq!(blocked.send_state(), UpstreamSendState::NotSent);
-    assert!(
-        provider
-            .execute(
-                planned_request("openai", http_generate_operation()),
-                diagnostic_context("req_cold_diagnostic", account),
-            )
-            .await
-            .is_err()
-    );
+    let mut diagnostic = provider
+        .execute(
+            planned_request("openai", http_generate_operation()),
+            diagnostic_context("req_cold_diagnostic", account),
+        )
+        .await
+        .expect("diagnostic bypasses cooldown");
+    while let Some(event) = diagnostic.next().await {
+        if event.is_err() {
+            break;
+        }
+    }
+    let disabled = overload_request(&provider, account, None)
+        .await
+        .expect_err("upstream overload");
+    assert_eq!(disabled.send_state(), UpstreamSendState::Sent);
     assert_eq!(
         server.received_requests().await.expect("requests").len(),
-        before
+        before + 2
     );
     overload_response(&server, overload_success_response()).await;
     overload_request(&provider, "acct_scope_new", policy)
         .await
         .expect("other account remains eligible");
+}
+
+#[tokio::test]
+async fn overload_cooldown_preserves_healthy_websocket_for_previous_response_continuation() {
+    for (status, message) in [
+        (
+            429,
+            "Our servers are currently overloaded. Please try again later.",
+        ),
+        (
+            503,
+            "Our servers are currently overloaded. Please try again later.",
+        ),
+        (429, "Selected model is at capacity. Retry later."),
+    ] {
+        let store = Arc::new(MemoryAccountStore::default());
+        create_account(&store, "acct_provider_contract").await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("seed WS");
+            let mut ws = accept_codex_test_websocket(stream).await;
+            ws.next().await.expect("seed request").expect("valid seed");
+            ws.send(Message::Text(
+                json!({"type":"response.completed","response":{
+                    "id":"resp-healthy", "model":"gpt-5.4", "status":"completed", "output":[]
+                }})
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("seed complete");
+            let (mut http, _) = listener.accept().await.expect("HTTP overload");
+            capture_http_request(&mut http).await;
+            let body = json!({"error":{"type":"server_error","message":message}}).to_string();
+            http.write_all(format!("HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.expect("overload response");
+            let request = timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("same WS remains open")
+                .expect("continuation frame")
+                .expect("valid continuation");
+            let request: Value =
+                serde_json::from_str(request.to_text().expect("not a close frame")).unwrap();
+            assert_eq!(request["previous_response_id"], "resp-healthy");
+            ws.send(Message::Text(
+                json!({"type":"response.completed","response":{
+                    "id":"resp-continued", "model":"gpt-5.4", "status":"completed", "output":[]
+                }})
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("continuation complete");
+        });
+        let provider = provider_with_base_url_and_retry_budget(&store, base_url, 0);
+        let operation = || {
+            Operation::Generate(generate_with_persisted_session_context(
+                "acct_provider_contract",
+                "overload-healthy",
+                "shared",
+                "healthy-thread",
+            ))
+        };
+        let mut seed = provider
+            .execute(
+                planned_request("openai", operation()),
+                context("req_seed", CancellationToken::new()),
+            )
+            .await
+            .expect("seed");
+        while let Some(event) = seed.next().await {
+            event.expect("healthy seed");
+        }
+        let error = overload_request(&provider, "acct_provider_contract", Some((1, 120)))
+            .await
+            .expect_err("overload");
+        assert_eq!(error.upstream_status(), Some(status));
+        // 关闭保护后原生续接仍必须复用原连接，而非重连丢失服务端状态。
+        let mut continuation = provider
+            .execute(
+                planned_request("openai", operation()),
+                pinned_continuation_context(
+                    "req_continue",
+                    "acct_provider_contract",
+                    "resp-healthy",
+                    "resp-healthy",
+                    1,
+                    ContinuationAttempt::Native,
+                ),
+            )
+            .await
+            .expect("continuation admitted");
+        let mut reused = false;
+        while let Some(event) = continuation.next().await {
+            let event = event.expect("healthy continuation");
+            reused |= event.response_observation().is_some_and(|observation| {
+                observation.websocket_pool() == Some(WebSocketPoolKind::Reuse)
+            });
+        }
+        assert!(reused, "healthy pooled connection must survive cooldown");
+        server.await.expect("upstream server");
+    }
+}
+
+#[tokio::test]
+async fn overload_cooldown_folds_concurrent_failures_into_one_spike() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let provider = provider_with_base_url(&store, server.uri());
+    overload_response(&server, overloaded_response()).await;
+    let policy = Some((2, 120));
+    let (first, second) = tokio::join!(
+        overload_request(&provider, "acct_provider_contract", policy),
+        overload_request(&provider, "acct_provider_contract", policy)
+    );
+    for result in [first, second] {
+        assert_eq!(
+            result.expect_err("upstream overload").send_state(),
+            UpstreamSendState::Sent
+        );
+    }
+    overload_response(&server, overload_success_response()).await;
+    overload_request(&provider, "acct_provider_contract", policy)
+        .await
+        .expect("one concurrent spike must not freeze the account");
+}
+
+#[tokio::test]
+async fn overload_cooldown_rejects_echoed_text_and_ignores_single_model_capacity() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let provider = provider_with_base_url(&store, server.uri());
+    let policy = Some((1, 120));
+    for response in [
+        ResponseTemplate::new(400).set_body_json(json!({"error":{
+            "type":"server_error", "message":"Our servers are currently overloaded. Please try again later."
+        }})),
+        ResponseTemplate::new(200).set_body_json(json!({"error":{
+            "type":"server_error", "message":"Our servers are currently overloaded. Please try again later."
+        }})),
+        ResponseTemplate::new(503).set_body_json(json!({
+            "error":{"message":"A different error"},
+            "echo":"Our servers are currently overloaded. Please try again later."
+        })),
+        ResponseTemplate::new(503).set_body_json(json!({"error":{
+            "type":"server_error", "message":"Selected model is at capacity."
+        }})),
+        ResponseTemplate::new(429).set_body_json(json!({"error":{
+            "code":"server_is_overloaded", "message":"Selected model is at capacity. Retry later."
+        }})),
+        ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
+            .set_body_string("event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"Our servers are currently overloaded. Please try again later.\"}}\n\n"),
+    ] {
+        overload_response(&server, response).await;
+        let error = overload_request(&provider, "acct_provider_contract", policy).await.expect_err("upstream error");
+        assert_eq!(error.send_state(), UpstreamSendState::Sent);
+        overload_response(&server, overload_success_response()).await;
+        overload_request(&provider, "acct_provider_contract", policy).await
+            .expect("echo/client error/model capacity must not lock the account");
+    }
+}
+
+#[tokio::test]
+async fn overload_cooldown_accepts_structured_server_error_code_without_status() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_provider_contract").await;
+    let server = MockServer::start().await;
+    let provider = provider_with_base_url(&store, server.uri());
+    overload_response(&server, ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_string("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp-failed\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}}}\n\n"))
+        .await;
+    let policy = Some((1, 120));
+    let failure = overload_request(&provider, "acct_provider_contract", policy)
+        .await
+        .expect_err("upstream failure");
+    assert_eq!(failure.send_state(), UpstreamSendState::Sent);
+    let blocked = overload_request(&provider, "acct_provider_contract", policy)
+        .await
+        .expect_err("cooldown");
+    assert_eq!(blocked.send_state(), UpstreamSendState::NotSent);
 }
 
 #[tokio::test]

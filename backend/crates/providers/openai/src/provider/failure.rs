@@ -2,10 +2,9 @@
 
 use super::*;
 
-const OVERLOAD_COOLDOWN_KEYWORDS: &[&str] = &[
-    "Our servers are currently overloaded. Please try again later.",
-    "Selected model is at capacity.",
-];
+const ACCOUNT_OVERLOAD_MESSAGE: &str =
+    "Our servers are currently overloaded. Please try again later.";
+const MODEL_CAPACITY_MESSAGE: &str = "Selected model is at capacity.";
 
 /// OpenAI 失败对 Smart 账号分数的结构化 reason 闭集。
 ///
@@ -364,23 +363,17 @@ pub(super) async fn apply_failure(
     if context.cyber_session_block_enabled && failure.error.is_cyber_policy_refusal() {
         return;
     }
-    match context
+    // 临时过载只影响后续调度，不能销毁其他在途 turn 的 WebSocket/previous_response_id 状态。
+    if let Err(error) = context
         .selector
         .observe_overload_failure(account, context.selection_policy, failure.overload_failure)
         .await
     {
-        Ok(true) => {
-            context
-                .client
-                .evict_websocket_account(account.id().as_str())
-                .await
-        }
-        Ok(false) => {}
-        Err(error) => tracing::warn!(
+        tracing::warn!(
             account_id = %account.id(),
             error = %error,
             "Failed to persist OpenAI overload cooldown"
-        ),
+        );
     }
     synchronize_passive_quota_headers(context.quota, account, &failure.rate_limit_headers).await;
     let needs_authoritative_quota_refresh = matches!(
@@ -1164,13 +1157,42 @@ pub(super) fn map_upstream_failure(
     replay_boundary: ReplayBoundary,
 ) -> MappedProviderFailure {
     let category = failure.category();
-    let overload_failure = OVERLOAD_COOLDOWN_KEYWORDS.iter().any(|keyword| {
-        failure
-            .client_message
-            .as_deref()
-            .is_some_and(|message| message.contains(keyword))
-            || failure.raw_body.contains(keyword)
+    let structured_overload = [
+        failure.code.as_deref(),
+        failure.client_error_type.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| {
+        matches!(
+            value.trim(),
+            "overloaded" | "overloaded_error" | "server_is_overloaded"
+        )
     });
+    let structured_server_error = structured_overload
+        || [
+            failure.code.as_deref(),
+            failure.client_error_type.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| matches!(value.trim(), "server_error" | "service_unavailable_error"));
+    // HTTP 400/成功状态不能靠正文里的英文触发冷号；无状态的 SSE/WS 错误须有结构化服务端错误。
+    let overload_response = match failure.status {
+        Some(status) if matches!(status.as_u16(), 429 | 503) => true,
+        Some(status) => status.is_server_error() && structured_server_error,
+        None => structured_server_error,
+    };
+    let message = failure
+        .client_message
+        .as_deref()
+        .unwrap_or(&failure.raw_body)
+        .trim();
+    // 单模型容量不足不代表账号失效；不写账号级过载或 429 冷却，也不踢健康连接。
+    let model_capacity = overload_response && message.contains(MODEL_CAPACITY_MESSAGE);
+    let overload_failure = overload_response
+        && !model_capacity
+        && (structured_overload || message == ACCOUNT_OVERLOAD_MESSAGE);
     let cyber_session_refusal =
         gateway_protocol::openai::is_cyber_policy_refusal_json(&failure.raw_body);
     let cyber_policy_failure = failure
@@ -1258,11 +1280,15 @@ pub(super) fn map_upstream_failure(
     MappedProviderFailure {
         error,
         websocket_transport_retryable: false,
-        account_failure: account_failure(
-            category,
-            failure.retry_after_seconds,
-            failure.usage_limit_resets_at,
-        ),
+        account_failure: if model_capacity || overload_failure {
+            None
+        } else {
+            account_failure(
+                category,
+                failure.retry_after_seconds,
+                failure.usage_limit_resets_at,
+            )
+        },
         error_message: failure.client_message,
         cyber_policy_failure,
         overload_failure,

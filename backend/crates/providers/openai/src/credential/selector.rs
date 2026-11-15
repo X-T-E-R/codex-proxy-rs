@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use gateway_core::account::{
     AccountCandidate, AccountCapacitySnapshot, AccountEligibilityPolicy, AccountErrorReason,
@@ -44,6 +44,7 @@ const CLOUDFLARE_CHALLENGE_BACKOFF: [Duration; 4] = [
 const CLOUDFLARE_PATH_BLOCK_THRESHOLD: u32 = 3;
 const SESSION_AFFINITY_TIMEOUT: Duration = Duration::from_millis(100);
 const CYBER_POLICY_SESSION_TTL: Duration = Duration::from_secs(60 * 60);
+const OVERLOAD_COALESCING_WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexAccountFailure {
@@ -86,6 +87,7 @@ struct OverloadStreak {
     // 解析账号覆盖后的生效策略；生效值变化时重新计数。
     effective_policy: Option<(NonZeroU32, NonZeroU32)>,
     count: u32,
+    last_counted_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -388,15 +390,13 @@ impl CodexCredentialSelector {
         }
         let mut rate_limits = HashMap::with_capacity(accounts.len());
         let mut overload_accounts = Vec::new();
-        // 诊断和指定账号同样遵守显式过载冷却；Redis 异常不按“没有冷却”放行。
-        for account in &accounts {
-            if let Some(until) = self.quota.overload_cooldown_until(account).await? {
-                overload_accounts.push(account.id().clone());
-                rate_limits.insert(account.id().clone(), Some(until));
-            }
-        }
+        let policy = request.attempt.account_selection_policy();
         if !diagnostic {
             for account in &accounts {
+                if let Some(until) = self.quota.overload_cooldown_until(account, policy).await {
+                    overload_accounts.push(account.id().clone());
+                    rate_limits.insert(account.id().clone(), Some(until));
+                }
                 let until = self
                     .quota
                     .rate_limited_until(account.id())
@@ -511,7 +511,6 @@ impl CodexCredentialSelector {
             affinity.bound_account().cloned()
         };
         let mut shortest_retry = None;
-        let policy = request.attempt.account_selection_policy();
 
         loop {
             let preferred = pinned_account
@@ -574,11 +573,12 @@ impl CodexCredentialSelector {
                 }
                 ProviderLeaseAcquisition::Acquired(guard) => {
                     // 候选读取到 lease 获取之间可能刚触发冷号；准入前再确认一次。
-                    if self
-                        .quota
-                        .overload_cooldown_until(&account)
-                        .await?
-                        .is_some()
+                    if !diagnostic
+                        && self
+                            .quota
+                            .overload_cooldown_until(&account, policy)
+                            .await
+                            .is_some()
                     {
                         drop(guard);
                         excluded.insert(account.id().clone());
@@ -1021,13 +1021,18 @@ impl CodexCredentialSelector {
         policy: AccountSelectionPolicy,
         matches_overload: bool,
     ) -> Result<bool, ProviderStoreError> {
-        // 账号级覆盖优先于全局策略；disabled 与全局关闭一样只停止触发新冷却。
+        // 账号级覆盖优先于全局策略；关闭后不再读取或触发冷却。
         let effective = account.effective_overload_cooldown(policy.overload_cooldown());
         let Some((threshold, seconds)) = effective.filter(|_| matches_overload) else {
             self.reset_overload_streak(account);
             return Ok(false);
         };
-        if self.quota.overload_cooldown_until(account).await?.is_some() {
+        if self
+            .quota
+            .overload_cooldown_until(account, policy)
+            .await
+            .is_some()
+        {
             self.reset_overload_streak(account);
             return Ok(false);
         }
@@ -1041,13 +1046,24 @@ impl CodexCredentialSelector {
                 .or_insert(OverloadStreak {
                     effective_policy: effective,
                     count: 0,
+                    last_counted_at: None,
                 });
             if streak.effective_policy != effective {
                 *streak = OverloadStreak {
                     effective_policy: effective,
                     count: 0,
+                    last_counted_at: None,
                 };
             }
+            let now = Instant::now();
+            // 同一瞬时尖峰的并发失败只算一次，避免两条在途请求直接冻住整个账号。
+            if streak
+                .last_counted_at
+                .is_some_and(|last| now.duration_since(last) < OVERLOAD_COALESCING_WINDOW)
+            {
+                return Ok(false);
+            }
+            streak.last_counted_at = Some(now);
             streak.count = streak.count.saturating_add(1);
             streak.count >= threshold.get()
         };

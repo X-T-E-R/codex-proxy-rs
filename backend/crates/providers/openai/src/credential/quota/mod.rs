@@ -19,8 +19,8 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use gateway_core::account::{
-    AccountErrorReason, AccountQuotaSignals, CredentialRevision, CredentialState,
-    OpaqueProviderData, ProviderAccount, ProviderAccountId, ProviderAccountStore,
+    AccountErrorReason, AccountQuotaSignals, AccountSelectionPolicy, CredentialRevision,
+    CredentialState, OpaqueProviderData, ProviderAccount, ProviderAccountId, ProviderAccountStore,
     QuotaAccessChange, QuotaAccessState, QuotaEvidence, QuotaObservation, QuotaObservationTouch,
     QuotaState, QuotaWriteOutcome,
 };
@@ -978,13 +978,19 @@ impl CodexCredentialQuotaService {
     pub(crate) async fn overload_cooldown_until(
         &self,
         account: &ProviderAccount,
-    ) -> Result<Option<SystemTime>, ProviderStoreError> {
-        Ok(self
-            .cooldowns
+        policy: AccountSelectionPolicy,
+    ) -> Option<SystemTime> {
+        account.effective_overload_cooldown(policy.overload_cooldown())?;
+        // 过载保护是可选调度信号，存储抖动不能中断正常推理。
+        self.cooldowns
             .read_scoped(account.id(), &ProviderCooldownScope::AccountOverload)
-            .await?
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(account_id = %account.id(), error = %error, "OpenAI overload cooldown read failed open");
+                None
+            })
             .filter(|cooldown| cooldown.until() > SystemTime::now())
-            .map(|cooldown| cooldown.until()))
+            .map(|cooldown| cooldown.until())
     }
 
     /// 读取账号当前是否处于临时限流（429）冷却，及到期时间。
