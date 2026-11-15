@@ -94,38 +94,50 @@ impl fmt::Debug for CyberSessionRequest {
 }
 
 impl CyberSessionRequest {
-    /// 按 Responses 原生语义优先级提取显式会话；没有显式身份时才生成完整历史累计摘要。
+    /// 优先隔离当前线程；共享 session 只为完整历史摘要分域，不能单独封禁整个会话。
     #[must_use]
     pub fn from_responses<'a>(
         body: &Map<String, Value>,
         turn_metadata_header: Option<&str>,
         semantic_headers: impl IntoIterator<Item = &'a str>,
+        thread_id_header: Option<&str>,
     ) -> Self {
-        let explicit = body
-            .get("client_metadata")
-            .and_then(Value::as_object)
-            .and_then(|metadata| {
-                valid_session_value(metadata.get("session_id")).or_else(|| {
-                    turn_metadata_session(
-                        metadata
-                            .get("x-codex-turn-metadata")
-                            .or_else(|| metadata.get("X-Codex-Turn-Metadata")),
-                    )
-                })
+        let metadata = body.get("client_metadata").and_then(Value::as_object);
+        let turn_metadata = metadata.and_then(|metadata| {
+            metadata
+                .get("x-codex-turn-metadata")
+                .or_else(|| metadata.get("X-Codex-Turn-Metadata"))
+        });
+        // Codex 的 session_id 可被父子线程共享；turn metadata 是当前 turn 的权威身份。
+        let thread_id = turn_metadata_identity(turn_metadata, "thread_id")
+            .or_else(|| {
+                metadata.and_then(|metadata| valid_session_value(metadata.get("thread_id")))
             })
-            .or_else(|| turn_metadata_header.and_then(parse_turn_metadata_session))
-            .or_else(|| semantic_headers.into_iter().find_map(valid_session_id));
-        if let Some(session_id) = explicit {
+            .or_else(|| {
+                turn_metadata_header
+                    .and_then(|encoded| parse_turn_metadata_identity(encoded, "thread_id"))
+            })
+            .or_else(|| thread_id_header.and_then(valid_session_id));
+        if let Some(thread_id) = thread_id {
             let mut hasher = Sha256::new();
-            hash_field(&mut hasher, b"codex-proxy-rs.cyber-session.explicit.v1");
-            hash_field(&mut hasher, session_id.as_bytes());
+            // 线程键与旧 session marker 分域，避免升级后继承已误伤整段对话的条目。
+            hash_field(&mut hasher, b"codex-proxy-rs.cyber-session.thread.v1");
+            hash_field(&mut hasher, thread_id.as_bytes());
             return Self {
                 mode: CyberSessionMode::Explicit(hasher.finalize().into()),
             };
         }
+        let session_id = metadata
+            .and_then(|metadata| valid_session_value(metadata.get("session_id")))
+            .or_else(|| turn_metadata_identity(turn_metadata, "session_id"))
+            .or_else(|| {
+                turn_metadata_header
+                    .and_then(|encoded| parse_turn_metadata_identity(encoded, "session_id"))
+            })
+            .or_else(|| semantic_headers.into_iter().find_map(valid_session_id));
 
         Self {
-            mode: transcript_digests(body)
+            mode: transcript_digests(body, session_id.as_deref())
                 .map(CyberSessionMode::Transcript)
                 .unwrap_or(CyberSessionMode::None),
         }
@@ -163,19 +175,18 @@ fn valid_session_value(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).and_then(valid_session_id)
 }
 
-fn turn_metadata_session(value: Option<&Value>) -> Option<String> {
+fn turn_metadata_identity(value: Option<&Value>, field: &str) -> Option<String> {
     match value? {
-        Value::Object(metadata) => valid_session_value(metadata.get("session_id")),
-        Value::String(encoded) => parse_turn_metadata_session(encoded),
+        Value::Object(metadata) => valid_session_value(metadata.get(field)),
+        Value::String(encoded) => parse_turn_metadata_identity(encoded, field),
         _ => None,
     }
 }
 
-fn parse_turn_metadata_session(encoded: &str) -> Option<String> {
+fn parse_turn_metadata_identity(encoded: &str, field: &str) -> Option<String> {
     serde_json::from_str::<Value>(encoded)
         .ok()
-        .and_then(|value| value.as_object().cloned())
-        .and_then(|metadata| valid_session_value(metadata.get("session_id")))
+        .and_then(|value| valid_session_value(value.as_object()?.get(field)))
 }
 
 fn valid_session_id(value: &str) -> Option<String> {
@@ -188,7 +199,10 @@ fn valid_session_id(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
-fn transcript_digests(body: &Map<String, Value>) -> Option<Vec<[u8; 32]>> {
+fn transcript_digests(
+    body: &Map<String, Value>,
+    session_id: Option<&str>,
+) -> Option<Vec<[u8; 32]>> {
     let history: Vec<&Value> = if let Some(messages) = body.get("messages") {
         messages.as_array()?.iter().collect()
     } else {
@@ -205,7 +219,13 @@ fn transcript_digests(body: &Map<String, Value>) -> Option<Vec<[u8; 32]>> {
 
     let mut hasher = Sha256::new();
     hash_field(&mut hasher, b"codex-proxy-rs.cyber-session.transcript.v1");
-    for field in ["instructions", "system"] {
+    if let Some(session_id) = session_id {
+        // 同 session 的分支仍必须匹配精确历史；不同 session 不因相同开场白互相屏蔽。
+        hash_field(&mut hasher, b"session_id");
+        hash_field(&mut hasher, session_id.as_bytes());
+    }
+    // 增量续接的 input 不是完整历史；前序响应分域防止相同短输入误并其他分支。
+    for field in ["instructions", "system", "previous_response_id"] {
         if let Some(value) = body.get(field).and_then(Value::as_str)
             && !value.is_empty()
         {

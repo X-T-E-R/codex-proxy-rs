@@ -212,8 +212,29 @@ xAI 是 Grok wire 与 Responses wire 之间的协议转换层，转换只在 xAI
 ### Cyber 会话自动屏蔽
 
 启用 cyber 会话自动屏蔽后，Responses 请求按 `Client Key + 语义会话`查询 Redis 屏蔽状态。
-会话匹配优先使用请求中经校验的显式会话 ID；缺失时才使用完整历史的精确前缀/续接。会话键不包含
-账号、模型或通道，也不保存请求正文。
+会话键不包含账号、模型或通道，也不保存请求正文。
+
+会话身份先按下列顺序取客户端线程 ID，任一候选通过校验即停止，不再看会话 ID：
+
+| 顺序 | 线程 ID 来源 |
+| ---: | --- |
+| 1 | 请求正文 `client_metadata` 中 `x-codex-turn-metadata`（接受 `X-Codex-Turn-Metadata` 别名）对象的 `thread_id`；该容器为 JSON object 或内容是 JSON object 的字符串都有效 |
+| 2 | 请求正文平铺字段 `client_metadata.thread_id` |
+| 3 | `x-codex-turn-metadata` 请求头 JSON 中的 `thread_id` |
+| 4 | `thread-id` 请求头 |
+
+前两项来自请求正文，Responses WebSocket 逐 `response.create` 帧解码，因此每帧声明的当前 turn 字段优先于
+连接握手时携带的请求头。`parent_thread_id`、`x-codex-window-id`、`turn_id`、`role` 与
+`x-openai-subagent` 标识都不是当前线程身份，共享同一 session ID 的线程互不牵连。
+线程 ID 去除首尾空白后必须非空、长度不超过 255 个 Unicode 字符，且不含 ASCII 控制字符（小于 `0x20`）
+或 `0x7F`（DEL）；不满足的候选视为缺失，继续取下一个。
+
+没有有效线程 ID 时，使用完整历史的精确前缀/续接；共享 session ID 只为历史摘要分域，不作为独立屏蔽键。
+用于分域的 session ID 依次取自请求正文 `client_metadata.session_id`、同一 turn metadata 容器的
+`session_id`、`x-codex-turn-metadata` 请求头中的 `session_id`，再按 `session-id`、`session_id`、
+`conversation_id`、`x-session-id`、`x-opencode-session`、`x-conversation-id`、`x-claude-code-session-id`
+取第一个有效值。同一 session 下不同历史分支互不牵连；增量续接同时纳入 `previous_response_id` 分域，
+避免不同前序响应的相同短输入被合并。仅有 session ID 而没有历史时不生成屏蔽键。
 
 Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为空时，才回退读取 `response.error.code`。
 顶层值非空时不读取嵌套值；比较前去除首尾空白并按大小写不敏感匹配，规范化后精确等于
@@ -224,6 +245,9 @@ Provider 先读取顶层 `error.code`；该值缺失或去除首尾空白后为�
 
 屏蔽条目只存在于 Redis 的可过期 session marker 中：首次写入确定 TTL，后续写入或本地重试都不会
 续期；设置编辑也不改变已存条目的剩余 TTL。关闭开关时忽略现有条目，新请求使用新发布的运行策略。
+
+线程键及 session 分域历史键都不会命中此前仅按 session ID 写入的旧条目；旧条目按自身 TTL 自然到期，
+无需清理或迁移。
 
 ## 4. 管理员认证
 

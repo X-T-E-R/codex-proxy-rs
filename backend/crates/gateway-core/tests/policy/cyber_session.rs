@@ -5,7 +5,7 @@ fn request(body: Value, turn_metadata: Option<&str>, headers: &[&str]) -> CyberS
     let Value::Object(body) = body else {
         panic!("fixture must be an object");
     };
-    CyberSessionRequest::from_responses(&body, turn_metadata, headers.iter().copied())
+    CyberSessionRequest::from_responses(&body, turn_metadata, headers.iter().copied(), None)
 }
 
 fn key(value: &str) -> ClientApiKeyId {
@@ -15,17 +15,17 @@ fn key(value: &str) -> ClientApiKeyId {
 #[test]
 fn explicit_identity_is_key_scoped_and_ignores_history() {
     let first = request(
-        json!({"client_metadata":{"session_id":" session-a "},"input":[{"role":"user","content":"first"}]}),
+        json!({"client_metadata":{"thread_id":" thread-a "},"input":[{"role":"user","content":"first"}]}),
         None,
         &[],
     );
     let same_session = request(
-        json!({"client_metadata":{"session_id":"session-a"},"input":[{"role":"user","content":"changed"}]}),
+        json!({"client_metadata":{"thread_id":"thread-a"},"input":[{"role":"user","content":"changed"}]}),
         None,
         &[],
     );
     let other_session = request(
-        json!({"client_metadata":{"session_id":"session-b"},"input":[{"role":"user","content":"first"}]}),
+        json!({"client_metadata":{"thread_id":"thread-b"},"input":[{"role":"user","content":"first"}]}),
         None,
         &[],
     );
@@ -57,13 +57,170 @@ fn body_turn_metadata_precedes_header_aliases() {
         &["generic-header"],
     );
     let expected = request(
-        json!({"client_metadata":{"session_id":"body-session"},"input":"different"}),
+        json!({"client_metadata":{"session_id":"body-session"},"input":"hello"}),
         None,
         &[],
     );
     assert_eq!(
         nested.lookup_keys(&key("key"))[0].expose_to_store(),
         expected.lookup_keys(&key("key"))[0].expose_to_store()
+    );
+}
+
+#[test]
+fn shared_session_does_not_merge_parent_and_sibling_threads() {
+    let identity = |thread: &str, input: &str| {
+        request(
+            json!({"client_metadata":{"session_id":"shared-session","thread_id":thread},"input":input}),
+            None,
+            &[],
+        )
+    };
+    let refused = identity("child-a", "refused turn")
+        .refusal_key(&key("key"))
+        .expect("refusal key");
+    assert!(
+        identity("child-a", "retry")
+            .lookup_keys(&key("key"))
+            .contains(&refused)
+    );
+    for thread in ["parent", "child-b"] {
+        assert!(
+            !identity(thread, "continue")
+                .lookup_keys(&key("key"))
+                .contains(&refused)
+        );
+    }
+    let legacy = request(
+        json!({"client_metadata":{"session_id":"shared-session"},"input":"old turn"}),
+        None,
+        &[],
+    )
+    .refusal_key(&key("key"))
+    .expect("legacy marker");
+    assert!(
+        !identity("shared-session", "continue")
+            .lookup_keys(&key("key"))
+            .contains(&legacy)
+    );
+}
+
+#[test]
+fn canonical_turn_thread_precedes_flat_metadata_and_shared_session() {
+    for metadata in [
+        json!({"thread_id":"child-a","session_id":"shared-session"}),
+        json!("{\"thread_id\":\"child-a\",\"session_id\":\"shared-session\"}"),
+    ] {
+        let observed = request(
+            json!({"client_metadata":{
+                "session_id":"shared-session",
+                "thread_id":"stale-flat-thread",
+                "x-codex-turn-metadata":metadata
+            },"input":"turn"}),
+            Some("{\"thread_id\":\"connection-thread\",\"session_id\":\"shared-session\"}"),
+            &["shared-session"],
+        );
+        let expected = request(
+            json!({"client_metadata":{"thread_id":"child-a"},"input":"other turn"}),
+            None,
+            &[],
+        );
+        assert_eq!(
+            observed.lookup_keys(&key("key")),
+            expected.lookup_keys(&key("key"))
+        );
+    }
+}
+
+#[test]
+fn turn_header_thread_precedes_body_session_and_ignores_parent_lineage() {
+    let observed = request(
+        json!({"client_metadata":{"session_id":"shared-session","x-codex-parent-thread-id":"parent"},"input":"turn"}),
+        Some(
+            "{\"thread_id\":\"child-a\",\"session_id\":\"shared-session\",\"parent_thread_id\":\"parent\"}",
+        ),
+        &["shared-session"],
+    );
+    let expected = request(
+        json!({"client_metadata":{"thread_id":"child-a"},"input":"other turn"}),
+        None,
+        &[],
+    );
+    assert_eq!(
+        observed.lookup_keys(&key("key")),
+        expected.lookup_keys(&key("key"))
+    );
+}
+
+#[test]
+fn shared_session_without_thread_matches_only_the_refused_transcript_branch() {
+    let identity = |session: &str, input: Value| {
+        request(
+            json!({"client_metadata":{"session_id":session},"input":input}),
+            None,
+            &[],
+        )
+    };
+    let refused = identity("shared", json!(["common prefix", "child-a refused"]))
+        .refusal_key(&key("key"))
+        .expect("refusal key");
+    assert!(
+        identity(
+            "shared",
+            json!(["common prefix", "child-a refused", "retry"])
+        )
+        .lookup_keys(&key("key"))
+        .contains(&refused)
+    );
+    for (session, input) in [
+        ("shared", json!(["common prefix", "parent continues"])),
+        ("shared", json!(["common prefix", "child-b continues"])),
+        ("other", json!(["common prefix", "child-a refused"])),
+    ] {
+        assert!(
+            !identity(session, input)
+                .lookup_keys(&key("key"))
+                .contains(&refused)
+        );
+    }
+    for (body, header, aliases) in [
+        (
+            json!({"client_metadata":{"session_id":"shared"}}),
+            None,
+            vec![],
+        ),
+        (json!({}), Some("{\"session_id\":\"shared\"}"), vec![]),
+        (json!({}), None, vec!["shared"]),
+    ] {
+        assert!(
+            request(body, header, &aliases)
+                .refusal_key(&key("key"))
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn shared_session_incremental_input_is_scoped_to_previous_response() {
+    let identity = |previous: &str| {
+        request(
+            json!({"client_metadata":{"session_id":"shared"},"previous_response_id":previous,"input":"continue"}),
+            None,
+            &[],
+        )
+    };
+    let refused = identity("resp-a")
+        .refusal_key(&key("key"))
+        .expect("refusal");
+    assert!(
+        identity("resp-a")
+            .lookup_keys(&key("key"))
+            .contains(&refused)
+    );
+    assert!(
+        !identity("resp-b")
+            .lookup_keys(&key("key"))
+            .contains(&refused)
     );
 }
 
@@ -116,7 +273,7 @@ fn transcript_lookup_keeps_only_the_newest_256_prefixes() {
         .collect::<Vec<_>>();
     let mut body = Map::new();
     body.insert("input".to_owned(), Value::Array(items));
-    let request = CyberSessionRequest::from_responses(&body, None, std::iter::empty());
+    let request = CyberSessionRequest::from_responses(&body, None, std::iter::empty(), None);
 
     assert_eq!(
         request.lookup_keys(&key("key")).len(),
@@ -144,15 +301,58 @@ fn invalid_explicit_candidates_fall_back_to_transcript_without_using_affinity_fi
 }
 
 #[test]
+fn invalid_thread_candidates_use_session_scoped_transcript() {
+    let expected = request(
+        json!({"client_metadata":{"session_id":"session-a"},"input":"turn"}),
+        None,
+        &[],
+    );
+    for invalid in [
+        Value::Null,
+        json!(12),
+        json!(" "),
+        json!("bad\nthread"),
+        json!("好".repeat(256)),
+    ] {
+        let observed = request(
+            json!({"client_metadata":{
+                "session_id":"session-a", "thread_id":invalid,
+                "x-codex-turn-metadata":{"thread_id":invalid}
+            },"input":"turn"}),
+            Some("{\"thread_id\":12}"),
+            &[],
+        );
+        assert_eq!(
+            observed.lookup_keys(&key("key")),
+            expected.lookup_keys(&key("key"))
+        );
+    }
+    let accepted = request(
+        json!({"client_metadata":{"thread_id":"好".repeat(255)},"input":"turn"}),
+        None,
+        &[],
+    );
+    let same = request(
+        json!({"client_metadata":{"thread_id":"好".repeat(255)},"input":"other turn"}),
+        None,
+        &[],
+    );
+    assert_eq!(
+        accepted.lookup_keys(&key("key")),
+        same.lookup_keys(&key("key"))
+    );
+}
+
+#[test]
 fn explicit_identity_bounds_unicode_characters_without_byte_truncation() {
     let accepted = "好".repeat(255);
     let accepted_request = request(
-        json!({"client_metadata":{"session_id":accepted},"input":"first"}),
+        json!({"client_metadata":{"thread_id":accepted},"input":"first"}),
         None,
         &[],
     );
     let same_session = request(
-        json!({"client_metadata":{"session_id":"好".repeat(255)},"input":"changed"}),
+        json!({"client_metadata":{"thread_id":"好".repeat(255)},"input":"changed"}),
         None,
         &[],
     );
@@ -162,7 +362,7 @@ fn explicit_identity_bounds_unicode_characters_without_byte_truncation() {
     );
 
     let overlong = request(
-        json!({"client_metadata":{"session_id":"好".repeat(256)},"input":"fallback"}),
+        json!({"client_metadata":{"thread_id":"好".repeat(256)},"input":"fallback"}),
         None,
         &[],
     );

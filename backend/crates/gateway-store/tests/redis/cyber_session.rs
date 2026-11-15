@@ -71,11 +71,11 @@ async fn cyber_session_lookup_is_key_and_session_isolated() {
 }
 
 fn explicit_key(client_key: &str, session: &str) -> gateway_core::policy::CyberSessionKey {
-    let Value::Object(body) = json!({"client_metadata":{"session_id":session},"input":"hello"})
+    let Value::Object(body) = json!({"client_metadata":{"thread_id":session},"input":"hello"})
     else {
         unreachable!()
     };
-    CyberSessionRequest::from_responses(&body, None, std::iter::empty())
+    CyberSessionRequest::from_responses(&body, None, std::iter::empty(), None)
         .refusal_key(&ClientApiKeyId::new(client_key).expect("client key"))
         .expect("explicit key")
 }
