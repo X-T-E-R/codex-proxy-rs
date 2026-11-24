@@ -25,7 +25,7 @@ export function applicableOptionalFeatures(provider?: string, authenticationKind
   return ACCOUNT_OPTIONAL_FEATURES.filter((feature) => {
     if (!provider)
       return true
-    if (!feature.providers.some(item => item === provider))
+    if (!(feature.providers as readonly string[]).includes(provider))
       return false
     if (feature.oauthOnly && authenticationKind && authenticationKind !== 'oauth')
       return false

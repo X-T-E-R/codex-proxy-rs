@@ -3946,18 +3946,16 @@ async fn early_revoked_postgres_state_and_refresh_candidates_enforce_recovery_in
     // 提前 401 账号在 Admin 列表汇总与 status=error 筛选中也归入 error
     let admin_page = admin
         .list_accounts(
-            &AccountListQuery {
-                provider_kind: None,
-                search: None,
-                status: Some(AccountStatus::Error),
-                group_id: None,
-                ungrouped_only: false,
+            AccountListQuery {
                 page: 1,
                 page_size: PageSize::new(10).expect("page size"),
+                provider_kind: None,
+                group_filter: None,
+                search: None,
+                status: Some(AccountStatus::Error),
                 sort: None,
             },
-            &BTreeMap::new(),
-            SystemTime::from(now),
+            Default::default(),
         )
         .await
         .expect("admin list");

@@ -326,12 +326,20 @@ impl ProviderAccountStore for MemoryAccountStore {
             let early_revoked = loaded.account.credential_state() == CredentialState::Ready
                 && loaded.account.last_error_reason()
                     == Some(gateway_core::account::AccountErrorReason::AccessTokenExpired);
-            (
-                u8::from(!early_revoked),
+            let sort_time = if early_revoked {
+                loaded
+                    .account
+                    .credential_observed_at()
+                    .or_else(|| loaded.account.access_token_expires_at())
+            } else {
                 loaded
                     .account
                     .access_token_expires_at()
-                    .or_else(|| loaded.account.credential_observed_at()),
+                    .or_else(|| loaded.account.credential_observed_at())
+            };
+            (
+                u8::from(!early_revoked),
+                sort_time,
                 loaded.account.id().clone(),
             )
         });

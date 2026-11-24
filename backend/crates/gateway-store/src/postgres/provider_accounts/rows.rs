@@ -390,7 +390,11 @@ pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select coalesce(proxy_enable
          when credential_state = 'ready' and last_error_reason = 'access_token_expired' then 0
          else 1
        end,
-       coalesce(access_token_expires_at, credential_observed_at, created_at),
+       case
+         when credential_state = 'ready' and last_error_reason = 'access_token_expired'
+           then coalesce(credential_observed_at, access_token_expires_at, created_at)
+         else coalesce(access_token_expires_at, credential_observed_at, created_at)
+       end,
        id
      limit $6";
 
@@ -446,7 +450,7 @@ pub(crate) fn core_account_from_summary(
         summary.last_error_reason,
         summary.last_error_message,
     )
-    .with_credential_observed_at(summary.credential_observed_at.map(Into::into))
+    .with_credential_observed_at(Some(summary.credential_observed_at.into()))
     .with_scheduling(summary.concurrency_limit, summary.weight)
     .with_model_access(summary.model_access)
     .with_feature_opt_outs(summary.feature_opt_outs)
