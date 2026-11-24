@@ -897,6 +897,7 @@ pub(crate) async fn rotate_provider_account_in_transaction(
     Revision::new(to_u64(next)?)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_provider_accounts_scheduling_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     account_ids: &[String],
