@@ -442,6 +442,7 @@ async fn upstream_adapter_reloads_rotated_credentials_and_proxy_without_acceptin
         let after = store.account(account_id).unwrap();
         assert_eq!(after.revision(), revision);
         assert_eq!(after.credential_state(), CredentialState::Ready);
+        assert_eq!(after.last_error_reason(), None);
     }
     current
         .record_failure(gateway_core::error::ProviderError::new(
@@ -449,9 +450,11 @@ async fn upstream_adapter_reloads_rotated_credentials_and_proxy_without_acceptin
             UpstreamSendState::Sent,
         ))
         .await;
+    let after_current_401 = store.account(account_id).unwrap();
+    assert_eq!(after_current_401.credential_state(), CredentialState::Ready);
     assert_eq!(
-        store.account(account_id).unwrap().credential_state(),
-        CredentialState::Expired
+        after_current_401.last_error_reason(),
+        Some(gateway_core::account::AccountErrorReason::AccessTokenExpired)
     );
     assert!(upstream.received_requests().await.unwrap().is_empty());
 }
