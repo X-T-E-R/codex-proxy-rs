@@ -80,6 +80,7 @@ impl AccountFeatureOptOuts {
     }
 
     /// 管理端提交的完整关闭列表；未知或重复标记拒绝
+    #[allow(clippy::result_unit_err)]
     pub fn from_wire_tokens(tokens: &[String]) -> Result<Self, ()> {
         let mut disabled = BTreeSet::new();
         for token in tokens {
@@ -103,7 +104,6 @@ impl AccountFeatureOptOuts {
         self.disabled.contains(&feature)
     }
 
-    #[must_use]
     pub fn iter(&self) -> impl Iterator<Item = AccountOptionalFeature> + '_ {
         self.disabled.iter().copied()
     }

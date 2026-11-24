@@ -129,7 +129,6 @@ impl RuntimeAccountDirectory {
         self.accounts.get(account_id)
     }
 
-    #[must_use]
     pub fn iter(&self) -> impl Iterator<Item = (&ProviderAccountId, &RuntimeAccount)> {
         self.accounts.iter()
     }
