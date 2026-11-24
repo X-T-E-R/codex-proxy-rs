@@ -32,7 +32,9 @@ use url::Url;
 use super::affinity::CodexSessionAffinity;
 use super::cookie::CodexCookiePolicy;
 use super::quota::CodexCredentialQuotaService;
-use super::refresh::refresh_recovery_deadline;
+use super::refresh::{
+    can_retain_for_oauth_refresh_recovery, refresh_recovery_deadline_for_account,
+};
 use super::repository::{CodexCredentialRepository, CredentialRepositoryError};
 use super::security::CodexRuntimeAuthentication;
 use super::types::{
@@ -1128,19 +1130,21 @@ impl CodexCredentialSelector {
             CodexAccountFailure::CredentialExpired => {
                 if account.authentication_kind() == CODEX_AUTHENTICATION_KIND_OAUTH
                     && account.has_refresh_token()
-                    && account
-                        .access_token_expires_at()
-                        .is_some_and(|expires_at| expires_at <= now)
-                    && refresh_recovery_deadline(account.access_token_expires_at())
-                        .is_some_and(|deadline| deadline > now)
+                    && matches!(
+                        account.credential_state(),
+                        CredentialState::Ready | CredentialState::Unknown
+                    )
+                    && can_retain_for_oauth_refresh_recovery(account, now)
                 {
                     tracing::info!(
                         account_id = %account.id(),
                         access_token_expires_at = ?account.access_token_expires_at()
                             .map(chrono::DateTime::<chrono::Utc>::from),
-                        recovery_deadline = ?refresh_recovery_deadline(account.access_token_expires_at())
+                        credential_observed_at = ?account.credential_observed_at()
                             .map(chrono::DateTime::<chrono::Utc>::from),
-                        "OpenAI access token expired; retaining account for bounded OAuth refresh recovery"
+                        recovery_deadline = ?refresh_recovery_deadline_for_account(account)
+                            .map(chrono::DateTime::<chrono::Utc>::from),
+                        "OpenAI access token rejected; retaining account for bounded OAuth refresh recovery"
                     );
                     return self
                         .apply_credential_state(

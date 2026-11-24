@@ -54,6 +54,7 @@ pub(crate) async fn load_admin_account_page(
                   case
                     when not a.enabled then 'disabled'
                     when a.credential_state <> 'ready'
+                      or a.last_error_reason = 'access_token_expired'
                       or a.access_token_expires_at <= $2 then 'error'
                     when a.quota_access_state = 'exhausted' then 'quota_exhausted'
                     when a.id = any($1::text[]) then 'rate_limited'

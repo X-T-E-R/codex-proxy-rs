@@ -297,12 +297,35 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
         let result = sqlx::query(
             "update provider_accounts
              set credential_state = $3,
-                 credential_observed_at = $4,
+                 credential_observed_at = case
+                   when $3 = 'ready'
+                     and $5 is not distinct from 'access_token_expired'
+                     and credential_state = 'ready'
+                     and last_error_reason is not distinct from 'access_token_expired'
+                     and credential_observed_at is not null
+                   then credential_observed_at
+                   else $4
+                 end,
+                 next_refresh_at = case
+                   when $3 = 'ready'
+                     and $5 is not distinct from 'access_token_expired'
+                     and not (
+                       credential_state = 'ready'
+                       and last_error_reason is not distinct from 'access_token_expired'
+                     )
+                   then null
+                   else next_refresh_at
+                 end,
                  last_error_reason = $5,
                  last_error_message = $6,
                  updated_at = greatest(now(), updated_at, $4)
              where id = $1 and credential_revision = $2
-               and (credential_observed_at is null or credential_observed_at <= $4)",
+               and (credential_observed_at is null or credential_observed_at <= $4)
+               and not (
+                 $3 = 'ready'
+                 and $5 is not distinct from 'access_token_expired'
+                 and credential_state in ('expired', 'banned', 'invalid')
+               )",
         )
         .bind(update.account_id)
         .bind(to_i64(update.expected_revision.get())?)

@@ -88,6 +88,74 @@ impl CodexCredentialRepository {
         cas_revision(self.store.compare_and_swap_credential(update).await?)
     }
 
+    /// 提前 401 恢复期间上游返回了新的 RT/ID token 但未轮换新 AT 时，
+    /// 保留已轮换令牌并维持恢复阻塞态与原始观测起点，或直接落终态
+    pub async fn persist_partial_refresh_rotation(
+        &self,
+        account: &ProviderAccount,
+        secret: CodexOAuthSecret,
+        access_token_expires_at: Option<SystemTime>,
+        next_refresh_at: Option<SystemTime>,
+        terminal_state: Option<(CredentialState, AccountErrorReason, Option<String>)>,
+    ) -> Result<CredentialRevision, CredentialRepositoryError> {
+        let current = self
+            .store
+            .load_credential(account.id(), account.revision())
+            .await?;
+        let mut data = CodexCredentialCodec::decode_complete(&current.credential)?;
+        let oauth = data
+            .oauth_mut()
+            .ok_or(CredentialRepositoryError::InvalidCredentialData(None))?;
+        oauth.access_token = secret.access_token.expose_secret().to_owned();
+        oauth.refresh_token = secret
+            .refresh_token
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned());
+        oauth.id_token = secret
+            .id_token
+            .as_ref()
+            .map(|value| value.expose_secret().to_owned());
+        let credential = CodexCredentialCodec::encode_complete(data)?;
+        let mut update = CredentialCasUpdate::new(
+            account.id().clone(),
+            account.revision(),
+            unchanged_profile(account),
+            credential,
+            secret.refresh_token.is_some(),
+            access_token_expires_at,
+            next_refresh_at,
+        )
+        .map_err(|source| {
+            CredentialRepositoryError::InvalidCredentialData(Some(ErrorSource::new(source)))
+        })?
+        .preserving_profile();
+        if let Some((credential_state, error_reason, message)) = terminal_state {
+            update = update.with_account_state(
+                oauth_account_state(account, credential_state),
+                SystemTime::now(),
+                Some(error_reason),
+                message,
+            );
+        }
+        cas_revision(self.store.compare_and_swap_credential(update).await?)
+    }
+
+    /// 校验账号仍处于期望凭据版本且凭据可解码；允许同版本上的状态/额度事实并发推进
+    pub async fn verify_credential_revision(
+        &self,
+        account: &ProviderAccount,
+    ) -> Result<(), CredentialRepositoryError> {
+        if account.provider().as_str() != PROVIDER_NAME {
+            return Err(CredentialRepositoryError::InvalidCredentialData(None));
+        }
+        let loaded = self
+            .store
+            .load_credential(account.id(), account.revision())
+            .await?;
+        self.decode_runtime_credential(&loaded)?;
+        Ok(())
+    }
+
     /// 以相同 credential 原子推进刷新退避及本次上游错误事实
     pub async fn defer_refresh(
         &self,
@@ -117,9 +185,19 @@ impl CodexCredentialRepository {
         })?
         .preserving_profile();
         if let Some(error_reason) = error_reason {
+            let observed_at = if account.credential_state() == CredentialState::Ready
+                && account.last_error_reason() == Some(AccountErrorReason::AccessTokenExpired)
+                && error_reason == AccountErrorReason::AccessTokenExpired
+            {
+                account
+                    .credential_observed_at()
+                    .unwrap_or_else(SystemTime::now)
+            } else {
+                SystemTime::now()
+            };
             update = update.with_account_state(
                 account.credential_state(),
-                SystemTime::now(),
+                observed_at,
                 Some(error_reason),
                 message,
             );
@@ -269,7 +347,9 @@ impl CodexCredentialRepository {
         let credential_state = oauth_account_state(account, credential_state);
         let message = message.filter(|value| !value.trim().is_empty());
         let error_reason = if credential_state == CredentialState::Ready {
-            message.as_ref().and(error_reason)
+            error_reason.filter(|reason| {
+                *reason == AccountErrorReason::AccessTokenExpired || message.is_some()
+            })
         } else {
             error_reason.or_else(|| credential_state.error_reason())
         };

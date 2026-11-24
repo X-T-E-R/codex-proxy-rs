@@ -17,11 +17,12 @@ use serde_json::{Map, Value};
 
 use gateway_core::account::{
     AccountAttemptFeedback, AccountCandidate, AccountConcurrencyLimit, AccountEligibilityPolicy,
-    AccountFeedbackStats, AccountQuotaSignals, AccountRuntimeSignals, AccountSchedulingBlocker,
-    AccountSelectionContext, AccountSelectionPolicy, AccountSelector, AccountStatus, AccountWeight,
-    CredentialCasUpdate, CredentialRevision, CredentialState, OpaqueProviderData,
-    PlaintextCredential, PreferredAccountSelection, ProviderAccount, ProviderAccountId,
-    ProviderAccountIdentity, ProviderAccountUpdate, QuotaEvidence, QuotaState, RotationStrategy,
+    AccountErrorReason, AccountFeedbackStats, AccountQuotaSignals, AccountRuntimeSignals,
+    AccountSchedulingBlocker, AccountSelectionContext, AccountSelectionPolicy, AccountSelector,
+    AccountStatus, AccountWeight, CredentialCasUpdate, CredentialRevision, CredentialState,
+    OpaqueProviderData, PlaintextCredential, PreferredAccountSelection, ProviderAccount,
+    ProviderAccountId, ProviderAccountIdentity, ProviderAccountUpdate, ProviderRefreshQuery,
+    QuotaEvidence, QuotaState, RotationStrategy,
 };
 use gateway_core::routing::{
     ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
@@ -1139,4 +1140,182 @@ fn reserved_capacity_stays_bounded_when_normal_concurrency_is_unlimited() {
         .capacity_snapshot(&candidates, &reserved)
         .unwrap();
     assert_eq!((capacity.used_slots(), capacity.total_slots()), (3, 3));
+}
+
+#[test]
+fn ready_account_with_access_token_expired_reason_projects_error_and_is_excluded_from_selection() {
+    let now = SystemTime::now();
+    let mut early_revoked_future_exp = candidate("acct_early_future", 0, Some(100));
+    early_revoked_future_exp.account = ProviderAccount::new(
+        ProviderAccountId::new("acct_early_future").expect("id"),
+        ProviderKind::new("openai").expect("provider"),
+        "acct_early_future".to_owned(),
+        Some("user-early-future".to_owned()),
+        "oauth".to_owned(),
+        CredentialRevision::new(1).expect("rev"),
+        Some(now + Duration::from_secs(9 * 24 * 3600)),
+    )
+    .with_account_facts(
+        true,
+        CredentialState::Ready,
+        QuotaState::unknown(),
+        Some(AccountErrorReason::AccessTokenExpired),
+        Some("token_revoked".to_owned()),
+    );
+    let mut early_revoked_no_exp = candidate("acct_early_none", 0, Some(100));
+    early_revoked_no_exp.account = ProviderAccount::new(
+        ProviderAccountId::new("acct_early_none").expect("id"),
+        ProviderKind::new("openai").expect("provider"),
+        "acct_early_none".to_owned(),
+        Some("user-early-none".to_owned()),
+        "oauth".to_owned(),
+        CredentialRevision::new(1).expect("rev"),
+        None,
+    )
+    .with_account_facts(
+        true,
+        CredentialState::Ready,
+        QuotaState::unknown(),
+        Some(AccountErrorReason::AccessTokenExpired),
+        None,
+    );
+    for blocked in [&early_revoked_future_exp, &early_revoked_no_exp] {
+        let projection = blocked.account.status_projection(now, None);
+        assert_eq!(projection.status, AccountStatus::Error);
+        assert_eq!(
+            projection.error_reason,
+            Some(AccountErrorReason::AccessTokenExpired)
+        );
+    }
+    let healthy = candidate("acct_healthy", 0, Some(100));
+    let candidates = [early_revoked_future_exp, early_revoked_no_exp, healthy];
+    let selected = AccountSelector
+        .select(&candidates, &context(RotationStrategy::Smart))
+        .expect("healthy account must be selected");
+    assert_eq!(selected.candidate().account.id().as_str(), "acct_healthy");
+}
+
+#[test]
+fn refresh_query_includes_early_revoked_accounts_and_respects_backoff_and_two_hour_force_window() {
+    let now = SystemTime::now();
+    let provider = ProviderKind::new("openai").expect("provider");
+    let query = ProviderRefreshQuery::new(
+        provider.clone(),
+        now + Duration::from_secs(5 * 60),
+        now - Duration::from_secs(2 * 60 * 60),
+        now,
+        Vec::new(),
+        NonZeroU32::new(10).expect("limit"),
+    );
+
+    let make = |id: &str,
+                expires_at: Option<SystemTime>,
+                state: CredentialState,
+                reason: Option<AccountErrorReason>,
+                observed_at: Option<SystemTime>,
+                next_refresh_at: Option<SystemTime>| {
+        ProviderAccount::new(
+            ProviderAccountId::new(id).expect("id"),
+            provider.clone(),
+            id.to_owned(),
+            Some(format!("user-{id}")),
+            "oauth".to_owned(),
+            CredentialRevision::new(1).expect("rev"),
+            expires_at,
+        )
+        .with_account_facts(true, state, QuotaState::unknown(), reason, None)
+        .with_credential_observed_at(observed_at)
+        .with_refresh_schedule(true, next_refresh_at)
+    };
+
+    let early_future = make(
+        "acct_early_future",
+        Some(now + Duration::from_secs(9 * 24 * 3600)),
+        CredentialState::Ready,
+        Some(AccountErrorReason::AccessTokenExpired),
+        Some(now - Duration::from_secs(60)),
+        None,
+    );
+    let early_no_exp = make(
+        "acct_early_no_exp",
+        None,
+        CredentialState::Ready,
+        Some(AccountErrorReason::AccessTokenExpired),
+        Some(now - Duration::from_secs(60)),
+        None,
+    );
+    let early_backed_off = make(
+        "acct_early_backoff",
+        Some(now + Duration::from_secs(9 * 24 * 3600)),
+        CredentialState::Ready,
+        Some(AccountErrorReason::AccessTokenExpired),
+        Some(now - Duration::from_secs(60)),
+        Some(now + Duration::from_secs(60)),
+    );
+    let early_force_after_2h = make(
+        "acct_early_force",
+        Some(now + Duration::from_secs(9 * 24 * 3600)),
+        CredentialState::Ready,
+        Some(AccountErrorReason::AccessTokenExpired),
+        Some(now - Duration::from_secs(2 * 60 * 60 + 60)),
+        Some(now + Duration::from_secs(60)),
+    );
+    let healthy_future = make(
+        "acct_healthy_future",
+        Some(now + Duration::from_secs(9 * 24 * 3600)),
+        CredentialState::Ready,
+        None,
+        Some(now - Duration::from_secs(60)),
+        None,
+    );
+    let terminal_expired = make(
+        "acct_terminal_expired",
+        Some(now + Duration::from_secs(9 * 24 * 3600)),
+        CredentialState::Expired,
+        Some(AccountErrorReason::AccessTokenExpired),
+        Some(now - Duration::from_secs(60)),
+        None,
+    );
+
+    assert!(query.contains(&early_future));
+    assert!(query.contains(&early_no_exp));
+    assert!(!query.contains(&early_backed_off));
+    assert!(query.contains(&early_force_after_2h));
+    assert!(!query.contains(&healthy_future));
+    assert!(!query.contains(&terminal_expired));
+}
+
+#[test]
+fn credential_cas_preserves_access_token_expired_reason_even_without_message() {
+    let account_id = ProviderAccountId::new("acct_cas_reason").expect("account id");
+    let profile = ProviderAccountUpdate {
+        account_id: account_id.clone(),
+        name: "cas-reason".to_owned(),
+        email: None,
+        plan_type: None,
+    };
+    let update = CredentialCasUpdate::new(
+        account_id,
+        CredentialRevision::new(1).expect("revision"),
+        profile,
+        PlaintextCredential::new(Map::new()),
+        true,
+        Some(SystemTime::now() + Duration::from_secs(3600)),
+        Some(SystemTime::now() + Duration::from_secs(60)),
+    )
+    .expect("valid update")
+    .with_account_state(
+        CredentialState::Ready,
+        SystemTime::now(),
+        Some(AccountErrorReason::AccessTokenExpired),
+        None,
+    );
+    let parts = update.into_parts();
+    let state = parts.account_state.expect("account state write");
+    assert_eq!(state.credential_state, CredentialState::Ready);
+    assert_eq!(
+        state.error_reason,
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(state.message, None);
 }

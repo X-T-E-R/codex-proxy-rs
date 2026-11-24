@@ -587,6 +587,27 @@ async fn credential_error_message_is_persisted_and_cleared_on_recovery() {
 
     repository
         .apply_state_change(AccountStateChange {
+            message: Some("Invalid refresh token.".to_owned()),
+            account_id: account_id.clone(),
+            expected_revision: revision,
+            credential_state: CredentialState::Ready,
+            observed_at: SystemTime::now(),
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+        })
+        .await
+        .expect("persist recoverable refresh failure");
+    let recoverable: (Option<String>, Option<String>) = sqlx::query_as(
+        "select last_error_reason, last_error_message from provider_accounts where id = $1",
+    )
+    .bind(account_id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .expect("read recoverable refresh failure");
+    assert_eq!(recoverable.0.as_deref(), Some("access_token_expired"));
+    assert_eq!(recoverable.1.as_deref(), Some("Invalid refresh token."));
+
+    repository
+        .apply_state_change(AccountStateChange {
             message: Some("upstream returned 402 payment required".to_owned()),
             account_id: account_id.clone(),
             expected_revision: revision,
@@ -606,27 +627,6 @@ async fn credential_error_message_is_persisted_and_cleared_on_recovery() {
         stored.as_deref(),
         Some("upstream returned 402 payment required")
     );
-
-    repository
-        .apply_state_change(AccountStateChange {
-            message: Some("Invalid refresh token.".to_owned()),
-            account_id: account_id.clone(),
-            expected_revision: revision,
-            credential_state: CredentialState::Ready,
-            observed_at: SystemTime::now(),
-            error_reason: Some(AccountErrorReason::AccessTokenExpired),
-        })
-        .await
-        .expect("persist recoverable refresh failure");
-    let recoverable: (Option<String>, Option<String>) = sqlx::query_as(
-        "select last_error_reason, last_error_message from provider_accounts where id = $1",
-    )
-    .bind(account_id.as_str())
-    .fetch_one(&database.pool)
-    .await
-    .expect("read recoverable refresh failure");
-    assert_eq!(recoverable.0.as_deref(), Some("access_token_expired"));
-    assert_eq!(recoverable.1.as_deref(), Some("Invalid refresh token."));
 
     repository
         .apply_state_change(AccountStateChange {
@@ -3862,4 +3862,244 @@ async fn allowed_model_tokens(pool: &sqlx::PgPool, id: &str) -> Vec<String> {
     let mut tokens = tokens.unwrap_or_default();
     tokens.sort();
     tokens
+}
+
+#[tokio::test]
+async fn early_revoked_postgres_state_and_refresh_candidates_enforce_recovery_invariants() {
+    let Some(database) = TestDatabase::create("early_revoked_recovery_invariants").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let admin = admin_account_store(&database.pool);
+    let now = Utc::now();
+
+    let mut early = account("acct_pg_early", "user-pg-early");
+    early.credential_state = CredentialState::Ready;
+    early.credential_observed_at = now - TimeDelta::hours(4);
+    early.has_refresh_token = true;
+    early.access_token_expires_at = Some(now + TimeDelta::days(9));
+    early.next_refresh_at = Some(now + TimeDelta::minutes(30));
+    repository
+        .insert_provider_account(early)
+        .await
+        .expect("insert early account");
+
+    let mut early_no_exp = account("acct_pg_early_no_exp", "user-pg-early-no-exp");
+    early_no_exp.credential_state = CredentialState::Ready;
+    early_no_exp.credential_observed_at = now - TimeDelta::hours(4);
+    early_no_exp.has_refresh_token = true;
+    early_no_exp.access_token_expires_at = None;
+    repository
+        .insert_provider_account(early_no_exp)
+        .await
+        .expect("insert early account without expiry");
+
+    let early_id = ProviderAccountId::new("acct_pg_early").expect("id");
+    let early_no_exp_id = ProviderAccountId::new("acct_pg_early_no_exp").expect("id");
+    let rev1 = CredentialRevision::new(1).expect("rev1");
+    let first_t = SystemTime::from(now - TimeDelta::minutes(10));
+    let second_t = SystemTime::from(now - TimeDelta::minutes(5));
+
+    // 首次提前 401（行内 last_error_reason 为 NULL）：更新 credential_observed_at 且清空旧 next_refresh_at
+    repository
+        .apply_state_change(AccountStateChange {
+            account_id: early_id.clone(),
+            expected_revision: rev1,
+            credential_state: CredentialState::Ready,
+            observed_at: first_t,
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+            message: Some("token_revoked".to_owned()),
+        })
+        .await
+        .expect("first early 401");
+    repository
+        .apply_state_change(AccountStateChange {
+            account_id: early_no_exp_id.clone(),
+            expected_revision: rev1,
+            credential_state: CredentialState::Ready,
+            observed_at: first_t,
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+            message: None,
+        })
+        .await
+        .expect("first early 401 without expiry");
+
+    let loaded_first = repository
+        .get_account(&early_id)
+        .await
+        .expect("load")
+        .expect("account");
+    assert_eq!(loaded_first.next_refresh_at(), None);
+    let stored_first_observed: chrono::DateTime<Utc> =
+        sqlx::query_scalar("select credential_observed_at from provider_accounts where id = $1")
+            .bind(early_id.as_str())
+            .fetch_one(&database.pool)
+            .await
+            .expect("read observed_at");
+    assert!(
+        (stored_first_observed - (now - TimeDelta::minutes(10)))
+            .num_seconds()
+            .abs()
+            <= 1
+    );
+
+    // 提前 401 账号在 Admin 列表汇总与 status=error 筛选中也归入 error
+    let admin_page = admin
+        .list_accounts(
+            &AccountListQuery {
+                provider_kind: None,
+                search: None,
+                status: Some(AccountStatus::Error),
+                group_id: None,
+                ungrouped_only: false,
+                page: 1,
+                page_size: PageSize::new(10).expect("page size"),
+                sort: None,
+            },
+            &BTreeMap::new(),
+            SystemTime::from(now),
+        )
+        .await
+        .expect("admin list");
+    assert_eq!(admin_page.summary.error, 2);
+    assert_eq!(admin_page.items.len(), 2);
+
+    // 刷新候选查询应优先捞出提前 401（含无 access_token_expires_at 的账号）
+    let observed = SystemTime::from(now);
+    let query = ProviderRefreshQuery::new(
+        ProviderKind::new("openai").expect("provider"),
+        observed + Duration::from_secs(5 * 60),
+        observed - Duration::from_secs(2 * 60 * 60),
+        observed,
+        Vec::new(),
+        NonZeroU32::new(10).expect("limit"),
+    );
+    let candidates = repository
+        .list_refresh_candidates(query.clone())
+        .await
+        .expect("list refresh candidates");
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|c| c.account.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["acct_pg_early", "acct_pg_early_no_exp"]
+    );
+
+    // defer_refresh CAS 与重复 401 均不得右移 credential_observed_at
+    let cas = CredentialCasUpdate::new(
+        early_id.clone(),
+        rev1,
+        ProviderAccountUpdate {
+            account_id: early_id.clone(),
+            name: "unused".to_owned(),
+            email: None,
+            plan_type: None,
+        },
+        plaintext_credential("same-secret"),
+        true,
+        Some(SystemTime::from(now + TimeDelta::days(9))),
+        Some(SystemTime::from(now + TimeDelta::minutes(10))),
+    )
+    .expect("cas")
+    .preserving_profile()
+    .with_account_state(
+        CredentialState::Ready,
+        second_t,
+        Some(AccountErrorReason::AccessTokenExpired),
+        Some("transient".to_owned()),
+    );
+    let CredentialCasOutcome::Updated(rev2) = repository
+        .compare_and_swap_credential(cas)
+        .await
+        .expect("cas update")
+    else {
+        panic!("expected CAS update");
+    };
+    repository
+        .apply_state_change(AccountStateChange {
+            account_id: early_id.clone(),
+            expected_revision: rev2,
+            credential_state: CredentialState::Ready,
+            observed_at: SystemTime::from(now),
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+            message: Some("duplicate_401".to_owned()),
+        })
+        .await
+        .expect("duplicate early 401");
+    let stored_after_dup: (chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>) = sqlx::query_as(
+        "select credential_observed_at, next_refresh_at from provider_accounts where id = $1",
+    )
+    .bind(early_id.as_str())
+    .fetch_one(&database.pool)
+    .await
+    .expect("read after duplicate");
+    assert_eq!(stored_after_dup.0, stored_first_observed);
+    assert!(stored_after_dup.1.is_some());
+
+    // 退避未到点时不出现在候选列表，但超过 2h 强制窗口后必须重新出现
+    let during_backoff = repository
+        .list_refresh_candidates(query)
+        .await
+        .expect("list during backoff");
+    assert_eq!(
+        during_backoff
+            .iter()
+            .map(|c| c.account.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["acct_pg_early_no_exp"]
+    );
+    let after_two_hours = SystemTime::from(now + TimeDelta::hours(2));
+    let forced_query = ProviderRefreshQuery::new(
+        ProviderKind::new("openai").expect("provider"),
+        after_two_hours + Duration::from_secs(5 * 60),
+        after_two_hours - Duration::from_secs(2 * 60 * 60),
+        SystemTime::from(now),
+        Vec::new(),
+        NonZeroU32::new(10).expect("limit"),
+    );
+    let forced = repository
+        .list_refresh_candidates(forced_query)
+        .await
+        .expect("list after 2h force window");
+    assert_eq!(
+        forced
+            .iter()
+            .map(|c| c.account.id().as_str())
+            .collect::<Vec<_>>(),
+        vec!["acct_pg_early", "acct_pg_early_no_exp"]
+    );
+
+    // 终态原子保护：Expired/Banned/Invalid 不得被迟到的 Ready+AccessTokenExpired 重新打开
+    repository
+        .apply_state_change(AccountStateChange {
+            account_id: early_id.clone(),
+            expected_revision: rev2,
+            credential_state: CredentialState::Expired,
+            observed_at: SystemTime::from(now + TimeDelta::seconds(1)),
+            error_reason: Some(AccountErrorReason::CredentialExpired),
+            message: Some("invalid_grant".to_owned()),
+        })
+        .await
+        .expect("mark expired");
+    let reopen = repository
+        .apply_state_change(AccountStateChange {
+            account_id: early_id.clone(),
+            expected_revision: rev2,
+            credential_state: CredentialState::Ready,
+            observed_at: SystemTime::from(now + TimeDelta::seconds(2)),
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+            message: Some("late_401".to_owned()),
+        })
+        .await;
+    assert!(reopen.is_err());
+    let final_state: String =
+        sqlx::query_scalar("select credential_state from provider_accounts where id = $1")
+            .bind(early_id.as_str())
+            .fetch_one(&database.pool)
+            .await
+            .expect("read final state");
+    assert_eq!(final_state, "expired");
+
+    database.close().await;
 }

@@ -191,8 +191,14 @@ impl ProviderAccountStore for PgProviderAccountRepository {
                    when $10::text is not null
                    then $10 else credential_state end,
                  credential_observed_at = case
-                   when $10::text is not null
-                   then $11 else credential_observed_at end,
+                   when $10::text is null then credential_observed_at
+                   when $10 = 'ready'
+                     and $12 is not distinct from 'access_token_expired'
+                     and credential_state = 'ready'
+                     and last_error_reason is not distinct from 'access_token_expired'
+                     and credential_observed_at is not null
+                   then credential_observed_at
+                   else $11 end,
                  last_error_reason = case
                    when $10::text is not null
                    then $12 else last_error_reason end,
@@ -201,6 +207,11 @@ impl ProviderAccountStore for PgProviderAccountRepository {
                    then $13 else last_error_message end,
                  updated_at = greatest(now(), updated_at, $11)
              where id = $1 and credential_revision = $2
+               and not (
+                 $10 = 'ready'
+                 and $12 is not distinct from 'access_token_expired'
+                 and credential_state in ('expired', 'banned', 'invalid')
+               )
              returning credential_revision",
         )
         .bind(&account_id)

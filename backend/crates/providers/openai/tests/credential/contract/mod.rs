@@ -1439,7 +1439,16 @@ fn selector_returns_capacity_error_when_every_redis_lease_is_busy() {
 #[test]
 fn credential_expired_failure_marks_unified_account_expired() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_primary", "at-primary");
+    let mut no_refresh_secret = secret("at-primary");
+    no_refresh_secret.refresh_token = None;
+    block_on(store.seed_oauth_credential(ImportCodexOAuthCredential {
+        account_id: "acct_primary".to_owned(),
+        name: "acct_primary".to_owned(),
+        secret: no_refresh_secret,
+        verified_account: profile("chatgpt-acct_primary"),
+        next_refresh_at: None,
+        enabled: true,
+    }));
     let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
     let attempt = attempt(BTreeSet::new());
     let lease =
@@ -2621,4 +2630,97 @@ fn legacy_oauth_defaults_to_websocket_and_reimport_preserves_http() {
         CodexCredentialCodec::decode(&preserved).unwrap().transport,
         ResponsesTransport::Http
     );
+}
+
+#[tokio::test]
+async fn early_401_before_jwt_expiry_retains_ready_access_token_expired_and_guards_lifecycle() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let mut verified_account = profile("chatgpt-early-401");
+    verified_account.access_token_expires_at =
+        Some(chrono::Utc::now() + chrono::TimeDelta::days(9));
+    store
+        .seed_oauth_credential(ImportCodexOAuthCredential {
+            account_id: "acct_early_401".to_owned(),
+            name: "early-401".to_owned(),
+            secret: secret("at-early-401"),
+            verified_account,
+            next_refresh_at: Some(chrono::Utc::now() + chrono::TimeDelta::minutes(30)),
+            enabled: true,
+        })
+        .await;
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let initial = store.account("acct_early_401").expect("seeded");
+
+    // 首次提前 401（即使上游未附 message）必须保持 Ready + AccessTokenExpired，
+    // 清除旧的预刷新退避并立即退出 live 选号
+    selector
+        .record_failure(&initial, CodexAccountFailure::CredentialExpired, None)
+        .await
+        .expect("record early 401");
+    let after_first = store.account("acct_early_401").expect("after first 401");
+    assert_eq!(after_first.credential_state(), CredentialState::Ready);
+    assert_eq!(
+        after_first.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(after_first.next_refresh_at(), None);
+    let first_observed = after_first
+        .credential_observed_at()
+        .expect("observed timestamp");
+
+    let attempt = attempt(BTreeSet::new());
+    let selected = selector
+        .select(&SelectCodexCredential {
+            upstream_model: "gpt-5.4",
+            request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                .expect("URL"),
+            attempt: &attempt,
+            session_affinity_key: None,
+        })
+        .await;
+    assert!(matches!(
+        selected,
+        Err(CredentialSelectionError::NoEligibleCredential)
+    ));
+
+    // 同版本并发请求迟到成功不得清除 AccessTokenExpired
+    selector.record_success(&initial).await;
+    let after_late_success = store.account("acct_early_401").expect("after late success");
+    assert_eq!(
+        after_late_success.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+
+    // 二次 401 不得右移首次观测起点
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    selector
+        .record_failure(
+            &after_first,
+            CodexAccountFailure::CredentialExpired,
+            Some("token_revoked".to_owned()),
+        )
+        .await
+        .expect("record duplicate 401");
+    let after_second = store.account("acct_early_401").expect("after second 401");
+    assert_eq!(after_second.credential_observed_at(), Some(first_observed));
+
+    // 已进入终态的账号不得被旧租约 401 重新打开为 Ready
+    selector
+        .record_failure(
+            &after_second,
+            CodexAccountFailure::Banned,
+            Some("account_deactivated".to_owned()),
+        )
+        .await
+        .expect("ban account");
+    let stale_result = selector
+        .record_failure(
+            &initial,
+            CodexAccountFailure::CredentialExpired,
+            Some("late_401".to_owned()),
+        )
+        .await;
+    assert!(stale_result.is_err());
+    let banned = store.account("acct_early_401").expect("still banned");
+    assert_eq!(banned.credential_state(), CredentialState::Banned);
 }

@@ -363,16 +363,35 @@ pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select coalesce(proxy_enable
      where provider_kind = $1
        and has_refresh_token
        and credential_state in ('unknown', 'ready')
-       and access_token_expires_at is not null
        and (
-         access_token_expires_at <= $3
+         (
+           access_token_expires_at is not null
+           and (
+             access_token_expires_at <= $3
+             or (
+               access_token_expires_at <= $2
+               and (next_refresh_at is null or next_refresh_at <= $4)
+             )
+           )
+         )
          or (
-           access_token_expires_at <= $2
-           and (next_refresh_at is null or next_refresh_at <= $4)
+           credential_state = 'ready'
+           and last_error_reason = 'access_token_expired'
+           and (
+             next_refresh_at is null
+             or next_refresh_at <= $4
+             or (credential_observed_at is not null and credential_observed_at <= $3)
+           )
          )
        )
        and not (id = any($5::text[]))
-     order by access_token_expires_at, id
+     order by
+       case
+         when credential_state = 'ready' and last_error_reason = 'access_token_expired' then 0
+         else 1
+       end,
+       coalesce(access_token_expires_at, credential_observed_at, created_at),
+       id
      limit $6";
 
 pub(crate) fn account_record_from_row(
@@ -427,6 +446,7 @@ pub(crate) fn core_account_from_summary(
         summary.last_error_reason,
         summary.last_error_message,
     )
+    .with_credential_observed_at(summary.credential_observed_at.map(Into::into))
     .with_scheduling(summary.concurrency_limit, summary.weight)
     .with_model_access(summary.model_access)
     .with_feature_opt_outs(summary.feature_opt_outs)
