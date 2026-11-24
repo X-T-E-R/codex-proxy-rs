@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, Utc};
 use futures::{StreamExt as _, stream};
 use gateway_core::account::{
-    AccountErrorReason, CredentialState, ProviderAccount, ProviderAccountId, ProviderRefreshQuery,
+    AccountErrorReason, CredentialState, CredentialStateWrite, ProviderAccount, ProviderAccountId,
+    ProviderRefreshQuery,
 };
 use gateway_core::provider_ports::{
     ProviderCredentialStatePort, ProviderLeaseAcquisition, ProviderLeasePort, ProviderLeaseRequest,
@@ -42,16 +43,39 @@ pub(crate) fn refresh_recovery_deadline(
     access_token_expires_at.and_then(|expires_at| expires_at.checked_add(REFRESH_RECOVERY_WINDOW))
 }
 
-fn refresh_recovery_window_exhausted(
+/// 计算正常过期或上游提前吊销 AT 的有界恢复截止时间。
+///
+/// 当本地 JWT 到期时间晚于首次观测到失效的时刻（或缺失过期时间）时，
+/// 恢复窗口必须从 `observed_at` 起算，避免拖延到数天后的本地过期时间。
+pub(crate) fn early_or_expired_recovery_deadline(
     access_token_expires_at: Option<SystemTime>,
-    now: SystemTime,
-) -> bool {
-    refresh_recovery_deadline(access_token_expires_at).is_some_and(|deadline| deadline <= now)
+    observed_at: SystemTime,
+) -> Option<SystemTime> {
+    let expiry_deadline = refresh_recovery_deadline(access_token_expires_at);
+    let observed_deadline = observed_at.checked_add(REFRESH_RECOVERY_WINDOW);
+    match (expiry_deadline, observed_deadline) {
+        (Some(expiry), Some(observed)) => Some(expiry.min(observed)),
+        (expiry, observed) => expiry.or(observed),
+    }
+}
+
+pub(crate) fn account_refresh_recovery_deadline(account: &ProviderAccount) -> Option<SystemTime> {
+    if account.last_error_reason() == Some(AccountErrorReason::AccessTokenExpired)
+        && let Some(observed_at) = account.credential_observed_at()
+    {
+        return early_or_expired_recovery_deadline(account.access_token_expires_at(), observed_at);
+    }
+    refresh_recovery_deadline(account.access_token_expires_at())
+}
+
+fn refresh_recovery_window_exhausted(account: &ProviderAccount, now: SystemTime) -> bool {
+    account_refresh_recovery_deadline(account).is_some_and(|deadline| deadline <= now)
 }
 
 fn bounded_refresh_retry_at(
     retry_at: SystemTime,
     access_token_expires_at: Option<SystemTime>,
+    recovery_deadline: Option<SystemTime>,
     observed_at: SystemTime,
 ) -> SystemTime {
     let mut bounded = retry_at;
@@ -61,7 +85,7 @@ fn bounded_refresh_retry_at(
     {
         bounded = expires_at;
     }
-    if let Some(deadline) = refresh_recovery_deadline(access_token_expires_at)
+    if let Some(deadline) = recovery_deadline
         && bounded > deadline
     {
         bounded = deadline;
@@ -70,27 +94,26 @@ fn bounded_refresh_retry_at(
 }
 
 fn oauth_refresh_retry_at(
-    account_id: &ProviderAccountId,
-    access_token_expires_at: Option<SystemTime>,
+    account: &ProviderAccount,
     observed_at: SystemTime,
     attempt: u32,
     reason: &'static str,
 ) -> Result<SystemTime, ProviderStoreError> {
     let retry_at = if attempt <= REFRESH_BACKOFF_MAX_ATTEMPTS {
-        provider_refresh_backoff_at(account_id, observed_at, attempt, reason)?
+        provider_refresh_backoff_at(account.id(), observed_at, attempt, reason)?
     } else {
-        provider_refresh_retry_at(account_id, observed_at, REFRESH_RECOVERY_DELAY, reason)?
+        provider_refresh_retry_at(account.id(), observed_at, REFRESH_RECOVERY_DELAY, reason)?
     };
     Ok(bounded_refresh_retry_at(
         retry_at,
-        access_token_expires_at,
+        account.access_token_expires_at(),
+        account_refresh_recovery_deadline(account),
         observed_at,
     ))
 }
 
 fn log_refresh_deferred(
-    account_id: &ProviderAccountId,
-    access_token_expires_at: Option<SystemTime>,
+    account: &ProviderAccount,
     attempt: u32,
     reason: &'static str,
     upstream_message: Option<&str>,
@@ -98,7 +121,7 @@ fn log_refresh_deferred(
     retry_at: SystemTime,
 ) {
     tracing::warn!(
-        account_id = %account_id,
+        account_id = %account.id(),
         attempt,
         reason,
         upstream_message = ?upstream_message,
@@ -107,8 +130,8 @@ fn log_refresh_deferred(
         upstream_type = ?upstream.and_then(RefreshUpstreamFailure::error_type),
         upstream_body = ?upstream.map(RefreshUpstreamFailure::body),
         retry_at = %DateTime::<Utc>::from(retry_at),
-        access_token_expires_at = ?access_token_expires_at.map(DateTime::<Utc>::from),
-        recovery_deadline = ?refresh_recovery_deadline(access_token_expires_at)
+        access_token_expires_at = ?account.access_token_expires_at().map(DateTime::<Utc>::from),
+        recovery_deadline = ?account_refresh_recovery_deadline(account)
             .map(DateTime::<Utc>::from),
         "OpenAI OAuth refresh deferred"
     );
@@ -255,10 +278,8 @@ impl CodexCredentialRefreshService {
         policy: ProviderRefreshPolicy,
     ) -> Result<CodexCredentialRefreshOutcome, CodexCredentialRefreshError> {
         let account_id = due.account.id().to_string();
-        let recovery_window_exhausted = refresh_recovery_window_exhausted(
-            due.account.access_token_expires_at(),
-            SystemTime::now(),
-        );
+        let recovery_window_exhausted =
+            refresh_recovery_window_exhausted(&due.account, SystemTime::now());
         let capacity = self
             .leases
             .try_acquire(ProviderLeaseRequest::RefreshCapacity(
@@ -329,7 +350,10 @@ impl CodexCredentialRefreshService {
             };
         }
         match refresh_result {
-            Ok(tokens) => self.persist_success(due, tokens).await,
+            Ok(tokens) => {
+                self.persist_success(due, tokens, recovery_window_exhausted)
+                    .await
+            }
             Err(RefreshFailure::InvalidGrant { message, upstream }) => {
                 self.persist_terminal(
                     &due.account,
@@ -438,6 +462,7 @@ impl CodexCredentialRefreshService {
         &self,
         due: DueCodexCredential,
         tokens: TokenPair,
+        recovery_window_exhausted: bool,
     ) -> Result<CodexCredentialRefreshOutcome, CodexCredentialRefreshError> {
         let TokenPair {
             access_token,
@@ -453,6 +478,9 @@ impl CodexCredentialRefreshService {
             refresh_token: current_refresh_token,
             id_token: current_id_token,
         } = due.secret;
+        let rotated_new_access_token = access_token.as_deref().is_some_and(|next| {
+            !next.trim().is_empty() && next != current_access_token.expose_secret()
+        });
         let refresh_token = rotated_refresh_token
             .map(SecretString::from)
             .or(current_refresh_token);
@@ -474,6 +502,107 @@ impl CodexCredentialRefreshService {
                 .as_ref()
                 .map(ExposeSecret::expose_secret),
         );
+        // 若账号正因 AT 被上游吊销而处于隔离恢复态（包括在途刷新期间并发落库的 401），
+        // 刷新响应未返回新 AT 时绝不能清掉隔离标记；同时先持久化上游可能已轮换的新 RT/ID token。
+        let mut recovering_account = (due.account.credential_state() == CredentialState::Ready
+            && due.account.last_error_reason() == Some(AccountErrorReason::AccessTokenExpired))
+        .then(|| due.account.clone());
+        if !rotated_new_access_token && recovering_account.is_none() {
+            recovering_account = self
+                .repository
+                .store()
+                .get_account(due.account.id())
+                .await
+                .map_err(CredentialRepositoryError::from)?
+                .filter(|account| {
+                    account.revision() == due.account.revision()
+                        && account.credential_state() == CredentialState::Ready
+                        && account.last_error_reason()
+                            == Some(AccountErrorReason::AccessTokenExpired)
+                });
+        }
+        if let Some(recovering) = recovering_account
+            && !rotated_new_access_token
+        {
+            let observed_at = SystemTime::now();
+            let attempt = self
+                .credential_state
+                .record_refresh_backoff(recovering.id(), REFRESH_BACKOFF_WINDOW)
+                .await
+                .unwrap_or(1);
+            let retry_at = oauth_refresh_retry_at(
+                &recovering,
+                observed_at,
+                attempt,
+                "missing-rotated-access-token",
+            )?;
+            let state_observed_at = recovering.credential_observed_at().unwrap_or(observed_at);
+            let persisted_message = recovering.last_error_message().map(str::to_owned);
+            let result = self
+                .repository
+                .persist_partial_refresh_rotation(
+                    &recovering,
+                    secret,
+                    access_token_expires_at,
+                    retry_at,
+                    CredentialStateWrite {
+                        credential_state: recovering.credential_state(),
+                        observed_at: state_observed_at,
+                        error_reason: Some(AccountErrorReason::AccessTokenExpired),
+                        message: persisted_message,
+                    },
+                )
+                .await;
+            return match result {
+                Ok(next_revision) => {
+                    if recovery_window_exhausted
+                        || refresh_recovery_window_exhausted(&recovering, observed_at)
+                    {
+                        let updated_account = self
+                            .repository
+                            .store()
+                            .get_account(recovering.id())
+                            .await
+                            .map_err(CredentialRepositoryError::from)?
+                            .filter(|account| account.revision() == next_revision);
+                        if let Some(updated_account) = updated_account {
+                            return self
+                                .persist_terminal(
+                                    &updated_account,
+                                    CredentialState::Expired,
+                                    AccountErrorReason::CredentialExpired,
+                                    RefreshFailureContext::new(
+                                        "refresh_recovery_window_exhausted",
+                                        updated_account.last_error_message().map(str::to_owned),
+                                        None,
+                                    ),
+                                    CodexCredentialRefreshOutcome::Invalidated {
+                                        account_id: recovering.id().to_string(),
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    log_refresh_deferred(
+                        &recovering,
+                        attempt,
+                        "missing-rotated-access-token",
+                        Some("OAuth refresh response omitted a rotated access token"),
+                        None,
+                        retry_at,
+                    );
+                    Ok(CodexCredentialRefreshOutcome::Transient {
+                        account_id: recovering.id().to_string(),
+                    })
+                }
+                Err(CredentialRepositoryError::RevisionConflict) => {
+                    Ok(CodexCredentialRefreshOutcome::Stale {
+                        account_id: recovering.id().to_string(),
+                    })
+                }
+                Err(error) => Err(error.into()),
+            };
+        }
         // 成功轮换清掉仅用于失败退避的 retry-not-before；正常预刷新窗口由
         // worker 结合当前 runtime policy 动态判断，不写入账号时间字段。
         let next_refresh_at = None;
@@ -565,7 +694,7 @@ impl CodexCredentialRefreshService {
                     upstream_body = ?upstream.map(RefreshUpstreamFailure::body),
                     access_token_expires_at = ?account.access_token_expires_at()
                         .map(DateTime::<Utc>::from),
-                    recovery_deadline = ?refresh_recovery_deadline(account.access_token_expires_at())
+                    recovery_deadline = ?account_refresh_recovery_deadline(account)
                         .map(DateTime::<Utc>::from),
                     "OpenAI OAuth refresh marked account terminal"
                 );
@@ -587,36 +716,56 @@ impl CodexCredentialRefreshService {
         upstream_message: Option<&str>,
         upstream: Option<&RefreshUpstreamFailure>,
     ) -> Result<bool, CodexCredentialRefreshError> {
+        let observed_at = SystemTime::now();
         let attempt = self
             .credential_state
             .record_refresh_backoff(account.id(), REFRESH_BACKOFF_WINDOW)
             .await
             .unwrap_or(1);
-        let retry_at = oauth_refresh_retry_at(
-            account.id(),
-            account.access_token_expires_at(),
-            SystemTime::now(),
-            attempt,
-            reason,
-        )?;
+        let retry_at = oauth_refresh_retry_at(account, observed_at, attempt, reason)?;
         let message = upstream_message
             .filter(|message| !message.trim().is_empty())
             .map(str::to_owned);
-        let error_reason = upstream.map(|_| {
+        let already_recovering_access_token = account.credential_state() == CredentialState::Ready
+            && account.last_error_reason() == Some(AccountErrorReason::AccessTokenExpired);
+        let access_token_unusable = account.credential_state() != CredentialState::Ready
+            || already_recovering_access_token
+            || account
+                .access_token_expires_at()
+                .is_some_and(|expires_at| expires_at <= observed_at);
+        // 仅在当前 AT 已明确不可用时持久化 AccessTokenExpired，避免预刷新瞬态失败误伤仍可用的健康 AT。
+        let error_reason = upstream.filter(|_| access_token_unusable).map(|_| {
             account
                 .credential_state()
                 .error_reason()
                 .unwrap_or(AccountErrorReason::AccessTokenExpired)
         });
+        let persisted_message = message.or_else(|| {
+            already_recovering_access_token
+                .then(|| account.last_error_message().map(str::to_owned))
+                .flatten()
+        });
+        // 提前吊销 AT 的有界恢复窗口从首次观测 401 起算；后续瞬态刷新退避必须保留原观测时刻，
+        // 防止每次退避把两小时截止时间不断顺延。
+        let state_observed_at = if already_recovering_access_token {
+            account.credential_observed_at().unwrap_or(observed_at)
+        } else {
+            observed_at
+        };
         match self
             .repository
-            .defer_refresh(account, retry_at, error_reason, message)
+            .defer_refresh(
+                account,
+                retry_at,
+                state_observed_at,
+                error_reason,
+                persisted_message,
+            )
             .await
         {
             Ok(_) => {
                 log_refresh_deferred(
-                    account.id(),
-                    account.access_token_expires_at(),
+                    account,
                     attempt,
                     reason,
                     upstream_message,

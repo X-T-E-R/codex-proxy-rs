@@ -5,8 +5,8 @@ use std::time::SystemTime;
 
 use gateway_core::account::{
     AccountErrorReason, AccountStateChange, CredentialCasOutcome, CredentialCasUpdate,
-    CredentialRevision, CredentialState, LoadedCredential, ProviderAccount, ProviderAccountStore,
-    ProviderAccountUpdate, ProviderRefreshQuery,
+    CredentialRevision, CredentialState, CredentialStateWrite, LoadedCredential, ProviderAccount,
+    ProviderAccountStore, ProviderAccountUpdate, ProviderRefreshQuery,
 };
 use gateway_core::routing::ProviderKind;
 use secrecy::ExposeSecret;
@@ -37,6 +37,7 @@ impl CodexCredentialRepository {
     ///
     /// Refresh endpoint 已经是这次 AT/RT 轮换的授权边界；这里仅以 revision
     /// CAS 保护并发写入，不重新验证新 access token 的身份声明。
+    /// 并发 401 状态写入或额度观测不推进 revision，因此不因状态字段变化丢弃已经换回的令牌。
     pub async fn rotate_refreshed_oauth_secret(
         &self,
         account: &ProviderAccount,
@@ -44,11 +45,59 @@ impl CodexCredentialRepository {
         access_token_expires_at: Option<SystemTime>,
         next_refresh_at: Option<SystemTime>,
     ) -> Result<CredentialRevision, CredentialRepositoryError> {
+        self.persist_oauth_secret_cas(
+            account,
+            secret,
+            access_token_expires_at,
+            next_refresh_at,
+            Some(CredentialStateWrite {
+                credential_state: CredentialState::Ready,
+                observed_at: SystemTime::now(),
+                error_reason: None,
+                message: None,
+            }),
+        )
+        .await
+    }
+
+    /// 持久化刷新响应中已轮换的 RT/ID token，同时保留当前账号隔离错误状态并推进退避。
+    ///
+    /// 当已吊销账号的刷新响应未返回新 AT 时，必须保存上游可能已轮换的一次性 RT，
+    /// 但绝不能清空 `AccessTokenExpired` 隔离标记。
+    pub async fn persist_partial_refresh_rotation(
+        &self,
+        account: &ProviderAccount,
+        secret: CodexOAuthSecret,
+        access_token_expires_at: Option<SystemTime>,
+        next_refresh_at: SystemTime,
+        state: CredentialStateWrite,
+    ) -> Result<CredentialRevision, CredentialRepositoryError> {
+        self.persist_oauth_secret_cas(
+            account,
+            secret,
+            access_token_expires_at,
+            Some(next_refresh_at),
+            Some(state),
+        )
+        .await
+    }
+
+    async fn persist_oauth_secret_cas(
+        &self,
+        account: &ProviderAccount,
+        secret: CodexOAuthSecret,
+        access_token_expires_at: Option<SystemTime>,
+        next_refresh_at: Option<SystemTime>,
+        account_state: Option<CredentialStateWrite>,
+    ) -> Result<CredentialRevision, CredentialRepositoryError> {
         let current = self
             .store
             .load_credential(account.id(), account.revision())
             .await?;
-        if current.account != *account {
+        if current.account.id() != account.id()
+            || current.account.provider() != account.provider()
+            || current.account.revision() != account.revision()
+        {
             return Err(CredentialRepositoryError::RevisionConflict);
         }
         let mut data = CodexCredentialCodec::decode_complete(&current.credential)?;
@@ -65,17 +114,24 @@ impl CodexCredentialRepository {
             .as_ref()
             .map(|value| value.expose_secret().to_owned());
         let credential = CodexCredentialCodec::encode_complete(data)?;
-        let update = CredentialCasUpdate::new(
+        let mut update = CredentialCasUpdate::new(
             account.id().clone(),
             account.revision(),
-            unchanged_profile(account),
+            unchanged_profile(&current.account),
             credential,
             secret.refresh_token.is_some(),
             access_token_expires_at,
             next_refresh_at,
         )
-        .map_err(|_| CredentialRepositoryError::InvalidCredentialData)?
-        .with_account_state(CredentialState::Ready, SystemTime::now(), None, None);
+        .map_err(|_| CredentialRepositoryError::InvalidCredentialData)?;
+        if let Some(state) = account_state {
+            update = update.with_account_state(
+                state.credential_state,
+                state.observed_at,
+                state.error_reason,
+                state.message,
+            );
+        }
         cas_revision(self.store.compare_and_swap_credential(update).await?)
     }
 
@@ -84,6 +140,7 @@ impl CodexCredentialRepository {
         &self,
         account: &ProviderAccount,
         next_refresh_at: SystemTime,
+        state_observed_at: SystemTime,
         error_reason: Option<AccountErrorReason>,
         message: Option<String>,
     ) -> Result<CredentialRevision, CredentialRepositoryError> {
@@ -91,7 +148,10 @@ impl CodexCredentialRepository {
             .store
             .load_credential(account.id(), account.revision())
             .await?;
-        if current.account != *account {
+        if current.account.id() != account.id()
+            || current.account.provider() != account.provider()
+            || current.account.revision() != account.revision()
+        {
             return Err(CredentialRepositoryError::RevisionConflict);
         }
         let data = CodexCredentialCodec::decode_complete(&current.credential)?;
@@ -100,19 +160,36 @@ impl CodexCredentialRepository {
         let mut update = CredentialCasUpdate::new(
             account.id().clone(),
             account.revision(),
-            unchanged_profile(account),
+            unchanged_profile(&current.account),
             credential,
             has_refresh_token,
-            account.access_token_expires_at(),
+            current.account.access_token_expires_at(),
             Some(next_refresh_at),
         )
         .map_err(|_| CredentialRepositoryError::InvalidCredentialData)?;
         if let Some(error_reason) = error_reason {
+            // 若在途刷新失败前已有并发 401 将账号置为提前吊销恢复态，必须沿用已落库的首次观测时刻。
+            let already_recovering = current.account.credential_state() == CredentialState::Ready
+                && current.account.last_error_reason()
+                    == Some(AccountErrorReason::AccessTokenExpired);
+            let effective_observed_at = if already_recovering {
+                current
+                    .account
+                    .credential_observed_at()
+                    .unwrap_or(state_observed_at)
+            } else {
+                state_observed_at
+            };
+            let effective_message = message.or_else(|| {
+                already_recovering
+                    .then(|| current.account.last_error_message().map(str::to_owned))
+                    .flatten()
+            });
             update = update.with_account_state(
-                account.credential_state(),
-                SystemTime::now(),
+                current.account.credential_state(),
+                effective_observed_at,
                 Some(error_reason),
-                message,
+                effective_message,
             );
         }
         cas_revision(self.store.compare_and_swap_credential(update).await?)
@@ -232,7 +309,9 @@ impl CodexCredentialRepository {
         }
         let message = message.filter(|value| !value.trim().is_empty());
         let error_reason = if credential_state == CredentialState::Ready {
-            message.as_ref().and(error_reason)
+            error_reason.filter(|reason| {
+                *reason == AccountErrorReason::AccessTokenExpired || message.is_some()
+            })
         } else {
             error_reason.or_else(|| credential_state.error_reason())
         };

@@ -454,16 +454,35 @@ pub(crate) const REFRESH_CANDIDATES_SELECT: &str = "select outbound_proxy_url, i
        and enabled
        and has_refresh_token
        and credential_state in ('unknown', 'ready')
-       and access_token_expires_at is not null
        and (
-         access_token_expires_at <= $3
+         (
+           access_token_expires_at is not null
+           and (
+             access_token_expires_at <= $3
+             or (
+               access_token_expires_at <= $2
+               and (next_refresh_at is null or next_refresh_at <= $4)
+             )
+           )
+         )
          or (
-           access_token_expires_at <= $2
-           and (next_refresh_at is null or next_refresh_at <= $4)
+           credential_state = 'ready'
+           and last_error_reason = 'access_token_expired'
+           and (
+             credential_observed_at <= $3
+             or next_refresh_at is null
+             or next_refresh_at <= $4
+           )
          )
        )
        and not (id = any($5::text[]))
-     order by access_token_expires_at, id
+     order by
+       case
+         when credential_state = 'ready' and last_error_reason = 'access_token_expired'
+         then least(coalesce(access_token_expires_at, credential_observed_at), credential_observed_at)
+         else access_token_expires_at
+       end,
+       id
      limit $6";
 
 pub(crate) fn account_record_from_row(
@@ -517,6 +536,7 @@ pub(crate) fn core_account_from_summary(
         summary.last_error_reason,
         summary.last_error_message,
     )
+    .with_credential_observed_at(Some(summary.credential_observed_at.into()))
     .with_scheduling(summary.concurrency_limit, summary.weight)
     .with_overload_cooldown_override(summary.overload_cooldown)
     .with_outbound_proxy(summary.outbound_proxy)

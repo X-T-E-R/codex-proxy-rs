@@ -902,9 +902,18 @@ fn selector_returns_capacity_error_when_every_redis_lease_is_busy() {
 }
 
 #[test]
-fn credential_expired_failure_marks_unified_account_expired() {
+fn credential_expired_failure_marks_non_refreshable_account_expired() {
     let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_primary", "at-primary");
+    let mut at_only_secret = secret("at-primary");
+    at_only_secret.refresh_token = None;
+    block_on(store.seed_oauth_credential(ImportCodexOAuthCredential {
+        account_id: "acct_primary".to_owned(),
+        name: "acct_primary".to_owned(),
+        secret: at_only_secret,
+        verified_account: profile("chatgpt-acct_primary"),
+        next_refresh_at: None,
+        enabled: true,
+    }));
     let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
     let attempt = attempt(BTreeSet::new());
     let lease =
@@ -937,6 +946,220 @@ fn credential_expired_failure_marks_unified_account_expired() {
         Some(AccountErrorReason::AccessTokenExpired)
     );
     assert_eq!(account.last_error_message(), None);
+}
+
+#[test]
+fn credential_expired_failure_retains_early_revoked_oauth_and_excludes_it_from_live_selection() {
+    let store = Arc::new(MemoryAccountStore::default());
+    let mut future_profile = profile("chatgpt-acct_primary");
+    future_profile.access_token_expires_at = Some(chrono::Utc::now() + chrono::Duration::days(3));
+    block_on(store.seed_oauth_credential(ImportCodexOAuthCredential {
+        account_id: "acct_primary".to_owned(),
+        name: "acct_primary".to_owned(),
+        secret: secret("at-primary"),
+        verified_account: future_profile,
+        next_refresh_at: Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+        enabled: true,
+    }));
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt = attempt(BTreeSet::new());
+    let lease =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select healthy account");
+    let revoked_message = "Encountered invalidated oauth token for user, failing request";
+
+    block_on(selector.record_failure(
+        lease.account(),
+        CodexAccountFailure::CredentialExpired,
+        Some(revoked_message.to_owned()),
+    ))
+    .expect("record early credential expiry");
+
+    let retained = store
+        .account("acct_primary")
+        .expect("account retained for refresh");
+    assert_eq!(retained.credential_state(), CredentialState::Ready);
+    assert_eq!(
+        retained.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(retained.last_error_message(), Some(revoked_message));
+    assert_eq!(
+        retained.next_refresh_at(),
+        None,
+        "first early-401 transition must clear stale next_refresh_at for immediate recovery"
+    );
+    let first_observed_at = retained
+        .credential_observed_at()
+        .expect("credential_observed_at recorded");
+
+    // 即使本地 JWT 到期时间在三天后，该账号在刷新成功前也绝不能被选入实时流量。
+    let next_attempt = self::attempt(BTreeSet::new());
+    let err =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &next_attempt,
+                session_affinity_key: None,
+            }),
+        )
+        .expect_err("early-revoked account must be excluded from live selection");
+    assert!(matches!(
+        err,
+        CredentialSelectionError::NoEligibleCredential
+    ));
+
+    // 重复 401（例如并发在途请求）不得顺延原观察时刻或清空已有刷新退避。
+    let active_backoff = SystemTime::now() + Duration::from_secs(120);
+    store.set_next_refresh_at("acct_primary", Some(active_backoff));
+    let retained_with_backoff = store.account("acct_primary").expect("account with backoff");
+    block_on(selector.record_failure(
+        &retained_with_backoff,
+        CodexAccountFailure::CredentialExpired,
+        None,
+    ))
+    .expect("record duplicate early 401");
+    let after_dup = store
+        .account("acct_primary")
+        .expect("account after duplicate 401");
+    assert_eq!(after_dup.credential_state(), CredentialState::Ready);
+    assert_eq!(
+        after_dup.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(after_dup.credential_observed_at(), Some(first_observed_at));
+    assert_eq!(after_dup.next_refresh_at(), Some(active_backoff));
+}
+
+#[test]
+fn credential_expired_failure_without_message_still_retains_access_token_expired_reason() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+    block_on(selector.record_failure(&account, CodexAccountFailure::CredentialExpired, None))
+        .expect("record message-less early 401");
+
+    let retained = store.account("acct_primary").expect("retained account");
+    assert_eq!(retained.credential_state(), CredentialState::Ready);
+    assert_eq!(
+        retained.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(retained.last_error_message(), None);
+    let next_attempt = attempt(BTreeSet::new());
+    assert!(matches!(
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &next_attempt,
+                session_affinity_key: None,
+            })
+        ),
+        Err(CredentialSelectionError::NoEligibleCredential)
+    ));
+}
+
+#[test]
+fn late_record_success_on_same_revision_does_not_clear_early_revoked_isolation() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+    let attempt_a = attempt(BTreeSet::new());
+    let lease_a =
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &attempt_a,
+                session_affinity_key: None,
+            }),
+        )
+        .expect("select in-flight request A");
+
+    // 请求 B 收到 401 吊销并写入隔离状态（revision 保持不变）。
+    block_on(selector.record_failure(
+        lease_a.account(),
+        CodexAccountFailure::CredentialExpired,
+        Some("Encountered invalidated oauth token for user, failing request".to_owned()),
+    ))
+    .expect("record early 401 from request B");
+
+    // 较早开始但晚完成的请求 A 调用 record_success 不得把旧 AT 放回流量池。
+    block_on(selector.record_success(lease_a.account(), None, lease_a.account().id()));
+
+    let current = store.account("acct_primary").expect("account");
+    assert_eq!(current.credential_state(), CredentialState::Ready);
+    assert_eq!(
+        current.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    let next_attempt = attempt(BTreeSet::new());
+    assert!(matches!(
+        block_on(
+            selector.select(&SelectCodexCredential {
+                upstream_model: "gpt-5.4",
+                request_url: &Url::parse("https://chatgpt.com/backend-api/codex/responses")
+                    .expect("request URL"),
+                attempt: &next_attempt,
+                session_affinity_key: None,
+            })
+        ),
+        Err(CredentialSelectionError::NoEligibleCredential)
+    ));
+}
+
+#[test]
+fn credential_expired_failure_does_not_reopen_terminal_expired_account() {
+    let store = Arc::new(MemoryAccountStore::default());
+    create_account(&store, "acct_primary", "at-primary");
+    let account = store.account("acct_primary").expect("account");
+    block_on(store.apply_state_change(AccountStateChange {
+        account_id: account.id().clone(),
+        expected_revision: account.revision(),
+        credential_state: CredentialState::Expired,
+        observed_at: SystemTime::now(),
+        error_reason: Some(AccountErrorReason::CredentialExpired),
+        message: Some("refresh_invalid_grant".to_owned()),
+    }))
+    .expect("mark account terminal expired");
+    let terminal = store.account("acct_primary").expect("terminal account");
+    let selector = selector(&store, Arc::new(TestLeaseCoordinator::default()));
+
+    // 即使管理员诊断请求再次收到 401，也绝不能把终态 Expired 重新打开成 Ready 恢复周期。
+    block_on(selector.record_failure(
+        &terminal,
+        CodexAccountFailure::CredentialExpired,
+        Some("Encountered invalidated oauth token for user, failing request".to_owned()),
+    ))
+    .expect("record diagnostic 401");
+
+    let after = store.account("acct_primary").expect("account after 401");
+    assert_eq!(after.credential_state(), CredentialState::Expired);
+
+    // 即使在途请求持有变成终态之前的旧 Ready 快照（相同 revision），迟到的 401 也绝不能重开终态。
+    let stale_result = block_on(selector.record_failure(
+        &account,
+        CodexAccountFailure::CredentialExpired,
+        Some("Encountered invalidated oauth token for user, failing request".to_owned()),
+    ));
+    assert!(stale_result.is_err());
+    let still_terminal = store.account("acct_primary").expect("still terminal");
+    assert_eq!(still_terminal.credential_state(), CredentialState::Expired);
 }
 
 #[test]

@@ -153,6 +153,164 @@ async fn refresh_candidates_should_filter_order_and_bound_in_one_query() {
 }
 
 #[tokio::test]
+async fn early_invalidated_refresh_candidates_and_state_transition_follow_contract() {
+    let Some(database) = TestDatabase::create("provider_refresh_early_invalidated").await else {
+        return;
+    };
+    let repository = PgProviderAccountRepository::new(database.pool.clone());
+    let now = Utc::now();
+
+    let mut early_future = account("acct_early_future", "user-early-future");
+    early_future.has_refresh_token = true;
+    early_future.access_token_expires_at = Some(now + TimeDelta::days(3));
+    early_future.next_refresh_at = Some(now + TimeDelta::minutes(30));
+
+    let mut early_no_expiry = account("acct_early_no_exp", "user-early-no-exp");
+    early_no_expiry.has_refresh_token = true;
+    early_no_expiry.access_token_expires_at = None;
+    early_no_expiry.next_refresh_at = None;
+
+    let mut early_backing_off = account("acct_early_backoff", "user-early-backoff");
+    early_backing_off.has_refresh_token = true;
+    early_backing_off.access_token_expires_at = Some(now + TimeDelta::days(3));
+    early_backing_off.next_refresh_at = Some(now + TimeDelta::minutes(10));
+
+    let mut early_exhausted = account("acct_early_exhausted", "user-early-exhausted");
+    early_exhausted.has_refresh_token = true;
+    early_exhausted.access_token_expires_at = Some(now + TimeDelta::days(3));
+    early_exhausted.next_refresh_at = Some(now + TimeDelta::minutes(10));
+
+    for fixture in [
+        early_future,
+        early_no_expiry,
+        early_backing_off,
+        early_exhausted,
+    ] {
+        repository
+            .insert_provider_account(fixture)
+            .await
+            .expect("insert early invalidation fixture");
+    }
+
+    // 首次观测时间必须不早于夹具写入时的初始 credential_observed_at，才能命中单调观测门禁。
+    let observed_now = Utc::now() + TimeDelta::seconds(1);
+    let revision = CredentialRevision::new(1).expect("revision");
+    let first_observed = SystemTime::from(observed_now);
+    // 首次进入提前吊销恢复态：清除陈旧未来 next_refresh_at 并记录观测时刻。
+    repository
+        .apply_state_change(AccountStateChange {
+            account_id: ProviderAccountId::new("acct_early_future").expect("id"),
+            expected_revision: revision,
+            credential_state: CredentialState::Ready,
+            observed_at: first_observed,
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+            message: Some("token_revoked".to_owned()),
+        })
+        .await
+        .expect("transition early_future into recovery");
+    let loaded_future = repository
+        .get_account(&ProviderAccountId::new("acct_early_future").expect("id"))
+        .await
+        .expect("load early_future")
+        .expect("stored early_future");
+    assert_eq!(loaded_future.next_refresh_at(), None);
+    assert_eq!(
+        loaded_future.last_error_reason(),
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+    assert_eq!(
+        loaded_future
+            .credential_observed_at()
+            .map(|value| chrono::DateTime::<Utc>::from(value).timestamp_micros()),
+        Some(observed_now.timestamp_micros())
+    );
+
+    // 重复 apply_state_change 不得覆写首次观测时刻。
+    repository
+        .apply_state_change(AccountStateChange {
+            account_id: ProviderAccountId::new("acct_early_future").expect("id"),
+            expected_revision: revision,
+            credential_state: CredentialState::Ready,
+            observed_at: SystemTime::from(observed_now + TimeDelta::minutes(5)),
+            error_reason: Some(AccountErrorReason::AccessTokenExpired),
+            message: Some("token_revoked".to_owned()),
+        })
+        .await
+        .expect("duplicate recovery transition");
+    let after_dup = repository
+        .get_account(&ProviderAccountId::new("acct_early_future").expect("id"))
+        .await
+        .expect("reload early_future")
+        .expect("stored early_future");
+    assert_eq!(
+        after_dup
+            .credential_observed_at()
+            .map(|value| chrono::DateTime::<Utc>::from(value).timestamp_micros()),
+        Some(observed_now.timestamp_micros())
+    );
+
+    // 直接构造其余三个状态以验证 REFRESH_CANDIDATES_SELECT 谓词与排序。
+    sqlx::query(
+        "update provider_accounts
+         set last_error_reason = 'access_token_expired',
+             credential_observed_at = $1
+         where id = 'acct_early_no_exp'",
+    )
+    .bind(observed_now - TimeDelta::minutes(1))
+    .execute(&database.pool)
+    .await
+    .expect("mark early_no_exp");
+    sqlx::query(
+        "update provider_accounts
+         set last_error_reason = 'access_token_expired',
+             credential_observed_at = $1
+         where id = 'acct_early_backoff'",
+    )
+    .bind(observed_now - TimeDelta::minutes(5))
+    .execute(&database.pool)
+    .await
+    .expect("mark early_backoff");
+    sqlx::query(
+        "update provider_accounts
+         set last_error_reason = 'access_token_expired',
+             credential_observed_at = $1
+         where id = 'acct_early_exhausted'",
+    )
+    .bind(observed_now - TimeDelta::hours(3))
+    .execute(&database.pool)
+    .await
+    .expect("mark early_exhausted");
+
+    let observed_at = SystemTime::from(observed_now);
+    let query = ProviderRefreshQuery::new(
+        ProviderKind::new("openai").expect("Provider kind"),
+        observed_at + Duration::from_secs(5 * 60),
+        observed_at - Duration::from_secs(2 * 60 * 60),
+        observed_at,
+        Vec::new(),
+        NonZeroU32::new(10).expect("positive limit"),
+    );
+    let candidates = repository
+        .list_refresh_candidates(query)
+        .await
+        .expect("load early-invalidated refresh candidates");
+
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| candidate.account.id().as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "acct_early_exhausted",
+            "acct_early_no_exp",
+            "acct_early_future"
+        ]
+    );
+
+    database.close().await;
+}
+
+#[tokio::test]
 async fn provider_account_should_allow_missing_upstream_user_id() {
     let Some(database) = TestDatabase::create("provider_account_missing_upstream_identity").await
     else {

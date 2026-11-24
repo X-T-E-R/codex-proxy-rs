@@ -100,6 +100,28 @@ impl MemoryAccountStore {
             .with_overload_cooldown_override(override_policy);
     }
 
+    pub(crate) fn set_credential_observed_at(&self, id: &str, observed_at: SystemTime) {
+        let id = ProviderAccountId::new(id).expect("valid account ID");
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts.get_mut(&id).expect("seeded account");
+        stored.account = stored
+            .account
+            .clone()
+            .with_credential_observed_at(Some(observed_at));
+        stored.state_observed_at = Some(observed_at);
+    }
+
+    pub(crate) fn set_next_refresh_at(&self, id: &str, next_refresh_at: Option<SystemTime>) {
+        let id = ProviderAccountId::new(id).expect("valid account ID");
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let stored = accounts.get_mut(&id).expect("seeded account");
+        let has_refresh_token = stored.account.has_refresh_token();
+        stored.account = stored
+            .account
+            .clone()
+            .with_refresh_schedule(has_refresh_token, next_refresh_at);
+    }
+
     pub(crate) fn quota_reads(&self) -> usize {
         self.quota_reads.load(Ordering::SeqCst)
     }
@@ -206,10 +228,21 @@ impl ProviderAccountStore for MemoryAccountStore {
             })
             .collect::<Vec<_>>();
         candidates.sort_by_key(|loaded| {
-            (
-                loaded.account.access_token_expires_at(),
-                loaded.account.id().clone(),
-            )
+            let effective_due = if loaded.account.credential_state() == CredentialState::Ready
+                && loaded.account.last_error_reason()
+                    == Some(AccountErrorReason::AccessTokenExpired)
+            {
+                match (
+                    loaded.account.access_token_expires_at(),
+                    loaded.account.credential_observed_at(),
+                ) {
+                    (Some(expires_at), Some(observed_at)) => Some(expires_at.min(observed_at)),
+                    (expires_at, observed_at) => expires_at.or(observed_at),
+                }
+            } else {
+                loaded.account.access_token_expires_at()
+            };
+            (effective_due, loaded.account.id().clone())
         });
         candidates.truncate(query.limit().get() as usize);
         Ok(candidates)
@@ -279,12 +312,15 @@ impl ProviderAccountStore for MemoryAccountStore {
             |state| state.message.clone(),
         );
         let state_observed_at = account_state.as_ref().map(|state| state.observed_at);
+        let credential_observed_at =
+            state_observed_at.or_else(|| stored.account.credential_observed_at());
         stored.account = rebuild_account(
             &stored.account,
             AccountRebuild {
                 revision: next,
                 enabled: stored.account.enabled(),
                 credential_state,
+                credential_observed_at,
                 quota: stored.account.quota(),
                 last_error_reason,
                 last_error_message,
@@ -397,22 +433,48 @@ impl ProviderAccountStore for MemoryAccountStore {
         {
             return Err(store_error(StoreErrorKind::Conflict));
         }
+        let entering_early_recovery = change.credential_state == CredentialState::Ready
+            && change.error_reason == Some(AccountErrorReason::AccessTokenExpired);
+        if entering_early_recovery
+            && matches!(
+                stored.account.credential_state(),
+                CredentialState::Expired | CredentialState::Banned | CredentialState::Invalid
+            )
+        {
+            return Err(store_error(StoreErrorKind::Conflict));
+        }
+        let already_early_recovery = stored.account.credential_state() == CredentialState::Ready
+            && stored.account.last_error_reason() == Some(AccountErrorReason::AccessTokenExpired);
+        let next_refresh_at = if entering_early_recovery && !already_early_recovery {
+            None
+        } else {
+            stored.account.next_refresh_at()
+        };
+        let credential_observed_at = if entering_early_recovery && already_early_recovery {
+            stored
+                .account
+                .credential_observed_at()
+                .or(Some(change.observed_at))
+        } else {
+            Some(change.observed_at)
+        };
         stored.account = rebuild_account(
             &stored.account,
             AccountRebuild {
                 revision: stored.account.revision(),
                 enabled: stored.account.enabled(),
                 credential_state: change.credential_state,
+                credential_observed_at,
                 quota: stored.account.quota(),
                 last_error_reason: change.error_reason,
                 last_error_message: change.message,
                 access_token_expires_at: stored.account.access_token_expires_at(),
                 has_refresh_token: stored.account.has_refresh_token(),
-                next_refresh_at: stored.account.next_refresh_at(),
+                next_refresh_at,
                 profile: None,
             },
         );
-        stored.state_observed_at = Some(change.observed_at);
+        stored.state_observed_at = credential_observed_at;
         Ok(())
     }
 
@@ -427,6 +489,7 @@ impl ProviderAccountStore for MemoryAccountStore {
                 revision: stored.account.revision(),
                 enabled: stored.account.enabled(),
                 credential_state: stored.account.credential_state(),
+                credential_observed_at: stored.account.credential_observed_at(),
                 quota: stored.account.quota(),
                 last_error_reason: stored.account.last_error_reason(),
                 last_error_message: stored.account.last_error_message().map(str::to_owned),
@@ -454,6 +517,7 @@ impl ProviderAccountStore for MemoryAccountStore {
                 revision: stored.account.revision(),
                 enabled,
                 credential_state: stored.account.credential_state(),
+                credential_observed_at: stored.account.credential_observed_at(),
                 quota: stored.account.quota(),
                 last_error_reason: stored.account.last_error_reason(),
                 last_error_message: stored.account.last_error_message().map(str::to_owned),
@@ -484,6 +548,7 @@ struct AccountRebuild {
     revision: CredentialRevision,
     enabled: bool,
     credential_state: CredentialState,
+    credential_observed_at: Option<SystemTime>,
     quota: QuotaState,
     last_error_reason: Option<AccountErrorReason>,
     last_error_message: Option<String>,
@@ -499,6 +564,7 @@ impl AccountRebuild {
             revision: account.revision(),
             enabled: account.enabled(),
             credential_state: account.credential_state(),
+            credential_observed_at: account.credential_observed_at(),
             quota: account.quota(),
             last_error_reason: account.last_error_reason(),
             last_error_message: account.last_error_message().map(str::to_owned),
@@ -544,6 +610,7 @@ fn rebuild_account(current: &ProviderAccount, rebuild: AccountRebuild) -> Provid
         rebuild.last_error_reason,
         rebuild.last_error_message,
     )
+    .with_credential_observed_at(rebuild.credential_observed_at)
     .with_scheduling(current.concurrency_limit(), current.weight())
     .with_refresh_schedule(rebuild.has_refresh_token, rebuild.next_refresh_at)
 }

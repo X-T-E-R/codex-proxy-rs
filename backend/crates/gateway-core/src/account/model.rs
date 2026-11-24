@@ -653,12 +653,21 @@ pub fn resolve_account_status(
     if !facts.enabled {
         return status_projection(AccountStatus::Disabled);
     }
-    let credential_error = facts.credential_state.error_reason().or_else(|| {
-        facts
-            .access_token_expires_at
-            .is_some_and(|expires_at| expires_at <= now)
-            .then_some(AccountErrorReason::AccessTokenExpired)
-    });
+    let credential_error = facts
+        .credential_state
+        .error_reason()
+        .or_else(|| {
+            facts
+                .access_token_expires_at
+                .is_some_and(|expires_at| expires_at <= now)
+                .then_some(AccountErrorReason::AccessTokenExpired)
+        })
+        .or_else(|| {
+            // 上游在本地 JWT 到期前主动吊销 AT 时，凭据保持 Ready 以便后台有界 RT 恢复，
+            // 但对外状态与调度资格必须立即视为不可用，避免热路径继续命中已知失效的 AT。
+            (facts.last_error_reason == Some(AccountErrorReason::AccessTokenExpired))
+                .then_some(AccountErrorReason::AccessTokenExpired)
+        });
     if let Some(default_reason) = credential_error {
         return AccountStatusProjection {
             status: AccountStatus::Error,
@@ -710,6 +719,7 @@ pub struct ProviderAccount {
     weight: AccountWeight,
     overload_cooldown_override: AccountOverloadCooldownOverride,
     credential_state: CredentialState,
+    credential_observed_at: Option<SystemTime>,
     quota: QuotaState,
     last_error_reason: Option<AccountErrorReason>,
     last_error_message: Option<String>,
@@ -746,6 +756,7 @@ impl ProviderAccount {
             weight: AccountWeight::DEFAULT,
             overload_cooldown_override: AccountOverloadCooldownOverride::Inherit,
             credential_state: CredentialState::Unknown,
+            credential_observed_at: None,
             quota: QuotaState::unknown(),
             last_error_reason: None,
             last_error_message: None,
@@ -882,9 +893,24 @@ impl ProviderAccount {
         &self.authentication_kind
     }
 
+    /// 设置凭据状态的最近观测时刻，供提前吊销 AT 的有界恢复窗口计算使用。
+    #[must_use]
+    pub const fn with_credential_observed_at(
+        mut self,
+        credential_observed_at: Option<SystemTime>,
+    ) -> Self {
+        self.credential_observed_at = credential_observed_at;
+        self
+    }
+
     #[must_use]
     pub const fn credential_state(&self) -> CredentialState {
         self.credential_state
+    }
+
+    #[must_use]
+    pub const fn credential_observed_at(&self) -> Option<SystemTime> {
+        self.credential_observed_at
     }
 
     #[must_use]
@@ -1050,6 +1076,21 @@ impl ProviderRefreshQuery {
     /// 判断内存 Store 中的账号是否满足与 PostgreSQL 相同的候选谓词。
     #[must_use]
     pub fn contains(&self, account: &ProviderAccount) -> bool {
+        let due_by_expiry = account.access_token_expires_at().is_some_and(|expires_at| {
+            expires_at <= self.force_due_before
+                || (expires_at <= self.refresh_due_before
+                    && account
+                        .next_refresh_at()
+                        .is_none_or(|retry_at| retry_at <= self.observed_at))
+        });
+        let due_by_early_invalidation = account.credential_state() == CredentialState::Ready
+            && account.last_error_reason() == Some(AccountErrorReason::AccessTokenExpired)
+            && (account
+                .credential_observed_at()
+                .is_some_and(|observed_at| observed_at <= self.force_due_before)
+                || account
+                    .next_refresh_at()
+                    .is_none_or(|retry_at| retry_at <= self.observed_at));
         account.provider() == &self.provider
             && account.enabled()
             && account.has_refresh_token()
@@ -1058,13 +1099,7 @@ impl ProviderRefreshQuery {
                 CredentialState::Unknown | CredentialState::Ready
             )
             && !self.excluded_account_ids.contains(account.id())
-            && account.access_token_expires_at().is_some_and(|expires_at| {
-                expires_at <= self.force_due_before
-                    || (expires_at <= self.refresh_due_before
-                        && account
-                            .next_refresh_at()
-                            .is_none_or(|retry_at| retry_at <= self.observed_at))
-            })
+            && (due_by_expiry || due_by_early_invalidation)
     }
 }
 
@@ -1198,7 +1233,9 @@ impl CredentialCasUpdate {
     ) -> Self {
         let message = message.filter(|value| !value.trim().is_empty());
         let error_reason = if credential_state == CredentialState::Ready {
-            message.as_ref().and(error_reason)
+            error_reason.filter(|reason| {
+                *reason == AccountErrorReason::AccessTokenExpired || message.is_some()
+            })
         } else {
             error_reason.or_else(|| credential_state.error_reason())
         };

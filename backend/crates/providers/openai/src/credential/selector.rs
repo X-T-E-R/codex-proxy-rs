@@ -27,7 +27,7 @@ use super::affinity::{CODEX_ROOT_SESSION_TTL, CodexSessionAffinity};
 use super::catalog::CodexCredentialCatalogService;
 use super::cookie::CodexCookiePolicy;
 use super::quota::CodexCredentialQuotaService;
-use super::refresh::refresh_recovery_deadline;
+use super::refresh::{account_refresh_recovery_deadline, early_or_expired_recovery_deadline};
 use super::repository::{CodexCredentialRepository, CredentialRepositoryError};
 use super::security::CodexRuntimeAuthentication;
 use super::types::{
@@ -881,31 +881,50 @@ impl CodexCredentialSelector {
         let message = message.filter(|value| !value.trim().is_empty());
         match failure {
             CodexAccountFailure::CredentialExpired => {
+                // 仅允许当前仍处于 Ready/Unknown 的 OAuth 账号进入或继续有界 RT 恢复，
+                // 防止诊断测试触发的 401 将已经 Expired/Banned/Invalid 的终态账号重新打开。
                 if account.authentication_kind() == CODEX_AUTHENTICATION_KIND_OAUTH
                     && account.has_refresh_token()
-                    && account
-                        .access_token_expires_at()
-                        .is_some_and(|expires_at| expires_at <= now)
-                    && refresh_recovery_deadline(account.access_token_expires_at())
-                        .is_some_and(|deadline| deadline > now)
+                    && matches!(
+                        account.credential_state(),
+                        CredentialState::Ready | CredentialState::Unknown
+                    )
                 {
-                    tracing::info!(
-                        account_id = %account.id(),
-                        access_token_expires_at = ?account.access_token_expires_at()
-                            .map(chrono::DateTime::<chrono::Utc>::from),
-                        recovery_deadline = ?refresh_recovery_deadline(account.access_token_expires_at())
-                            .map(chrono::DateTime::<chrono::Utc>::from),
-                        "OpenAI access token expired; retaining account for bounded OAuth refresh recovery"
-                    );
-                    return self
-                        .apply_credential_state(
-                            account,
-                            CredentialState::Ready,
-                            AccountErrorReason::AccessTokenExpired,
-                            now,
-                            message,
+                    let already_recovering = account.credential_state() == CredentialState::Ready
+                        && account.last_error_reason()
+                            == Some(AccountErrorReason::AccessTokenExpired);
+                    let observed_at = if already_recovering {
+                        account.credential_observed_at().unwrap_or(now)
+                    } else {
+                        now
+                    };
+                    let recovery_deadline = if already_recovering {
+                        account_refresh_recovery_deadline(account)
+                    } else {
+                        early_or_expired_recovery_deadline(
+                            account.access_token_expires_at(),
+                            observed_at,
                         )
-                        .await;
+                    };
+                    if recovery_deadline.is_some_and(|deadline| deadline > now) {
+                        tracing::info!(
+                            account_id = %account.id(),
+                            access_token_expires_at = ?account.access_token_expires_at()
+                                .map(chrono::DateTime::<chrono::Utc>::from),
+                            recovery_deadline = ?recovery_deadline
+                                .map(chrono::DateTime::<chrono::Utc>::from),
+                            "OpenAI access token rejected; retaining account for bounded OAuth refresh recovery"
+                        );
+                        return self
+                            .apply_credential_state(
+                                account,
+                                CredentialState::Ready,
+                                AccountErrorReason::AccessTokenExpired,
+                                observed_at,
+                                message,
+                            )
+                            .await;
+                    }
                 }
                 self.apply_credential_state(
                     account,

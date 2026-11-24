@@ -266,7 +266,15 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                      else credential_state
                  end,
                  credential_observed_at = case
-                     when enabled and upstream_user_id is not null then $4
+                     when enabled
+                          and upstream_user_id is not null
+                          and (
+                              $3 is distinct from 'ready'
+                              or $5 is distinct from 'access_token_expired'
+                              or credential_state is distinct from 'ready'
+                              or last_error_reason is distinct from 'access_token_expired'
+                          )
+                     then $4
                      else credential_observed_at
                  end,
                  last_error_reason = case
@@ -277,9 +285,26 @@ impl ProviderAccountRepository for PgProviderAccountRepository {
                      when enabled and upstream_user_id is not null then $6
                      else last_error_message
                  end,
+                 next_refresh_at = case
+                     when enabled
+                          and upstream_user_id is not null
+                          and $3 = 'ready'
+                          and $5 = 'access_token_expired'
+                          and (
+                              credential_state is distinct from 'ready'
+                              or last_error_reason is distinct from 'access_token_expired'
+                          )
+                     then null
+                     else next_refresh_at
+                 end,
                  updated_at = case when enabled then greatest(now(), $4) else updated_at end
              where id = $1 and credential_revision = $2
-               and (credential_observed_at is null or credential_observed_at <= $4)",
+               and (credential_observed_at is null or credential_observed_at <= $4)
+               and not (
+                   $3 = 'ready'
+                   and $5 is not distinct from 'access_token_expired'
+                   and credential_state in ('expired', 'banned', 'invalid')
+               )",
         )
         .bind(update.account_id)
         .bind(to_i64(update.expected_revision.get())?)

@@ -11,12 +11,12 @@ use serde_json::{Map, Value};
 
 use gateway_core::account::{
     AccountAttemptFeedback, AccountCandidate, AccountConcurrencyLimit, AccountEligibilityPolicy,
-    AccountFeedbackStats, AccountOverloadCooldownOverride, AccountQuotaSignals,
+    AccountErrorReason, AccountFeedbackStats, AccountOverloadCooldownOverride, AccountQuotaSignals,
     AccountRuntimeSignals, AccountSchedulingBlocker, AccountSelectionContext,
     AccountSelectionPolicy, AccountSelector, AccountStatus, AccountWeight, CredentialCasUpdate,
     CredentialRevision, CredentialState, OpaqueProviderData, PlaintextCredential,
     PreferredAccountSelection, ProviderAccount, ProviderAccountId, ProviderAccountIdentity,
-    ProviderAccountUpdate, QuotaEvidence, QuotaState, RotationStrategy,
+    ProviderAccountUpdate, ProviderRefreshQuery, QuotaEvidence, QuotaState, RotationStrategy,
 };
 use gateway_core::routing::{
     ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
@@ -1091,4 +1091,130 @@ fn elapsed_quota_reset_does_not_fabricate_recovery() {
         .select(&candidates, &context(RotationStrategy::Smart))
         .expect("healthy candidate available");
     assert_eq!(selected.candidate().account.id().as_str(), "acct_healthy");
+}
+
+#[test]
+fn ready_account_with_access_token_expired_reason_is_unschedulable_before_local_expiry() {
+    let now = SystemTime::now();
+    let mut revoked = candidate("acct_early_revoked", 0, Some(100));
+    revoked.account = revoked
+        .account
+        .with_account_facts(
+            true,
+            CredentialState::Ready,
+            QuotaState::unknown(),
+            Some(AccountErrorReason::AccessTokenExpired),
+            Some("Encountered invalidated oauth token for user, failing request".to_owned()),
+        )
+        .with_credential_observed_at(Some(now));
+    let healthy = candidate("acct_healthy", 0, Some(100));
+
+    let projection = revoked.account.status_projection(now, None);
+    assert_eq!(projection.status, AccountStatus::Error);
+    assert_eq!(
+        projection.error_reason,
+        Some(AccountErrorReason::AccessTokenExpired)
+    );
+
+    // 仅剩提前吊销账号时不得路由真实请求。
+    assert!(
+        AccountSelector
+            .select(
+                std::slice::from_ref(&revoked),
+                &context(RotationStrategy::Smart)
+            )
+            .is_none()
+    );
+    let mut preferred_ctx = context(RotationStrategy::Smart);
+    preferred_ctx.preferred_account = Some(revoked.account.id().clone());
+    let candidates = [revoked, healthy];
+    let selection = AccountSelector
+        .select(&candidates, &preferred_ctx)
+        .expect("healthy fallback available");
+    assert_eq!(selection.candidate().account.id().as_str(), "acct_healthy");
+    assert_eq!(
+        selection.preferred(),
+        PreferredAccountSelection::Blocked(AccountSchedulingBlocker::LocalAvailability)
+    );
+}
+
+#[test]
+fn refresh_query_includes_early_invalidated_ready_accounts_and_respects_backoff_and_force_window() {
+    let now = SystemTime::now();
+    let provider = ProviderKind::new("openai").expect("valid provider");
+    let query = ProviderRefreshQuery::new(
+        provider.clone(),
+        now + Duration::from_secs(5 * 60),
+        now - Duration::from_secs(2 * 60 * 60),
+        now,
+        Vec::new(),
+        NonZeroU32::new(10).expect("positive limit"),
+    );
+
+    // 本地过期时间在三天后，但已记录提前吊销且无退避，必须立即进入刷新候选。
+    let early_future_expiry = ProviderAccount::new(
+        ProviderAccountId::new("acct_early_future").expect("id"),
+        provider.clone(),
+        "early-future".to_owned(),
+        Some("user-1".to_owned()),
+        "oauth".to_owned(),
+        CredentialRevision::new(1).expect("rev"),
+        Some(now + Duration::from_secs(3 * 24 * 60 * 60)),
+    )
+    .with_account_facts(
+        true,
+        CredentialState::Ready,
+        QuotaState::unknown(),
+        Some(AccountErrorReason::AccessTokenExpired),
+        None,
+    )
+    .with_credential_observed_at(Some(now))
+    .with_refresh_schedule(true, None);
+    assert!(query.contains(&early_future_expiry));
+
+    // 无本地过期时间的提前吊销账号同样进入刷新候选。
+    let early_no_expiry = ProviderAccount::new(
+        ProviderAccountId::new("acct_early_no_exp").expect("id"),
+        provider,
+        "early-no-exp".to_owned(),
+        Some("user-2".to_owned()),
+        "oauth".to_owned(),
+        CredentialRevision::new(1).expect("rev"),
+        None,
+    )
+    .with_account_facts(
+        true,
+        CredentialState::Ready,
+        QuotaState::unknown(),
+        Some(AccountErrorReason::AccessTokenExpired),
+        None,
+    )
+    .with_credential_observed_at(Some(now))
+    .with_refresh_schedule(true, None);
+    assert!(query.contains(&early_no_expiry));
+
+    // 仍在退避期内且未满两小时恢复窗时，暂不选中。
+    let backing_off = early_future_expiry
+        .clone()
+        .with_refresh_schedule(true, Some(now + Duration::from_secs(60)));
+    assert!(!query.contains(&backing_off));
+
+    // 超过两小时恢复窗后，即使退避时间仍在未来也必须强制选中以完成终态收敛。
+    let window_exhausted =
+        backing_off.with_credential_observed_at(Some(now - Duration::from_secs(2 * 60 * 60 + 1)));
+    assert!(query.contains(&window_exhausted));
+
+    // 无 RT 或已终态账号绝不选中。
+    let without_rt = early_future_expiry
+        .clone()
+        .with_refresh_schedule(false, None);
+    assert!(!query.contains(&without_rt));
+    let expired_terminal = early_future_expiry.with_account_facts(
+        true,
+        CredentialState::Expired,
+        QuotaState::unknown(),
+        Some(AccountErrorReason::CredentialExpired),
+        None,
+    );
+    assert!(!query.contains(&expired_terminal));
 }
